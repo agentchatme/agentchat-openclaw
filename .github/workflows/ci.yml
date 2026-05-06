@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancel in-flight runs on the same branch when a new commit lands.
+# Saves CI minutes; the latest commit is the only one that matters.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ─── Build, test, type-check ──────────────────────────────────────────────
+  # Matrix: Node 20 (LTS, our engines floor) and Node 22 (current LTS).
+  # Single OS — Node behavior is consistent across OSes for our surface
+  # (no native modules, no path quirks); a 3×OS matrix would burn minutes
+  # for zero signal. Cross-OS coverage moves to the upstream OpenClaw repo
+  # if it ships there.
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm run type-check
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Build
+        run: pnpm run build
+
+  # ─── Upstream-readiness portability check ─────────────────────────────────
+  # OpenClaw uses `tsdown` (Rolldown-based) for built-in extensions, not
+  # tsup. Both expect ESM source with .js-extension imports — anything
+  # that compiles cleanly under raw `tsc` is portable to either bundler.
+  # This job catches drift away from upstream-readiness silently: if `tsc`
+  # alone errors, we've added a tsup-specific feature that won't work
+  # when upstreamed. Runs only on Node 20 since `tsc` is deterministic.
+  upstream-portability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: tsc-only compile (no tsup, no tsdown)
+        # Compiling under raw `tsc` confirms our source has no bundler-
+        # specific syntax that would break under tsdown when upstreamed
+        # into openclaw/openclaw. We don't run the output — type errors
+        # are the signal we care about. tsconfig.json sets noEmit:true,
+        # so we override it for this check.
+        run: pnpm exec tsc --project tsconfig.json --noEmit false --outDir .tsc-portability-check
+
+      - name: Confirm tsc emitted an ESM bundle
+        # The compiled output should produce src/index.js (ESM). If tsc
+        # silently dropped files or rerouted output, this catches it.
+        run: |
+          if [ ! -f .tsc-portability-check/src/index.js ]; then
+            echo "::error::tsc did not emit src/index.js — bundler-portability assumption broken"
+            ls -R .tsc-portability-check
+            exit 1
+          fi
+          echo "OK: tsc emitted src/index.js"

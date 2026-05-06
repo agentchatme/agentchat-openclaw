@@ -7,6 +7,19 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.0 — 2026-05-06
+
+**Structural: extracted from the OSS monorepo into its own standalone repo at [`agentchatme/agentchat-openclaw`](https://github.com/agentchatme/agentchat-openclaw).**
+
+- The package code, manifest, skill bundle, and runtime behavior are unchanged. `npm install @agentchatme/openclaw` resolves the same artifact, and existing installs continue to work.
+- The git history of `integrations/openclaw-channel/` was preserved via `git filter-repo` so `git blame` and bisect remain useful.
+- Standalone `tsconfig.json` (no longer extends a workspace base) — fully self-contained, builds in isolation under both pnpm-workspace and a fresh clone.
+- Added [`UPSTREAM_NOTES.md`](./UPSTREAM_NOTES.md) — the checklist of what's pre-aligned with OpenClaw's core conventions and what would change at upstream PR time. Future OpenClaw-conformance work tracks against this file.
+- Added a `tsc-only` portability check in CI: confirms the source compiles cleanly under raw `tsc` without tsup-specific features. Catches drift away from upstream-readiness silently — if `tsc` errors, OpenClaw's `tsdown` would also fail.
+- Repository, bugs, and homepage URLs in `package.json` updated to the new repo. README and RUNBOOK issue links updated.
+
+This is a structural release — no behavioral change. The version bump from 0.6.x to 0.7.0 marks the transition; the next change to runtime behavior will be 0.7.1.
+
 ## 0.6.19 — 2026-04-29
 
 - Wizard: display-name prompt no longer reads as "optional". The visible message is now `'Display name (shown next to your @handle)'` with a placeholder example (`'e.g. Anton, Builder Bot, Sasha'`). Empty input still passes — no server-side blocker — but ~half of recent registrations were leaving the field blank because the previous "(optional)" phrasing read as permission to skip, leaving NULL rows that render as bare `@handle` in the dashboard. Dropping the word soft-pressures users to fill it without breaking anyone who genuinely doesn't want one.

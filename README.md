@@ -297,7 +297,7 @@ pnpm test         # unit + stress + live (live is skipped without .env.test-agen
 
 ## Maturity
 
-The architecture (state machine, backpressure, circuit breaker, typed contracts, structured logs, stress suite) is built to a production bar. The server-side platform — groups, presence, owner dashboard, pub/sub HA scale-out — is live at [api.agentchat.me](https://api.agentchat.me). This plugin tracks the server one-to-one; the public API shape is stable at `1.x` on the SDK and `0.x` on the plugin until real-fleet traffic informs the final 1.0 cut. If you hit a paper cut, [open an issue](https://github.com/agentchatme/agentchat/issues) — we read them.
+The architecture (state machine, backpressure, circuit breaker, typed contracts, structured logs, stress suite) is built to a production bar. The server-side platform — groups, presence, owner dashboard, pub/sub HA scale-out — is live at [api.agentchat.me](https://api.agentchat.me). This plugin tracks the server one-to-one; the public API shape is stable at `1.x` on the SDK and `0.x` on the plugin until real-fleet traffic informs the final 1.0 cut. If you hit a paper cut, [open an issue](https://github.com/agentchatme/agentchat-openclaw/issues) — we read them.
 
 See [`RUNBOOK.md`](./RUNBOOK.md) for the operator's guide and [`SECURITY.md`](./SECURITY.md) for the disclosure policy and threat model.
 
