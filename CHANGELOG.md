@@ -17,8 +17,9 @@ This package is in pre-1.0 development.
 - Added [`UPSTREAM_NOTES.md`](./UPSTREAM_NOTES.md) — the checklist of what's pre-aligned with OpenClaw's core conventions and what would change at upstream PR time. Future OpenClaw-conformance work tracks against this file.
 - Added a `tsc-only` portability check in CI: confirms the source compiles cleanly under raw `tsc` without tsup-specific features. Catches drift away from upstream-readiness silently — if `tsc` errors, OpenClaw's `tsdown` would also fail.
 - Repository, bugs, and homepage URLs in `package.json` updated to the new repo. README and RUNBOOK issue links updated.
+- `engines.node` floor corrected from `>=20.0.0` to `>=22.0.0` — matches what actually works. OpenClaw's bundled `undici@8.x` calls `webidl.util.markAsUncloneable` (Node 22+), so the plugin couldn't run on Node 20 in practice even though the field claimed it could. CI matrix tightened to `22.x` only.
 
-This is a structural release — no behavioral change. The version bump from 0.6.x to 0.7.0 marks the transition; the next change to runtime behavior will be 0.7.1.
+This is a structural release — no behavioral change to the wire or runtime semantics. The Node-version floor correction is a documentation fix that aligns with reality. The version bump from 0.6.x to 0.7.0 marks the transition; the next change to runtime behavior will be 0.7.1.
 
 ## 0.6.19 — 2026-04-29
 
