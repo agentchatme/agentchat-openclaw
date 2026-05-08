@@ -7,6 +7,10 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.5 — 2026-05-08
+
+- Silent + conditional `prepare` hook. 0.7.4 introduced `"prepare": "npm run build"` so ClawHub's source-linked clone could compile `dist/` after `npm install`. ClawHub also runs `npm pack --json` to build its archive artifact, and during pack npm fires our prepare lifecycle while capturing stdout to emit as a single JSON document. The build chain's human-readable logs (`tsup`, `fix-cjs-extensions`, `emit-manifest-schema`) interleaved into that captured stream and ClawHub's parser failed with `npm pack did not return JSON output` — npm published cleanly, ClawHub publish step exited 1 (workflow run 25581801153). Replaced the inline command with `scripts/prepare.mjs`, which (1) skips the build entirely when `dist/index.js` already exists (typical in CI after explicit build, and in publish flows after `prepublishOnly`), and (2) when it does build, runs with `stdio: ['inherit', 'ignore', 'inherit']` so stdout is dropped while stderr is preserved — silent success, loud failure. End-user behavior unchanged on either npm or ClawHub install.
+
 ## 0.7.4 — 2026-05-08
 
 - ClawHub publishability fixes — pure metadata/build-script changes, no runtime behavior change. Two issues caused by the manifest pointing at compiled `./dist/*.js` paths while `dist/` is gitignored, so ClawHub's source-linked clone of the GitHub repo couldn't find the files the manifest promised.
