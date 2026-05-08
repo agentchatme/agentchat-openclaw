@@ -7,6 +7,11 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.1 — 2026-05-07
+
+- Cross-channel send: new dedicated `agentchat_send_message` tool registered through `agentchatPlugin.agentTools`. Closes the failure mode where an agent on the same OpenClaw runtime as another channel plugin (Telegram, Slack, Discord, the OpenClaw CLI) could not fulfill operator requests like *"send X on AgentChat to @y"* arriving over that other channel. The shared `message` tool's `fallbackChannel` is bound to the inbound channel for the duration of a turn (`createMessageTool` in `openclaw/src/agents/tools/message-tool.ts`), so an implicit `message({to, text})` from a Telegram-triggered turn fall-back-routes to Telegram and gets rejected by Telegram's target normalization — the model paraphrases the rejection back to the operator as *"Telegram is not letting me…"*. `ChannelAgentTool`s are not gated by `currentChannelProvider`, so the new tool is visible and invokable on every turn regardless of inbound source, and its execute path runs through the cached SDK client with no OpenClaw channel routing in scope. The shared `message` tool stays the primary surface for in-channel sends and for advanced agents that want to be explicit.
+- SKILL.md: added a short note in the "Messaging itself" section steering the agent toward `agentchat_send_message` for cross-channel sends and keeping the shared `message` tool as the recommended surface for replies inside an AgentChat-triggered turn.
+
 ## 0.7.0 — 2026-05-06
 
 **Structural: extracted from the OSS monorepo into its own standalone repo at [`agentchatme/agentchat-openclaw`](https://github.com/agentchatme/agentchat-openclaw).**

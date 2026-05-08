@@ -82,6 +82,77 @@ const ACCOUNT_PARAM = Type.Optional(
  */
 export const agentchatAgentToolsFactory: ChannelAgentToolFactoryFn = ({ cfg }) => {
   const tools: ChannelAgentTool[] = [
+    // ─── Cross-channel send ──────────────────────────────────────────────
+    //
+    // OpenClaw's core `message` tool is the conventional sender — and is
+    // the right pick when the current turn was triggered by an AgentChat
+    // inbound. But when the inbound arrived on a different channel
+    // (Telegram, Slack, Discord, the OpenClaw CLI), the per-turn `message`
+    // tool's `fallbackChannel` is bound to that channel, so an implicit
+    // `message({to, text})` call from the model fall-back-routes to the
+    // wrong outbound and gets rejected by that channel's target
+    // normalization. The model paraphrases the rejection back to the
+    // operator as "Telegram is not letting me…".
+    //
+    // This tool sidesteps the binding entirely. ChannelAgentTools are not
+    // gated by `currentChannelProvider`, so this is visible and invokable
+    // on every turn regardless of inbound source. The execute path runs
+    // through our cached SDK client against the AgentChat REST API — no
+    // OpenClaw channel routing in scope, no implicit fallback, no
+    // requireExplicitMessageTarget gate. Reach for this whenever the
+    // operator says "message X on AgentChat" or the model otherwise needs
+    // a deterministic, channel-agnostic AgentChat send.
+    tool({
+      name: 'agentchat_send_message',
+      description:
+        "Send a peer-to-peer message on AgentChat to another agent by handle. " +
+        "Use this whenever the operator asks you to message someone on AgentChat, " +
+        "regardless of which channel the request arrived on (Telegram, Slack, the " +
+        "OpenClaw CLI, AgentChat itself — anywhere). This is the right tool for " +
+        "cross-channel sends because it is not bound to the inbound channel; the " +
+        "shared `message` tool defaults its destination to the inbound channel and " +
+        "will route incorrectly when the operator asks you to send on AgentChat " +
+        "from a different channel's turn. Returns the new message id once delivered.",
+      parameters: Type.Object({
+        handle: Type.String({
+          minLength: 3,
+          maxLength: 31,
+          description:
+            "The recipient agent's handle, with or without the leading @. Lowercase letters, digits, and hyphens; must start with a letter; 3-30 chars after stripping the @.",
+        }),
+        message: Type.String({
+          minLength: 1,
+          maxLength: 8000,
+          description:
+            "The message text to send. Plain text — the platform is a transport, not a renderer.",
+        }),
+        replyToMessageId: Type.Optional(
+          Type.String({
+            description:
+              "Optional id of an existing message you are replying to. Threads the response so the recipient's client can render it as a reply.",
+          }),
+        ),
+        account: ACCOUNT_PARAM,
+      }),
+      execute: async (_id, p) => {
+        const r = clientFor(cfg, p.account)
+        if ('error' in r) return err(r.error)
+        const handle = stripAt(p.handle)
+        try {
+          const result = await r.client.sendMessage({
+            to: handle,
+            content: { text: p.message },
+            ...(p.replyToMessageId
+              ? { metadata: { reply_to: p.replyToMessageId } }
+              : {}),
+          })
+          return ok(`sent to @${handle} — message ${result.message.id}`)
+        } catch (e) {
+          return err(toMsg(e))
+        }
+      },
+    }),
+
     // ─── Contacts ─────────────────────────────────────────────────────────
     tool({
       name: 'agentchat_add_contact',

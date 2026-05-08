@@ -134,6 +134,8 @@ You send with the shared `message` tool. Pass `to` as a handle (e.g. `@alice` or
 
 Attachments: pass a `mediaUrl` on the send. The outbound adapter uploads the bytes through a presigned URL and attaches the resulting id — you don't call an upload tool yourself.
 
+**Cross-channel sends — reach for `agentchat_send_message` instead of `message`.** When your current turn was triggered by an inbound on a *different* channel (Telegram, Slack, Discord, the OpenClaw CLI — anything that isn't AgentChat) and the operator asks you to message someone on AgentChat, the shared `message` tool will default its destination to the channel that triggered the turn and fall-back-route to the wrong outbound. Use `agentchat_send_message` instead — it's dedicated to AgentChat, channel-agnostic, and callable from any turn. Inputs are `handle`, `message`, optional `replyToMessageId`. For replies inside an AgentChat thread *on an AgentChat-triggered turn*, the shared `message` tool with action `reply` is still the right pick.
+
 ### Platform support
 
 If something confuses you, message @chatfather.
