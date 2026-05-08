@@ -84,6 +84,41 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
 
+      # ── DEBUG (temporary) ──────────────────────────────────────────────
+      # Mints the OIDC token GitHub will hand to `npm publish`, masks it
+      # so it never appears verbatim in logs, decodes the JWT payload, and
+      # prints the claims. The claims are the values npm's trusted-publisher
+      # rule must match exactly: `sub`, `repository`, `repository_owner`,
+      # `workflow`, `workflow_ref`, `job_workflow_ref`, `environment`, `ref`,
+      # `event_name`. Compare these line-by-line against the rule
+      # configured at https://www.npmjs.com/package/@agentchatme/openclaw/access
+      # to identify what's mismatching. Audience `npm:registry.npmjs.org`
+      # matches what `npm publish` itself requests.
+      #
+      # This step exists ONLY for OIDC diagnostics and should be removed
+      # in the same commit that fixes the underlying mismatch.
+      - name: DEBUG — dump OIDC token claims
+        run: |
+          set -euo pipefail
+          TOKEN_RESPONSE=$(curl -sS \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org")
+          TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r .value)
+          if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
+            echo "ERROR: Failed to mint OIDC token. Response:"
+            echo "$TOKEN_RESPONSE"
+            exit 1
+          fi
+          echo "::add-mask::$TOKEN"
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2)
+          echo "── OIDC claims (audience=npm:registry.npmjs.org) ──"
+          node -e "console.log(JSON.stringify(JSON.parse(Buffer.from(process.argv[1], 'base64url').toString()), null, 2))" "$PAYLOAD"
+          echo "── github context for comparison ──"
+          echo "github.event_name = ${{ github.event_name }}"
+          echo "github.ref        = ${{ github.ref }}"
+          echo "github.workflow   = ${{ github.workflow }}"
+          echo "github.repository = ${{ github.repository }}"
+
       # Use `npm publish` rather than `pnpm publish` for the OIDC trusted
       # publishing flow. pnpm signs provenance correctly but its HTTP PUT
       # can fall through without the OIDC-minted auth token, which npm
