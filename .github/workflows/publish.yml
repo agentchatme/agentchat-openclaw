@@ -1,20 +1,28 @@
-name: Publish to npm
+name: Publish
 
-# Two ways to publish:
+# Two registries, one trigger. Tag push (`v*`) publishes to BOTH npm and
+# ClawHub in sequence — npm first, then ClawHub. Manual `workflow_dispatch`
+# is for dry-runs and recovery:
 #
-#   1. Push a tag matching `v*` (e.g. `v0.7.1`) → publishes to npm.
-#      The version in `package.json` is the source of truth; the workflow
-#      does not parse the tag.
+#   target=test         npm `next` dist-tag only (existing dry-run behavior)
+#   target=prod         npm + ClawHub (same as tag push)
+#   target=clawhub-only ClawHub only — used when npm is already current and
+#                       a previous ClawHub publish was held by a security
+#                       scan, the issue is fixed, and we want to retry without
+#                       a fake npm bump.
 #
-#   2. Manual `workflow_dispatch` with `target=test` → publishes a `next`
-#      dist-tag for dry-run install verification. Use this before the first
-#      real release after a structural change.
+# Auth:
+#   - npm: `NPM_TOKEN` repo secret. Generate at
+#     https://www.npmjs.com/settings/agentchatme/tokens
+#   - ClawHub: `CLAWHUB_TOKEN` repo secret. Mint via `clawhub login` on a
+#     trusted machine, then copy the `token` field from
+#     %APPDATA%\clawhub\config.json (Windows) or ~/.config/clawhub/config.json.
 #
-# Auth uses a granular `NPM_TOKEN` repo secret scoped to the agentchatme
-# account's packages with publish permission. Generate at
-# https://www.npmjs.com/settings/agentchatme/tokens. Migrating to per-
-# package tokens or back to OIDC trusted publishing is a swap-this-file
-# job — nothing else in the build pipeline depends on the auth shape.
+# Why npm first, ClawHub second: ClawHub source-links the GitHub repo at
+# the published commit, so npm being current is irrelevant to ClawHub's
+# build — but if ClawHub's scanner blocks, we want npm to have the version
+# already so users on `npm install` are unaffected. The recovery path
+# (`clawhub-only`) lets us retry ClawHub without re-tagging.
 
 on:
   push:
@@ -26,8 +34,8 @@ on:
         description: "Where to publish"
         type: choice
         required: true
-        default: test
-        options: [test, prod]
+        default: prod
+        options: [test, prod, clawhub-only]
 
 concurrency:
   group: publish-${{ github.ref }}
@@ -60,9 +68,11 @@ jobs:
       - run: pnpm run test
       - run: pnpm run build
 
-  publish:
+  publish-npm:
     runs-on: ubuntu-latest
     needs: test
+    # Skip on `clawhub-only` recovery runs — npm is already current there.
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'clawhub-only') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -94,3 +104,77 @@ jobs:
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  publish-clawhub:
+    runs-on: ubuntu-latest
+    needs:
+      - test
+      - publish-npm
+    # Run on tag push, on `prod` dispatch, and on `clawhub-only` dispatch.
+    # `always()` is needed because publish-npm is SKIPPED (not failed) on
+    # clawhub-only — without `always()` GitHub won't start this job. The
+    # explicit `result` checks guard against actual failures.
+    if: |
+      always()
+      && needs.test.result == 'success'
+      && (needs.publish-npm.result == 'success' || needs.publish-npm.result == 'skipped')
+      && (
+        github.event_name == 'push'
+        || (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'prod' || github.event.inputs.target == 'clawhub-only'))
+      )
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      # ClawHub source-links the repo and runs `npm install` on the raw
+      # source — it does NOT consume the npm tarball. That means
+      # `prepublishOnly` (which runs `verify-source-installs.mjs`) doesn't
+      # gate it. Run the same verification explicitly here so a
+      # `workspace:`/`file:`/`link:`/`catalog:` spec slipping into a
+      # runtime dep section can't reach ClawHub end-users either. Same
+      # check, different trigger.
+      - name: Verify source-install cleanliness
+        run: pnpm run test:install-source
+
+      - name: Install ClawHub CLI
+        run: npm install -g clawhub@latest
+
+      - name: Authenticate to ClawHub
+        env:
+          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
+        run: clawhub login --token "$CLAWHUB_TOKEN" --no-browser
+
+      # Publish flags pinned explicitly rather than letting clawhub
+      # auto-detect from package.json + git, because the CLI accepts every
+      # field as a flag and we want the audit trail of what we declared at
+      # publish time. Source-repo + source-commit + source-ref together
+      # form the immutable pointer ClawHub stores so a user can later
+      # `clawhub package inspect @agentchatme/openclaw` and see exactly
+      # which commit produced the listed version.
+      #
+      # We do NOT pass --changelog. The CHANGELOG.md is large and the CLI
+      # accepts a single string; pulling the right slice in YAML is brittle.
+      # ClawHub renders a "see CHANGELOG" link to the source-repo at
+      # source-commit, which is the canonical view anyway.
+      - name: Publish to ClawHub
+        run: |
+          set -euo pipefail
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          echo "Publishing @agentchatme/openclaw@${PKG_VERSION} to ClawHub"
+          clawhub package publish . \
+            --family code-plugin \
+            --name "@agentchatme/openclaw" \
+            --version "${PKG_VERSION}" \
+            --source-repo "agentchatme/agentchat-openclaw" \
+            --source-commit "${GITHUB_SHA}" \
+            --source-ref "${GITHUB_REF_NAME}"
