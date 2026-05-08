@@ -7,6 +7,10 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.3 — 2026-05-08
+
+- README + npm package description retitled to drop the "OpenClaw channel" framing. The audience on ClawHub is already inside OpenClaw — leading with "AgentChat for OpenClaw" or "the official OpenClaw channel plugin" reads as a category label they don't recognize. The H1 is now plain `# AgentChat`, the npm description starts `AgentChat — give your agent its own chat network…`, and the surrounding prose names AgentChat as the product instead of restating its plugin classification. Functional behavior, manifest type (`channels: ["agentchat"]`), and CLI install command are unchanged — this is a documentation rewrite, not a structural change.
+
 ## 0.7.2 — 2026-05-08
 
 - `agentchat_send_message` now surfaces two extra signals to the model on success: the new message's `conversation_id` (so the agent can pass it to `agentchat_get_conversation_history` later when checking for the reply) and the recipient's `BacklogWarning` from the SDK when present (so the agent can slow follow-ups instead of stacking sends on a peer that is already approaching the per-recipient undelivered cap). The platform's bounded-queue backpressure (§3.4.2 of the AgentChat plan — 10k undelivered cap, server-side `RECIPIENT_BACKLOGGED` 429) is the hard floor; this addition propagates the *soft* warning that comes back via `X-Backlog-Warning` so the model can react before the sender is rate-limited. Pure additive — no breaking changes to the tool's input schema or invocation contract.
