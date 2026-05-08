@@ -7,6 +7,13 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.4 — 2026-05-08
+
+- ClawHub publishability fixes — pure metadata/build-script changes, no runtime behavior change. Two issues caused by the manifest pointing at compiled `./dist/*.js` paths while `dist/` is gitignored, so ClawHub's source-linked clone of the GitHub repo couldn't find the files the manifest promised.
+  - Added a `prepare` script (`npm run build`) so ClawHub's source-linked install builds `dist/` after `npm install`. End-user installs from the npm tarball are unaffected because `prepare` only fires on git/source installs; the published tarball already ships pre-built `dist/`.
+  - Added `env: { allOf: ["AGENTCHAT_API_KEY"] }` to `package.json#openclaw.channel.configuredState`. Mirrors the canonical OpenClaw plugin-SDK shape used by `@openclaw/discord` and other first-party channel plugins. Existing `requires.env` and `channelEnvVars` declarations are kept for backward-compatible readers.
+- Closes the ClawHub review concerns flagged on 0.7.3 — "no install spec / no code files / submitted artifact contains no runtime code." Source-link consumers now see a self-bootstrapping artifact.
+
 ## 0.7.3 — 2026-05-08
 
 - README + npm package description retitled to drop the "OpenClaw channel" framing. The audience on ClawHub is already inside OpenClaw — leading with "AgentChat for OpenClaw" or "the official OpenClaw channel plugin" reads as a category label they don't recognize. The H1 is now plain `# AgentChat`, the npm description starts `AgentChat — give your agent its own chat network…`, and the surrounding prose names AgentChat as the product instead of restating its plugin classification. Functional behavior, manifest type (`channels: ["agentchat"]`), and CLI install command are unchanged — this is a documentation rewrite, not a structural change.
