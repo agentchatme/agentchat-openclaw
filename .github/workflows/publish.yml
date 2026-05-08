@@ -2,18 +2,19 @@ name: Publish to npm
 
 # Two ways to publish:
 #
-#   1. Push a tag matching `v*` (e.g. `v0.7.0`) → publishes to npm with
-#      provenance. The version in `package.json` is the source of truth;
-#      the workflow does not parse the tag.
+#   1. Push a tag matching `v*` (e.g. `v0.7.1`) → publishes to npm.
+#      The version in `package.json` is the source of truth; the workflow
+#      does not parse the tag.
 #
 #   2. Manual `workflow_dispatch` with `target=test` → publishes a `next`
-#      tag for dry-run install verification. Use this before the first
+#      dist-tag for dry-run install verification. Use this before the first
 #      real release after a structural change.
 #
-# Auth uses npm Trusted Publishing (OIDC) — there is NO long-lived
-# `NPM_TOKEN` in repo secrets. Configure the trusted publisher at
-# https://www.npmjs.com/settings/agentchatme/packages → @agentchatme/openclaw
-# bound to this repo + workflow filename + the `npm` GitHub environment.
+# Auth uses a granular `NPM_TOKEN` repo secret scoped to the agentchatme
+# account's packages with publish permission. Generate at
+# https://www.npmjs.com/settings/agentchatme/tokens. Migrating to per-
+# package tokens or back to OIDC trusted publishing is a swap-this-file
+# job — nothing else in the build pipeline depends on the auth shape.
 
 on:
   push:
@@ -62,12 +63,6 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     needs: test
-    environment:
-      name: npm
-      url: https://www.npmjs.com/package/@agentchatme/openclaw
-    permissions:
-      id-token: write  # OIDC for npm trusted publishing
-      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -84,60 +79,18 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
 
-      # DEBUG — pin to latest npm CLI; older bundled versions have known
-      # trusted-publishing bugs around audience handling.
-      - name: DEBUG — upgrade npm + dump versions
-        run: |
-          set -e
-          echo "Bundled npm: $(npm --version)"
-          npm install -g npm@latest
-          echo "Latest  npm: $(npm --version)"
-          echo "node:        $(node --version)"
-
-      # ── DEBUG (temporary) ──────────────────────────────────────────────
-      # Mints the OIDC token GitHub will hand to `npm publish`, masks it
-      # so it never appears verbatim in logs, decodes the JWT payload, and
-      # prints the claims. The claims are the values npm's trusted-publisher
-      # rule must match exactly: `sub`, `repository`, `repository_owner`,
-      # `workflow`, `workflow_ref`, `job_workflow_ref`, `environment`, `ref`,
-      # `event_name`. Compare these line-by-line against the rule
-      # configured at https://www.npmjs.com/package/@agentchatme/openclaw/access
-      # to identify what's mismatching. Audience `npm:registry.npmjs.org`
-      # matches what `npm publish` itself requests.
-      #
-      # This step exists ONLY for OIDC diagnostics and should be removed
-      # in the same commit that fixes the underlying mismatch.
-      - name: DEBUG — dump OIDC token claims
-        run: |
-          set -euo pipefail
-          TOKEN_RESPONSE=$(curl -sS \
-            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org")
-          TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r .value)
-          if [ "$TOKEN" = "null" ] || [ -z "$TOKEN" ]; then
-            echo "ERROR: Failed to mint OIDC token. Response:"
-            echo "$TOKEN_RESPONSE"
-            exit 1
-          fi
-          echo "::add-mask::$TOKEN"
-          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2)
-          echo "── OIDC claims (audience=npm:registry.npmjs.org) ──"
-          node -e "console.log(JSON.stringify(JSON.parse(Buffer.from(process.argv[1], 'base64url').toString()), null, 2))" "$PAYLOAD"
-          echo "── github context for comparison ──"
-          echo "github.event_name = ${{ github.event_name }}"
-          echo "github.ref        = ${{ github.ref }}"
-          echo "github.workflow   = ${{ github.workflow }}"
-          echo "github.repository = ${{ github.repository }}"
-
-      # Use `npm publish` rather than `pnpm publish` for the OIDC trusted
-      # publishing flow. pnpm signs provenance correctly but its HTTP PUT
-      # can fall through without the OIDC-minted auth token, which npm
-      # rejects as a misleading 404. See agentchat-mcp commit 640d3cf for
-      # the full diagnosis.
+      # Use `npm publish` rather than `pnpm publish` — pnpm's publish HTTP
+      # PUT has a long-standing tendency to drop auth headers in CI, while
+      # npm publish reliably picks up NODE_AUTH_TOKEN from the .npmrc
+      # that actions/setup-node writes when registry-url is set.
       - name: Publish (next dist-tag for dry-run)
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'test' }}
-        run: npm publish --access public --tag next --provenance --loglevel=verbose
+        run: npm publish --access public --tag next
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish (prod)
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'prod') }}
-        run: npm publish --access public --provenance --loglevel=verbose
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
