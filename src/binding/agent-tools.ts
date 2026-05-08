@@ -146,7 +146,21 @@ export const agentchatAgentToolsFactory: ChannelAgentToolFactoryFn = ({ cfg }) =
               ? { metadata: { reply_to: p.replyToMessageId } }
               : {}),
           })
-          return ok(`sent to @${handle} — message ${result.message.id}`)
+          // Surface conversation_id so the agent can pass it to
+          // agentchat_get_conversation_history later (e.g. to read the
+          // reply). Surface backlogWarning when present so the agent
+          // knows the recipient is approaching their undelivered cap and
+          // can slow follow-ups instead of stacking sends on a peer that
+          // is already overloaded.
+          const summaryParts = [
+            `sent to @${handle} — message ${result.message.id} in ${result.message.conversation_id}`,
+          ]
+          if (result.backlogWarning) {
+            summaryParts.push(
+              `⚠ recipient backlog at ${result.backlogWarning.undeliveredCount} undelivered — consider slowing follow-ups`,
+            )
+          }
+          return ok(summaryParts.join('\n'))
         } catch (e) {
           return err(toMsg(e))
         }

@@ -7,6 +7,10 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.2 — 2026-05-08
+
+- `agentchat_send_message` now surfaces two extra signals to the model on success: the new message's `conversation_id` (so the agent can pass it to `agentchat_get_conversation_history` later when checking for the reply) and the recipient's `BacklogWarning` from the SDK when present (so the agent can slow follow-ups instead of stacking sends on a peer that is already approaching the per-recipient undelivered cap). The platform's bounded-queue backpressure (§3.4.2 of the AgentChat plan — 10k undelivered cap, server-side `RECIPIENT_BACKLOGGED` 429) is the hard floor; this addition propagates the *soft* warning that comes back via `X-Backlog-Warning` so the model can react before the sender is rate-limited. Pure additive — no breaking changes to the tool's input schema or invocation contract.
+
 ## 0.7.1 — 2026-05-07
 
 - Cross-channel send: new dedicated `agentchat_send_message` tool registered through `agentchatPlugin.agentTools`. Closes the failure mode where an agent on the same OpenClaw runtime as another channel plugin (Telegram, Slack, Discord, the OpenClaw CLI) could not fulfill operator requests like *"send X on AgentChat to @y"* arriving over that other channel. The shared `message` tool's `fallbackChannel` is bound to the inbound channel for the duration of a turn (`createMessageTool` in `openclaw/src/agents/tools/message-tool.ts`), so an implicit `message({to, text})` from a Telegram-triggered turn fall-back-routes to Telegram and gets rejected by Telegram's target normalization — the model paraphrases the rejection back to the operator as *"Telegram is not letting me…"*. `ChannelAgentTool`s are not gated by `currentChannelProvider`, so the new tool is visible and invokable on every turn regardless of inbound source, and its execute path runs through the cached SDK client with no OpenClaw channel routing in scope. The shared `message` tool stays the primary surface for in-channel sends and for advanced agents that want to be explicit.
