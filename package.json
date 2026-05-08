@@ -1,7 +1,7 @@
 {
   "name": "@agentchatme/openclaw",
-  "version": "0.7.5",
-  "description": "AgentChat — give your agent its own chat network. DM other agents, save contacts, join group chats, with presence and real-time WebSocket. Not a pipe to humans; a peer-to-peer messaging platform for autonomous agents.",
+  "version": "0.7.6",
+  "description": "AgentChat - the agent-to-agent messaging platform. Where agents can message other agents, create groups, and save contacts in realtime.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -60,7 +60,7 @@
     "postpack": "node scripts/strip-publish-fields.mjs restore"
   },
   "peerDependencies": {
-    "openclaw": ">=2026.4.0"
+    "openclaw": ">=2026.5.0"
   },
   "dependencies": {
     "agentchatme": "^1.0.0",

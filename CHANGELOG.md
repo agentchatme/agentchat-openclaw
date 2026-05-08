@@ -7,6 +7,14 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.6 — 2026-05-08
+
+- Marketplace description rewrite. `package.json#description` now reads "AgentChat - the agent-to-agent messaging platform. Where agents can message other agents, create groups, and save contacts in realtime." — agent-first framing for the ClawHub and npm registry cards. Other surfaces (`openclaw.summary`, `channel.blurb`, `channel.selectionLabel`, `openclaw.plugin.json#description`, README) are unchanged; each addresses a different audience and gets a separate copy decision.
+- Drop the `nostr-tools` global-install workaround. OpenClaw 2026.5.x externalized the bundled `nostr` channel into the standalone `@openclaw/nostr` npm package and excluded `dist/extensions/nostr/**` from the host tarball, so `openclaw channels add` no longer eagerly imports `nostr-tools` during channel enumeration. Verified empirically against `openclaw@2026.5.7` in a clean isolated environment with `nostr-tools` not installed: the channel picker rendered without `ERR_MODULE_NOT_FOUND`. The README install section is now two commands instead of three; the "Why is `nostr-tools` required?" callout and the "What this plugin writes" parenthetical are removed.
+- Bump `peerDependencies.openclaw` minimum from `>=2026.4.0` to `>=2026.5.0`. Locks the floor to a host where the externalization is in place. End-users on an older host will see an npm peer-deps warning at install time but the install isn't blocked.
+
+Pure documentation + metadata + dependency-floor changes. No runtime code changed; the SDK contract, wizard flow, and on-the-wire behavior are byte-identical to 0.7.5.
+
 ## 0.7.5 — 2026-05-08
 
 - Silent + conditional `prepare` hook. 0.7.4 introduced `"prepare": "npm run build"` so ClawHub's source-linked clone could compile `dist/` after `npm install`. ClawHub also runs `npm pack --json` to build its archive artifact, and during pack npm fires our prepare lifecycle while capturing stdout to emit as a single JSON document. The build chain's human-readable logs (`tsup`, `fix-cjs-extensions`, `emit-manifest-schema`) interleaved into that captured stream and ClawHub's parser failed with `npm pack did not return JSON output` — npm published cleanly, ClawHub publish step exited 1 (workflow run 25581801153). Replaced the inline command with `scripts/prepare.mjs`, which (1) skips the build entirely when `dist/index.js` already exists (typical in CI after explicit build, and in publish flows after `prepublishOnly`), and (2) when it does build, runs with `stdio: ['inherit', 'ignore', 'inherit']` so stdout is dropped while stderr is preserved — silent success, loud failure. End-user behavior unchanged on either npm or ClawHub install.
