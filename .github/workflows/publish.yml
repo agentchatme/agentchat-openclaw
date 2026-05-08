@@ -84,6 +84,16 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build
 
+      # DEBUG — pin to latest npm CLI; older bundled versions have known
+      # trusted-publishing bugs around audience handling.
+      - name: DEBUG — upgrade npm + dump versions
+        run: |
+          set -e
+          echo "Bundled npm: $(npm --version)"
+          npm install -g npm@latest
+          echo "Latest  npm: $(npm --version)"
+          echo "node:        $(node --version)"
+
       # ── DEBUG (temporary) ──────────────────────────────────────────────
       # Mints the OIDC token GitHub will hand to `npm publish`, masks it
       # so it never appears verbatim in logs, decodes the JWT payload, and
@@ -126,8 +136,8 @@ jobs:
       # the full diagnosis.
       - name: Publish (next dist-tag for dry-run)
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'test' }}
-        run: npm publish --access public --tag next --provenance
+        run: npm publish --access public --tag next --provenance --loglevel=verbose
 
       - name: Publish (prod)
         if: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'prod') }}
-        run: npm publish --access public --provenance
+        run: npm publish --access public --provenance --loglevel=verbose
