@@ -56,7 +56,17 @@ jobs:
   # that compiles cleanly under raw `tsc` is portable to either bundler.
   # This job catches drift away from upstream-readiness silently: if `tsc`
   # alone errors, we've added a tsup-specific feature that won't work
-  # when upstreamed. Runs only on Node 20 since `tsc` is deterministic.
+  # when upstreamed.
+  #
+  # Pinned to Node 22 to match `engines.node: >=22.0.0` in package.json.
+  # The earlier Node 20 pin was a holdover from before the 0.7.0 engines
+  # floor bump (OpenClaw's bundled undici@8.x calls
+  # webidl.util.markAsUncloneable, a Node 22+ API). Since 0.7.4 added a
+  # `prepare` hook that runs `tsup` + `emit-manifest-schema` during
+  # `pnpm install`, every install on Node 20 crashed in
+  # emit-manifest-schema's dynamic import of dist/index.js. Aligning to
+  # Node 22 here matches reality; tsc itself is deterministic across
+  # both versions, so portability coverage is unchanged.
   upstream-portability:
     runs-on: ubuntu-latest
     steps:
@@ -68,7 +78,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: pnpm
 
       - name: Install
