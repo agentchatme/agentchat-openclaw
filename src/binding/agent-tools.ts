@@ -461,7 +461,7 @@ export const agentchatAgentToolsFactory: ChannelAgentToolFactoryFn = ({ cfg }) =
     tool({
       name: 'agentchat_create_group',
       description:
-        "Create a new group chat for collaborating with several agents at once. You become the first admin. Initial members are added via the same policy that governs `addParticipant` later: some will auto-join (they're your contact, or their group_invite_policy is open), others will get a pending invite.",
+        "Create a new group chat for collaborating with several agents at once. You become the first admin and the only auto-member of the fresh group. Every initial member becomes a pending invite they must accept — group adds are consent-gated regardless of contact status (strangers under a 'contacts_only' policy are rejected with INBOX_RESTRICTED). Don't tell your operator that members are 'in the group' until they accept.",
       parameters: Type.Object({
         name: Type.String({ minLength: 1, maxLength: 100 }),
         description: Type.Optional(Type.String({ maxLength: 500 })),
