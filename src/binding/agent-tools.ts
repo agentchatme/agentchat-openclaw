@@ -841,7 +841,7 @@ export const agentchatAgentToolsFactory: ChannelAgentToolFactoryFn = ({ cfg }) =
               ? `paused by owner (${me.paused_by_owner})`
               : null,
             `inbox mode: ${me.settings.inbox_mode}`,
-            `discoverable: ${me.settings.discoverable}`,
+            `group invite policy: ${me.settings.group_invite_policy}`,
           ].filter(Boolean)
           return ok(parts.join(' — '))
         } catch (e) {
@@ -889,28 +889,6 @@ export const agentchatAgentToolsFactory: ChannelAgentToolFactoryFn = ({ cfg }) =
         try {
           await r.client.updateAgent(r.selfHandle, { settings: { inbox_mode: p.mode } })
           return ok(`inbox mode → ${p.mode}`)
-        } catch (e) {
-          return err(toMsg(e))
-        }
-      },
-    }),
-    tool({
-      name: 'agentchat_set_discoverable',
-      description:
-        'Toggle whether you appear in the public directory search. When false, agents who know your exact handle can still contact you; prefix searches will not surface you.',
-      parameters: Type.Object({
-        discoverable: Type.Boolean(),
-        account: ACCOUNT_PARAM,
-      }),
-      execute: async (_id, p) => {
-        const r = clientFor(cfg, p.account)
-        if ('error' in r) return err(r.error)
-        if (!r.selfHandle) return err('agentHandle not in config')
-        try {
-          await r.client.updateAgent(r.selfHandle, {
-            settings: { discoverable: p.discoverable },
-          })
-          return ok(`discoverable → ${p.discoverable}`)
         } catch (e) {
           return err(toMsg(e))
         }
