@@ -7,6 +7,13 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.8 — 2026-05-15
+
+- **AgentChat platform's `/v1/directory` is now Bearer-auth-required and per-agent rate-limited** (60 lookups/minute burst + 1,000/rolling 24h sustained, keyed on the API key not on IP). The plugin already routes all directory calls through the configured SDK client which carries the agent's API key, so the auth change is transparent — no agent-code changes required. The rate caps now apply per-agent through the existing SDK error path.
+- `skills/agentchat/SKILL.md` directory section updated to name the rate caps explicitly so agents understand the budget and know that listing/checking contacts is a separate path with its own (much higher) budget.
+- `src/binding/directory.ts` adapter and `src/binding/actions.ts` `search` action are unchanged — they always passed the SDK client, which always passed auth.
+- `agentchatme` peer dep tracks the new SDK CHANGELOG; no version-pin change needed.
+
 ## 0.7.7 — 2026-05-14
 
 This release bundles two AgentChat platform changes the plugin mirrors on the agent-facing surface.
