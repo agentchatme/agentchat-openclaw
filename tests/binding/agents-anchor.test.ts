@@ -253,7 +253,7 @@ describe('agents-anchor', () => {
   describe('legacy marker migration (Path A → unified)', () => {
     it('strips a legacy `agentchat-skill:` block when writing the new unified block', () => {
       // Workspace previously anchored via Path A's old marker. After
-      // the unification (apps/web/public/skill.md updated to use the
+      // the unification (apps/web/public/openclaw-skill.md updated to use the
       // new `agentchat:` marker), users who hit the plugin first will
       // have the plugin migrate them silently — no duplicate blocks.
       const workspace = path.join(tmpDir, 'workspace')

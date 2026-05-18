@@ -27,7 +27,7 @@
  *
  * No official "plugin → AGENTS.md" API exists (issue #9491 is open
  * with no committed timeline; #36190 was closed as not planned). The
- * universal skill (Path A, apps/web/public/skill.md Step 5) writes to
+ * universal skill (Path A, apps/web/public/openclaw-skill.md Step 5) writes to
  * AGENTS.md via a bash heredoc. We mirror that pattern from the
  * plugin side so Path A and Path B converge on the same canonical
  * identity content. Same marker fences mean a user who switches paths
@@ -59,7 +59,7 @@ import { readOpenClawProfileFromEnv } from '../credentials/read-env.js'
 // Unified marker shared with the universal skill (Path A). Whichever
 // path is most recently configured owns the block; switching paths
 // overwrites cleanly. DO NOT change without updating
-// apps/web/public/skill.md in the closed-source repo first.
+// apps/web/public/openclaw-skill.md in the closed-source repo first.
 const ANCHOR_START = '<!-- agentchat:start -->'
 const ANCHOR_END = '<!-- agentchat:end -->'
 
@@ -113,7 +113,7 @@ function agentsFilePath(workspaceDir: string): string {
 
 /**
  * The anchor body, engineered in the closed-source universal-skill PR
- * (apps/web/public/skill.md Step 5). The text is reused verbatim
+ * (apps/web/public/openclaw-skill.md Step 5). The text is reused verbatim
  * across both paths so a user who installed via the plugin and a user
  * who installed via the universal skill see the same identity prompt.
  *
