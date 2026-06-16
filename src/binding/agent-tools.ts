@@ -29,6 +29,7 @@ import type {
 import { readChannelSection, readAccountRaw } from '../channel-account.js'
 import { parseChannelConfig } from '../config-schema.js'
 import { getClient, disposeClient } from './sdk-client.js'
+import { getThreadClosures } from './thread-closures.js'
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>
@@ -700,6 +701,93 @@ export const agentchatAgentToolsFactory: ChannelAgentToolFactoryFn = ({ cfg }) =
           return ok(`${filtered.length} conversation(s):\n${lines.join('\n')}`)
         } catch (e) {
           return err(toMsg(e))
+        }
+      },
+    }),
+    tool({
+      name: 'agentchat_close_local_thread',
+      description:
+        'Locally close a conversation thread for this OpenClaw AgentChat account. Future inbound on this exact conversation id will not enter the reply pipeline here, but this does not block the peer and either side can still start a brand-new thread later.',
+      parameters: Type.Object({
+        conversationId: Type.String(),
+        reason: Type.Optional(Type.String({ maxLength: 200 })),
+        account: ACCOUNT_PARAM,
+      }),
+      execute: async (_id, p) => {
+        const r = clientFor(cfg, p.account)
+        if ('error' in r) return err(r.error)
+        const closures = getThreadClosures(cfg, r.accountId)
+        const record = closures.close(p.conversationId, p.reason)
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `closed ${record.conversationId} locally`,
+            },
+          ],
+          details: {
+            conversationId: record.conversationId,
+            closedAt: record.closedAt,
+            reason: record.reason,
+            localOnly: true,
+          },
+        }
+      },
+    }),
+    tool({
+      name: 'agentchat_reopen_local_thread',
+      description:
+        'Re-open a previously locally closed conversation thread so new inbound on that conversation id can reach the reply pipeline again.',
+      parameters: Type.Object({
+        conversationId: Type.String(),
+        account: ACCOUNT_PARAM,
+      }),
+      execute: async (_id, p) => {
+        const r = clientFor(cfg, p.account)
+        if ('error' in r) return err(r.error)
+        const closures = getThreadClosures(cfg, r.accountId)
+        const reopened = closures.reopen(p.conversationId)
+        return {
+          content: [
+            {
+              type: 'text',
+              text: reopened
+                ? `re-opened ${p.conversationId} locally`
+                : `${p.conversationId} was not locally closed`,
+            },
+          ],
+          details: {
+            conversationId: p.conversationId,
+            reopened,
+            localOnly: true,
+          },
+        }
+      },
+    }),
+    tool({
+      name: 'agentchat_list_local_closed_threads',
+      description:
+        'List conversation threads currently closed locally for this OpenClaw AgentChat account. These are client-side only, not server-side blocks or mutes.',
+      parameters: Type.Object({
+        account: ACCOUNT_PARAM,
+      }),
+      execute: async (_id, p) => {
+        const r = clientFor(cfg, p.account)
+        if ('error' in r) return err(r.error)
+        const closures = getThreadClosures(cfg, r.accountId)
+        const closed = closures.list()
+        if (closed.length === 0) {
+          return {
+            content: [{ type: 'text', text: 'no locally closed threads' }],
+            details: { closedThreads: [], localOnly: true },
+          }
+        }
+        const lines = closed.map((record) =>
+          `${record.conversationId} — ${record.closedAt}${record.reason ? ` — ${record.reason}` : ''}`,
+        )
+        return {
+          content: [{ type: 'text', text: lines.join('\n') }],
+          details: { closedThreads: closed, localOnly: true },
         }
       },
     }),

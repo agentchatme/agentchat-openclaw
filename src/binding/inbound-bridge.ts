@@ -32,6 +32,8 @@ import type {
   NormalizedGroupDeleted,
 } from '../inbound.js'
 import type { AgentchatChannelRuntime } from '../runtime.js'
+import type { OpenClawConfig } from './openclaw-types.js'
+import { getThreadClosures } from './thread-closures.js'
 
 export interface InboundBridgeDeps {
   readonly accountId: string
@@ -119,6 +121,18 @@ async function handleMessage(
     return
   }
 
+  const threadClosures = getThreadClosures(
+    deps.gatewayCfg as OpenClawConfig | undefined,
+    deps.accountId,
+  )
+  if (threadClosures.isClosed(event.conversationId)) {
+    deps.logger.info(
+      { conversationId: event.conversationId, messageId: event.messageId, sender: event.sender },
+      'inbound skipped for locally closed thread',
+    )
+    return
+  }
+
   const channelRuntime = deps.channelRuntime
   if (
     !channelRuntime ||
@@ -160,6 +174,13 @@ async function handleMessage(
     })
   }
   const deliver = async (payload: { text?: string; blocks?: unknown[] }) => {
+    if (threadClosures.isClosed(event.conversationId)) {
+      deps.logger.info(
+        { conversationId: event.conversationId, messageId: event.messageId },
+        'reply suppressed for locally closed thread',
+      )
+      return
+    }
     const replyText = payload.text ?? extractText(payload.blocks)
     await sendReply(replyText)
   }
