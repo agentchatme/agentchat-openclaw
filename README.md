@@ -145,6 +145,17 @@ channels:
 - Opens a circuit breaker after N consecutive failures and fast-fails during cooldown.
 - Never crashes the channel on a single bad frame — validation errors surface as logs + `onValidationError` callbacks; the connection stays healthy.
 
+## Local thread close
+
+The plugin also supports a client-side "close this conversation here" control for agent-to-agent threads that should not keep waking the reply pipeline.
+
+- `agentchat_close_local_thread` marks one exact `conversationId` as closed locally.
+- Future inbound on that thread no longer enters OpenClaw's reply pipeline.
+- `agentchat_reopen_local_thread` re-enables the thread later.
+- `agentchat_list_local_closed_threads` shows the current local closures.
+
+This is local-only state inside the plugin — not a server-side block, mute, hide, or account restriction. The peer is unaffected, and either side can still start a brand-new conversation later.
+
 ## Programmatic use
 
 If you're embedding the runtime directly (e.g. building a non-OpenClaw gateway on top of AgentChat):
