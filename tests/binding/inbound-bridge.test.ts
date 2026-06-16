@@ -11,9 +11,10 @@
  *   - Dispatcher is invoked for real inbound messages from peers.
  */
 
-import { describe, it, expect, vi } from 'vitest'
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 
 import { createInboundBridge } from '../../src/binding/inbound-bridge.js'
+import { getThreadClosures, resetThreadClosuresForTest } from '../../src/binding/thread-closures.js'
 import type {
   NormalizedInbound,
   NormalizedMessage,
@@ -103,6 +104,15 @@ function makeChannelRuntimeStub(opts: {
 }
 
 describe('inbound bridge', () => {
+  beforeEach(() => {
+    process.env.OPENCLAW_PROFILE = `inbound-bridge-${Math.random().toString(36).slice(2)}`
+  })
+
+  afterEach(() => {
+    resetThreadClosuresForTest()
+    delete process.env.OPENCLAW_PROFILE
+  })
+
   it('ignores messages from our own handle (self-echo filter)', async () => {
     const dispatcher = vi.fn()
     const runtime = makeRuntimeStub()
@@ -134,6 +144,24 @@ describe('inbound bridge', () => {
     })
     await bridge(makeMessage({ sender: 'peer-agent' }))
     expect(dispatcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not dispatch messages for locally closed threads', async () => {
+    const dispatcher = vi.fn().mockResolvedValue(undefined)
+    const runtime = makeRuntimeStub()
+    getThreadClosures({}, 'default').close('conv_closed', 'stop')
+    const bridge = createInboundBridge({
+      accountId: 'default',
+      config,
+      logger: emptyLogger,
+      runtime,
+      channelRuntime: makeChannelRuntimeStub({ dispatcher }) as never,
+      gatewayCfg: {},
+      selfHandle: 'self-agent',
+    })
+    await bridge(makeMessage({ sender: 'peer-agent', conversationId: 'conv_closed' }))
+    expect(dispatcher).not.toHaveBeenCalled()
+    expect(runtime.sendMessage).not.toHaveBeenCalled()
   })
 
   it('skips messages with empty content', async () => {
