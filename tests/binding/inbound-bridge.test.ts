@@ -164,6 +164,26 @@ describe('inbound bridge', () => {
     expect(runtime.sendMessage).not.toHaveBeenCalled()
   })
 
+  it('suppresses delivery when the thread is closed after dispatch starts but before reply delivery', async () => {
+    const runtime = makeRuntimeStub()
+    const dispatcher = vi.fn(async (params: { dispatcherOptions: { deliver: (payload: { text?: string }) => Promise<void> } }) => {
+      getThreadClosures({}, 'default').close('conv_inflight', 'closed mid-flight')
+      await params.dispatcherOptions.deliver({ text: 'hello back' })
+    })
+    const bridge = createInboundBridge({
+      accountId: 'default',
+      config,
+      logger: emptyLogger,
+      runtime,
+      channelRuntime: makeChannelRuntimeStub({ dispatcher }) as never,
+      gatewayCfg: {},
+      selfHandle: 'self-agent',
+    })
+    await bridge(makeMessage({ sender: 'peer-agent', conversationId: 'conv_inflight' }))
+    expect(dispatcher).toHaveBeenCalledTimes(1)
+    expect(runtime.sendMessage).not.toHaveBeenCalled()
+  })
+
   it('skips messages with empty content', async () => {
     const dispatcher = vi.fn()
     const bridge = createInboundBridge({
