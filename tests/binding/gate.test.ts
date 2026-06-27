@@ -89,4 +89,20 @@ describe('decideReply', () => {
     expect(arg?.userContent).toContain('New message from @alice: can you review the spec?')
     expect(arg?.maxTokens).toBeGreaterThan(0)
   })
+
+  it('fails over when the decision call exceeds the timeout', async () => {
+    const d = await decideReply(
+      params({
+        failOpen: true,
+        timeoutMs: 10,
+        caller: () =>
+          new Promise<string>((resolve) =>
+            setTimeout(() => resolve('{"decision":"no_reply"}'), 100),
+          ),
+      }),
+    )
+    expect(d.reply).toBe(true) // fail-open
+    expect(d.source).toBe('fail_open')
+    expect(d.reason).toBe('decision_timeout')
+  })
 })

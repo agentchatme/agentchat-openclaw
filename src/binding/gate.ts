@@ -31,6 +31,28 @@ import {
 } from './reply-gate.js'
 import type { OpenClawConfig } from './openclaw-types.js'
 
+/** Default decision-call timeout. The gate must never block inbound forever. */
+export const DEFAULT_GATE_TIMEOUT_MS = 20_000
+
+class GateTimeoutError extends Error {}
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  if (!Number.isFinite(ms) || ms <= 0) return promise
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new GateTimeoutError('gate decision timed out')), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      },
+    )
+  })
+}
+
 /** Inputs handed to a gate model caller. Injectable so tests can stub the LLM. */
 export interface GateCallParams {
   readonly systemPrompt: string
@@ -63,6 +85,8 @@ export interface DecideReplyParams {
   readonly caller?: GateCaller
   /** Output-token cap override; defaults to {@link DEFAULT_GATE_MAX_TOKENS}. */
   readonly maxTokens?: number
+  /** Decision-call timeout (ms); defaults to {@link DEFAULT_GATE_TIMEOUT_MS}. */
+  readonly timeoutMs?: number
 }
 
 /**
@@ -88,13 +112,15 @@ export async function decideReply(params: DecideReplyParams): Promise<GateDecisi
   const caller =
     params.caller ?? createSimpleCompletionGateCaller(params.cfg, params.agentId)
   const maxTokens = params.maxTokens ?? DEFAULT_GATE_MAX_TOKENS
+  const timeoutMs = params.timeoutMs ?? DEFAULT_GATE_TIMEOUT_MS
 
   const start = Date.now()
   let text: string
   try {
-    text = await caller({ systemPrompt, userContent, maxTokens })
-  } catch {
-    return gateFallback(params.failOpen, 'decision_call_error', Date.now() - start)
+    text = await withTimeout(caller({ systemPrompt, userContent, maxTokens }), timeoutMs)
+  } catch (err) {
+    const reason = err instanceof GateTimeoutError ? 'decision_timeout' : 'decision_call_error'
+    return gateFallback(params.failOpen, reason, Date.now() - start)
   }
 
   const latencyMs = Date.now() - start
