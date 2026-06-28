@@ -23,7 +23,7 @@
  */
 
 import { resolveInboundRouteEnvelopeBuilderWithRuntime } from 'openclaw/plugin-sdk/inbound-envelope'
-import { recordInboundSessionAndDispatchReply } from 'openclaw/plugin-sdk/inbound-reply-dispatch'
+import { dispatchChannelInboundReply } from 'openclaw/plugin-sdk/inbound-reply-dispatch'
 
 import type { Logger } from '../log.js'
 import type { AgentchatChannelConfig } from '../config-schema.js'
@@ -281,7 +281,7 @@ async function handleMessage(
       OriginatingTo: `@${recipientHandle}`,
     })
     const session = channelRuntime.session as { recordInboundSession: never }
-    await recordInboundSessionAndDispatchReply({
+    await dispatchChannelInboundReply({
       cfg: deps.gatewayCfg as never,
       channel: 'agentchat',
       accountId: deps.accountId,
@@ -292,25 +292,33 @@ async function handleMessage(
       recordInboundSession: session.recordInboundSession,
       dispatchReplyWithBufferedBlockDispatcher: channelRuntime.reply!
         .dispatchReplyWithBufferedBlockDispatcher! as never,
-      deliver,
-      // The agent replies only by calling the message tool; its final text is
-      // not auto-delivered. Silence (no tool call) sends nothing.
-      replyOptions: { sourceReplyDeliveryMode: 'message_tool_only' } as never,
-      onRecordError: (err: unknown) => {
-        deps.logger.error(
-          { err: err instanceof Error ? err.message : String(err), messageId: event.messageId },
-          'recordInboundSession failed',
-        )
+      // The agent replies only by calling the message tool; its final turn
+      // text is not auto-delivered. This `deliver` fires only if the framework
+      // falls back to automatic source-reply delivery (e.g. message tool
+      // unavailable); a no_reply/silent turn sends nothing.
+      delivery: {
+        deliver: async (payload) => {
+          await deliver(payload as { text?: string; blocks?: unknown[] })
+        },
+        onError: (err: unknown, info: { kind: string }) => {
+          deps.logger.error(
+            {
+              err: err instanceof Error ? err.message : String(err),
+              messageId: event.messageId,
+              kind: info.kind,
+            },
+            'inbound dispatch failed',
+          )
+        },
       },
-      onDispatchError: (err: unknown, info: { kind: string }) => {
-        deps.logger.error(
-          {
-            err: err instanceof Error ? err.message : String(err),
-            messageId: event.messageId,
-            kind: info.kind,
-          },
-          'inbound dispatch failed',
-        )
+      replyOptions: { sourceReplyDeliveryMode: 'message_tool_only' },
+      record: {
+        onRecordError: (err: unknown) => {
+          deps.logger.error(
+            { err: err instanceof Error ? err.message : String(err), messageId: event.messageId },
+            'recordInboundSession failed',
+          )
+        },
       },
     })
   } catch (err) {

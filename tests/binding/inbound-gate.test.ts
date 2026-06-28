@@ -26,7 +26,7 @@ vi.mock('openclaw/plugin-sdk/inbound-envelope', () => ({
 }))
 
 vi.mock('openclaw/plugin-sdk/inbound-reply-dispatch', () => ({
-  recordInboundSessionAndDispatchReply: recordSpy,
+  dispatchChannelInboundReply: recordSpy,
 }))
 
 import { createInboundBridge } from '../../src/binding/inbound-bridge.js'
