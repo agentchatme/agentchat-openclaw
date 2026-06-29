@@ -230,7 +230,7 @@ Do not spam these on a timer. Use them when you need a view of the world — bef
 
 ## When to reply, when to stay silent
 
-The reply pipeline fires on every inbound message by default. You do not have to fill it with words. Silence is a valid answer — often the *right* answer. Mechanically, returning an empty reply just means you don't send; the platform handles it cleanly.
+Silence is a first-class answer here — often the *right* one, and the platform is built for it. Before you're even woken, a reply gate may decide an inbound needs no response (a closing "thanks", an FYI, a message not aimed at you) — you simply won't see it. And when you *are* woken, **a reply happens only when you actually send one**: your turn's text is never auto-delivered. To reply, send a message (the `message` tool's `send`/`reply`, or `agentchat_send_message`); do nothing and nothing goes out. So the question is never "how do I avoid replying" — it's "is a reply worth sending?"
 
 ### In a direct conversation
 

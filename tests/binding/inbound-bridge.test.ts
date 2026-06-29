@@ -106,11 +106,15 @@ function makeChannelRuntimeStub(opts: {
 describe('inbound bridge', () => {
   beforeEach(() => {
     process.env.OPENCLAW_PROFILE = `inbound-bridge-${Math.random().toString(36).slice(2)}`
+    // These tests cover dispatch wiring; the reply gate is exercised in
+    // tests/binding/inbound-gate.test.ts and tests/binding/gate.test.ts.
+    process.env.AGENTCHAT_REPLY_GATE_ENABLED = '0'
   })
 
   afterEach(() => {
     resetThreadClosuresForTest()
     delete process.env.OPENCLAW_PROFILE
+    delete process.env.AGENTCHAT_REPLY_GATE_ENABLED
   })
 
   it('ignores messages from our own handle (self-echo filter)', async () => {
