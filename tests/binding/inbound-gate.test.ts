@@ -112,6 +112,8 @@ describe('inbound reply gate', () => {
   beforeEach(() => {
     process.env.OPENCLAW_PROFILE = `inbound-gate-${Math.random().toString(36).slice(2)}`
     delete process.env.AGENTCHAT_REPLY_GATE_ENABLED // gate on by default
+    delete process.env.AGENTCHAT_REPLY_GATE_FAIL_OPEN // fail-closed by default
+    delete process.env.AGENTCHAT_SOURCE_REPLY_MODE // automatic by default
     recordSpy.mockClear()
   })
 
@@ -119,7 +121,16 @@ describe('inbound reply gate', () => {
     resetThreadClosuresForTest()
     delete process.env.OPENCLAW_PROFILE
     delete process.env.AGENTCHAT_REPLY_GATE_ENABLED
+    delete process.env.AGENTCHAT_REPLY_GATE_FAIL_OPEN
+    delete process.env.AGENTCHAT_SOURCE_REPLY_MODE
   })
+
+  function dispatchedMode(): string | undefined {
+    const arg = recordSpy.mock.calls[0]?.[0] as
+      | { replyOptions?: { sourceReplyDeliveryMode?: string } }
+      | undefined
+    return arg?.replyOptions?.sourceReplyDeliveryMode
+  }
 
   it('does NOT dispatch a turn when the gate says no_reply', async () => {
     const bridge = makeBridge(noReplyCaller)
@@ -127,17 +138,34 @@ describe('inbound reply gate', () => {
     expect(recordSpy).not.toHaveBeenCalled()
   })
 
-  it('dispatches with message_tool_only when the gate says reply', async () => {
+  it('dispatches with automatic delivery by default when the gate says reply', async () => {
+    // automatic so the gated reply lands even when the agent's tool profile
+    // strips the message tool (the loop is already prevented by the gate).
     const bridge = makeBridge(replyCaller)
     await bridge(makeMessage())
     expect(recordSpy).toHaveBeenCalledTimes(1)
-    const arg = recordSpy.mock.calls[0]?.[0] as
-      | { replyOptions?: { sourceReplyDeliveryMode?: string } }
-      | undefined
-    expect(arg?.replyOptions?.sourceReplyDeliveryMode).toBe('message_tool_only')
+    expect(dispatchedMode()).toBe('automatic')
   })
 
-  it('fails open (dispatches) when the gate caller throws', async () => {
+  it('uses message_tool_only delivery when opted in via env', async () => {
+    process.env.AGENTCHAT_SOURCE_REPLY_MODE = 'message_tool_only'
+    const bridge = makeBridge(replyCaller)
+    await bridge(makeMessage())
+    expect(recordSpy).toHaveBeenCalledTimes(1)
+    expect(dispatchedMode()).toBe('message_tool_only')
+  })
+
+  it('fails CLOSED (no dispatch) by default when the gate caller throws', async () => {
+    // A model outage must not reseed a loop: silence under uncertainty.
+    const bridge = makeBridge(async () => {
+      throw new Error('provider down')
+    })
+    await bridge(makeMessage())
+    expect(recordSpy).not.toHaveBeenCalled()
+  })
+
+  it('fails open (dispatches) when opted in via env and the caller throws', async () => {
+    process.env.AGENTCHAT_REPLY_GATE_FAIL_OPEN = '1'
     const bridge = makeBridge(async () => {
       throw new Error('provider down')
     })

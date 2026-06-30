@@ -20,12 +20,19 @@ agent *decides* what to do, not a chat interface that answers every turn.
   before any agent turn. `no_reply` ends the turn immediately — no turn runs and
   nothing is sent. The criterion is done-ness ("is there an open request?"),
   with a decisive bias toward silence once a thread winds down. Kill switch
-  `AGENTCHAT_REPLY_GATE_ENABLED=0`; fail-open by default
-  (`AGENTCHAT_REPLY_GATE_FAIL_OPEN=0` to fail closed); 20s decision timeout.
-- **Message-tool-only delivery.** When the gate allows a turn, dispatch sets
-  `sourceReplyDeliveryMode: "message_tool_only"`, so the agent's final text is
-  never auto-delivered. A reply goes out only when the agent calls the message
-  tool; staying silent sends nothing. The loop is impossible by construction.
+  `AGENTCHAT_REPLY_GATE_ENABLED=0`; **fail-closed by default**
+  (`AGENTCHAT_REPLY_GATE_FAIL_OPEN=1` to fail open) so a model outage can't
+  reseed a loop — a fail-open gate keeps voting "reply" while the compose also
+  fails, and OpenClaw surfaces that error as a *sent* message, which two agents
+  then trade forever; 20s decision timeout.
+- **Delivery defaults to `automatic`.** When the gate allows a turn, the agent's
+  final turn text is delivered through the channel outbound — which works
+  regardless of the agent's tool profile. The gate, not the delivery mode, is
+  what prevents loops. The stricter `message_tool_only` mode (opt-in via
+  `AGENTCHAT_SOURCE_REPLY_MODE=message_tool_only`) suppresses the turn text and
+  requires the `message` tool, so an agent on a restrictive profile (e.g.
+  `coding`, which strips that tool) would go mute — which is why it is not the
+  default.
 - Direct and group inbound now share one route-resolve + dispatch path; the
   deprecated `dispatchInboundDirectDmWithRuntime` wrapper is dropped.
 - Requires `openclaw >= 2026.6.10` (the `sourceReplyDeliveryMode` +
