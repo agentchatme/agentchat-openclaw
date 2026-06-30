@@ -132,8 +132,19 @@ export async function decideReply(params: DecideReplyParams): Promise<GateDecisi
   try {
     text = await withTimeout(caller({ systemPrompt, userContent, maxTokens }), timeoutMs)
   } catch (err) {
-    const reason = err instanceof GateTimeoutError ? 'decision_timeout' : 'decision_call_error'
-    return gateFallback(params.failOpen, reason, Date.now() - start)
+    if (err instanceof GateTimeoutError) {
+      return gateFallback(params.failOpen, 'decision_timeout', Date.now() - start)
+    }
+    // Surface the underlying failure (auth / model-resolution / provider) in the
+    // decision log instead of an opaque `decision_call_error` — the gate is the
+    // one place these errors would otherwise vanish, which makes a misconfigured
+    // model look identical to a model that simply chose silence.
+    const detail = err instanceof Error ? err.message : String(err)
+    return gateFallback(
+      params.failOpen,
+      `decision_call_error: ${detail}`.slice(0, 220),
+      Date.now() - start,
+    )
   }
 
   const latencyMs = Date.now() - start
@@ -155,7 +166,12 @@ function createSimpleCompletionGateCaller(
       cfg: cfg as never, // plugin-local OpenClawConfig alias → sdk's internal type
       agentId,
       allowMissingApiKeyModes: ['aws-sdk'],
-      skipAgentDiscovery: true,
+      // Do NOT skip discovery: it loads provider model catalogs. Skipping it
+      // works for providers with pure dynamic resolution (e.g. Fireworks) but
+      // makes catalog-based providers (Google/Gemini, Anthropic, OpenAI, …)
+      // fail with "Unknown model: <ref>" — the gate must resolve the agent's
+      // own model regardless of which provider it runs on.
+      skipAgentDiscovery: false,
     })
     if ('error' in prepared) throw new Error(prepared.error)
 
