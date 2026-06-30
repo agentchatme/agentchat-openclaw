@@ -55,7 +55,8 @@ describe('decideReply', () => {
     )
     expect(d.reply).toBe(true)
     expect(d.source).toBe('fail_open')
-    expect(d.reason).toBe('decision_call_error')
+    expect(d.reason).toContain('decision_call_error')
+    expect(d.reason).toContain('provider down') // underlying cause is surfaced
   })
 
   it('fails closed (silent) when the decision call throws and failOpen is false', async () => {
