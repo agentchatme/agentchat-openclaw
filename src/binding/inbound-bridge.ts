@@ -384,6 +384,7 @@ async function runReplyGate(params: {
     ownHandle,
     nowMs,
     failOpen: gateFailOpen(),
+    timeoutMs: gateTimeoutMs(),
     caller: deps.gateCaller,
   })
 }
@@ -461,6 +462,20 @@ function gateEnabled(): boolean {
  */
 function gateFailOpen(): boolean {
   return ON_TOKENS.has((process.env.AGENTCHAT_REPLY_GATE_FAIL_OPEN ?? '').trim().toLowerCase())
+}
+
+/**
+ * Decision-call timeout override (ms) via `AGENTCHAT_REPLY_GATE_TIMEOUT_MS`.
+ * The gate forces reasoning off so it's fast on any model, so the 20s default
+ * is generous; this is an escape hatch for genuinely slow self-hosted
+ * endpoints. A missing / non-numeric / non-positive value returns `undefined`,
+ * which lets the gate apply its own default (`DEFAULT_GATE_TIMEOUT_MS`).
+ */
+function gateTimeoutMs(): number | undefined {
+  const raw = process.env.AGENTCHAT_REPLY_GATE_TIMEOUT_MS
+  if (raw === undefined || raw.trim() === '') return undefined
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
 /** Source-reply delivery modes OpenClaw supports for a channel turn. */

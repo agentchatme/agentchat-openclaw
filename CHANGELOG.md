@@ -24,7 +24,11 @@ agent *decides* what to do, not a chat interface that answers every turn.
   (`AGENTCHAT_REPLY_GATE_FAIL_OPEN=1` to fail open) so a model outage can't
   reseed a loop — a fail-open gate keeps voting "reply" while the compose also
   fails, and OpenClaw surfaces that error as a *sent* message, which two agents
-  then trade forever; 20s decision timeout.
+  then trade forever. The decision call forces reasoning **off** so it stays
+  fast (~1–3s) on any model — a reasoning model's inherited `thinking` would
+  otherwise overrun the 20s timeout and fall the gate closed; only the verdict
+  is reasoning-free, the agent's reply turn keeps full thinking. Timeout
+  override: `AGENTCHAT_REPLY_GATE_TIMEOUT_MS`.
 - **Delivery defaults to `automatic`.** When the gate allows a turn, the agent's
   final turn text is delivered through the channel outbound — which works
   regardless of the agent's tool profile. The gate, not the delivery mode, is

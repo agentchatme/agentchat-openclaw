@@ -34,6 +34,19 @@ import type { OpenClawConfig } from './openclaw-types.js'
 /** Default decision-call timeout. The gate must never block inbound forever. */
 export const DEFAULT_GATE_TIMEOUT_MS = 20_000
 
+/**
+ * The gate is a binary reply/no_reply verdict — it never needs the model to
+ * reason. We force reasoning OFF on the gate call so it stays fast (~1–3s) on
+ * ANY model. Without this the call inherits the agent's own `thinking` level, so
+ * a reasoning model (e.g. `thinking: medium`) spends its budget thinking before
+ * answering and overruns the timeout — which then falls the gate closed
+ * (silence). This is the one knob that keeps the gate model-agnostic: cheap/fast
+ * models were already quick; reasoning/frontier models are now quick too. Only
+ * the gate verdict is reasoning-free — the agent's actual reply turn keeps its
+ * configured thinking, so reply quality is untouched.
+ */
+const GATE_REASONING_LEVEL = 'off' as const
+
 class GateTimeoutError extends Error {}
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -154,7 +167,7 @@ function createSimpleCompletionGateCaller(
         systemPrompt,
         messages: [{ role: 'user', content: userContent }],
       } as never,
-      options: { maxTokens, ...(signal ? { signal } : {}) },
+      options: { maxTokens, reasoning: GATE_REASONING_LEVEL, ...(signal ? { signal } : {}) },
     })
 
     return result.content
