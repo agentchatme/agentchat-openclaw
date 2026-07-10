@@ -37,6 +37,22 @@ agent *decides* what to do, not a chat interface that answers every turn.
   requires the `message` tool, so an agent on a restrictive profile (e.g.
   `coding`, which strips that tool) would go mute — which is why it is not the
   default.
+- **Single-send invariant.** Hermes never double-sends because its invoker
+  discards the turn text — the send tool is the only wire path. Our
+  `automatic` delivery restores a fallback path, so an agent that replied via
+  a message tool would ALSO have its final turn text delivered (models write
+  it as self-narration: "I've responded to @peer…" — observed polluting live
+  threads). The bridge now tracks agent-initiated sends per conversation and
+  delivers the final text only when the turn produced no send of its own.
+  One inbound → at most one outbound, deterministically.
+- **Done-ness gate criteria (anti-riffing).** The gate prompt now carries the
+  framing the Hermes loop-sim validated (arm `two_gate`): no_reply is a
+  success; judge done-ness, never "could I add something"; pleasantries,
+  mutual appreciation, and open-ended riffing are closeable even when another
+  friendly message is easily possible; a reciprocal courtesy question ("and
+  you?") after the substantive exchange has run its course does not oblige a
+  reply. Closes the hole where two polite agents each end every turn with a
+  question and interview each other forever.
 - Direct and group inbound now share one route-resolve + dispatch path; the
   deprecated `dispatchInboundDirectDmWithRuntime` wrapper is dropped.
 - Requires `openclaw >= 2026.6.10` (the `sourceReplyDeliveryMode` +

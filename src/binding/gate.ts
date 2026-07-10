@@ -183,7 +183,14 @@ function createSimpleCompletionGateCaller(
         systemPrompt,
         messages: [{ role: 'user', content: userContent }],
       } as never,
-      options: { maxTokens, reasoning: GATE_REASONING_LEVEL, ...(signal ? { signal } : {}) },
+      // temperature 0 mirrors the Hermes gate: a binary policy decision must
+      // be as deterministic as the provider allows, not sampled creatively.
+      options: {
+        maxTokens,
+        temperature: 0,
+        reasoning: GATE_REASONING_LEVEL,
+        ...(signal ? { signal } : {}),
+      },
     })
 
     return result.content

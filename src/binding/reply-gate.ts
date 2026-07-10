@@ -214,6 +214,22 @@ function isRecord(value: unknown): value is GateRawMessage {
 
 // ─── Prompt construction ────────────────────────────────────────────────
 
+/**
+ * The done-ness criterion. This framing is the load-bearing part — it is the
+ * intervention the Hermes loop-sim validated (arm `two_gate`), and its rules
+ * exist because softer framings measurably fail:
+ *
+ * - Judge DONE-NESS, never value. "Would a reply be valuable?" always answers
+ *   yes to a model — every riff feels valuable — which is precisely what feeds
+ *   the exploration/"riffing" loop the ack-rules alone cannot stop.
+ * - Silence is success. Without this, the model's built-in continuation bias
+ *   treats no_reply as a failure state and avoids it.
+ * - A reciprocal courtesy question is part of the pleasantry, not an open
+ *   task. Two polite agents each end every turn with "and you?" — a literal
+ *   "unanswered question directed at you" — and interview each other forever.
+ *   This was the exact hole we watched live: every gate call scored
+ *   open_request and the thread never terminated.
+ */
 function systemTemplate(handle: string): string {
   const h = `@${handle}`
   return (
@@ -222,27 +238,43 @@ function systemTemplate(handle: string): string {
     `Your only job is to decide whether ${h} should reply to it now. You ` +
     `do NOT write the reply — you output one decision.\n` +
     `\n` +
-    `Choose "no_reply" when the exchange is finished or nothing actually needs ` +
-    `${h} to respond. For example:\n` +
+    `"no_reply" is a SUCCESS, not a failure. Most healthy conversations are ` +
+    `SUPPOSED to end; going quiet is the normal, correct outcome and is never ` +
+    `rude here — on this network silence IS the acknowledgement.\n` +
+    `\n` +
+    `Judge DONE-NESS, not how interesting another message could be:\n` +
+    `\n` +
+    `Choose "reply" only if a further message accomplishes a concrete, ` +
+    `still-OPEN purpose:\n` +
+    `- answer a substantive pending question or supply specifically requested ` +
+    `information\n` +
+    `- make or respond to a decision, or unblock the peer on a real task\n` +
+    `- ${h} started this thread toward a goal and the peer's reply needs a ` +
+    `substantive follow-up to reach it\n` +
+    `- new information genuinely requires ${h}'s input\n` +
+    `\n` +
+    `Choose "no_reply" when the exchange has reached its natural end — even if ` +
+    `another clever or friendly message is easily possible:\n` +
+    `- it is trading pleasantries, mutual appreciation, agreement, or ` +
+    `open-ended tangents / "riffing" with no open objective\n` +
+    `- a courtesy question that merely mirrors the exchange back ("and you?", ` +
+    `"what are you working on?", "what tools are you using?") after the ` +
+    `substantive part has run its course is part of the pleasantry, not an ` +
+    `open task — it does not oblige a reply\n` +
     `- the other side is acknowledging or closing out (thanks / ok / got it / ` +
     `sounds good / 👍 / bye) and replying would only prolong it\n` +
-    `- the last message is a pleasantry or reaction with no question, request, ` +
-    `or new information for ${h}\n` +
     `- ${h} already answered what was asked and nothing new is on the table\n` +
-    `- in a group, the message is not addressed to ${h} and does not need it\n` +
+    `- in a group, the message is not addressed to ${h} and does not need it. ` +
+    `(Groups only — in a direct conversation every message is addressed to ` +
+    `${h} by definition, so "not_addressed" never applies there.)\n` +
     `\n` +
-    `Choose "reply" only when there is a real reason to respond. For example:\n` +
-    `- an open question, request, or task is directed at ${h} and unanswered\n` +
-    `- new information genuinely calls for ${h}'s input\n` +
-    `- ${h} started this and the peer's reply needs a substantive ` +
-    `follow-up to reach the goal\n` +
-    `\n` +
-    `Decisive bias: once a conversation is winding down, prefer "no_reply" — a ` +
-    `reply must earn its place. Two agents trading acknowledgements forever is ` +
-    `the exact failure you exist to prevent. If the only thing you could add is ` +
-    `another acknowledgement, choose "no_reply". If the Pace line shows ` +
-    `messages flying back and forth rapidly with each only restating or ` +
-    `acknowledging the last, that IS the loop — choose "no_reply".\n` +
+    `"I could add something" is NOT a reason to reply. "Something concrete is ` +
+    `unresolved and my reply resolves it" IS. Two agents keeping a chat alive ` +
+    `by each politely asking the next question is the exact failure you exist ` +
+    `to prevent — the thread being pleasant does not make it open. If the Pace ` +
+    `line shows messages flying back and forth with each turn only restating, ` +
+    `appreciating, or re-asking a mirrored question, that IS the loop — choose ` +
+    `"no_reply". When unsure, prefer "no_reply".\n` +
     `\n` +
     `Respond with ONLY a JSON object — no prose, no markdown fences:\n` +
     `{"decision": "reply" or "no_reply", "reason": "<one short sentence>", ` +
