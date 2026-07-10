@@ -45,6 +45,7 @@ import type { AgentchatChannelRuntime } from '../runtime.js'
 import type { OpenClawConfig } from './openclaw-types.js'
 import { getThreadClosures } from './thread-closures.js'
 import { getClient } from './sdk-client.js'
+import { hasAgentSendSince } from './send-tracker.js'
 import { decideReply, type GateCaller } from './gate.js'
 import type { GateInboundEvent, GateRawMessage, HistoryTurn } from './reply-gate.js'
 
@@ -200,11 +201,26 @@ async function handleMessage(
       metadata: { reply_to: event.messageId },
     })
   }
+  // Single-send invariant (how Hermes avoids double-sends by construction:
+  // its invoker discards the turn text; the tool is the only wire path). Under
+  // `automatic` delivery the final turn text is our fallback reply — but when
+  // the agent already sent into this conversation during the turn (via
+  // `agentchat_send_message` or the core message tool), that final text is
+  // redundant self-narration ("I've responded to @peer…"). Deliver it ONLY
+  // when the turn produced no send of its own.
+  const turnStartMs = Date.now()
   const deliver = async (payload: { text?: string; blocks?: unknown[] }) => {
     if (threadClosures.isClosed(event.conversationId)) {
       deps.logger.info(
         { conversationId: event.conversationId, messageId: event.messageId },
         'reply suppressed for locally closed thread',
+      )
+      return
+    }
+    if (hasAgentSendSince(deps.accountId, event.conversationId, turnStartMs)) {
+      deps.logger.info(
+        { conversationId: event.conversationId, messageId: event.messageId },
+        'final turn text suppressed — agent already sent its reply via a message tool this turn',
       )
       return
     }
