@@ -123,6 +123,19 @@ describe('buildDecisionMessages', () => {
     expect(out[0]?.content).toContain('reply gate for @me')
   })
 
+  it('carries the done-ness criteria the loop-sim validated (anti-riffing)', () => {
+    // These lines are load-bearing: the loop-sim proved value-framed criteria
+    // never stop the riffing loop. Removing any of them regresses the fix.
+    const sys = buildDecisionMessages({ handle: 'me', event, history: [], signals })[0]
+      ?.content as string
+    expect(sys).toContain('"no_reply" is a SUCCESS')
+    expect(sys).toContain('Judge DONE-NESS')
+    expect(sys).toContain('riffing')
+    expect(sys).toContain('courtesy question')
+    expect(sys).toContain('"I could add something" is NOT a reason to reply')
+    expect(sys).toContain('When unsure, prefer "no_reply"')
+  })
+
   it('includes a pace line when a previous-message gap exists', () => {
     const out = buildDecisionMessages({ handle: 'me', event, history: [], signals })
     expect(out[1]?.content).toContain('Pace: 4 message(s) in the last 60s')

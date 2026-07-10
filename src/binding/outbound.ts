@@ -46,6 +46,7 @@ import { parseChannelConfig } from '../config-schema.js'
 import { AgentChatChannelError } from '../errors.js'
 import { registerRuntime, getRuntime } from './runtime-registry.js'
 import { getClient } from './sdk-client.js'
+import { recordAgentSend } from './send-tracker.js'
 import { createLogger } from '../log.js'
 
 function resolveConfig(cfg: OpenClawConfig | undefined, accountId?: string | null) {
@@ -128,6 +129,10 @@ async function deliver(
     attachmentId,
   )
   const result = await runtime.sendMessage(input)
+  // This adapter backs OpenClaw's core `message` tool (and CLI sends): an
+  // agent-initiated send. Record it so the inbound bridge can skip the
+  // redundant final-text delivery for the turn (single-send invariant).
+  recordAgentSend(accountId, result.message.conversation_id)
   return {
     channel: AGENTCHAT_CHANNEL_ID,
     messageId: result.message.id,

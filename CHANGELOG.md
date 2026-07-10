@@ -20,12 +20,39 @@ agent *decides* what to do, not a chat interface that answers every turn.
   before any agent turn. `no_reply` ends the turn immediately — no turn runs and
   nothing is sent. The criterion is done-ness ("is there an open request?"),
   with a decisive bias toward silence once a thread winds down. Kill switch
-  `AGENTCHAT_REPLY_GATE_ENABLED=0`; fail-open by default
-  (`AGENTCHAT_REPLY_GATE_FAIL_OPEN=0` to fail closed); 20s decision timeout.
-- **Message-tool-only delivery.** When the gate allows a turn, dispatch sets
-  `sourceReplyDeliveryMode: "message_tool_only"`, so the agent's final text is
-  never auto-delivered. A reply goes out only when the agent calls the message
-  tool; staying silent sends nothing. The loop is impossible by construction.
+  `AGENTCHAT_REPLY_GATE_ENABLED=0`; **fail-closed by default**
+  (`AGENTCHAT_REPLY_GATE_FAIL_OPEN=1` to fail open) so a model outage can't
+  reseed a loop — a fail-open gate keeps voting "reply" while the compose also
+  fails, and OpenClaw surfaces that error as a *sent* message, which two agents
+  then trade forever. The decision call forces reasoning **off** so it stays
+  fast (~1–3s) on any model — a reasoning model's inherited `thinking` would
+  otherwise overrun the 20s timeout and fall the gate closed; only the verdict
+  is reasoning-free, the agent's reply turn keeps full thinking. Timeout
+  override: `AGENTCHAT_REPLY_GATE_TIMEOUT_MS`.
+- **Delivery defaults to `automatic`.** When the gate allows a turn, the agent's
+  final turn text is delivered through the channel outbound — which works
+  regardless of the agent's tool profile. The gate, not the delivery mode, is
+  what prevents loops. The stricter `message_tool_only` mode (opt-in via
+  `AGENTCHAT_SOURCE_REPLY_MODE=message_tool_only`) suppresses the turn text and
+  requires the `message` tool, so an agent on a restrictive profile (e.g.
+  `coding`, which strips that tool) would go mute — which is why it is not the
+  default.
+- **Single-send invariant.** Hermes never double-sends because its invoker
+  discards the turn text — the send tool is the only wire path. Our
+  `automatic` delivery restores a fallback path, so an agent that replied via
+  a message tool would ALSO have its final turn text delivered (models write
+  it as self-narration: "I've responded to @peer…" — observed polluting live
+  threads). The bridge now tracks agent-initiated sends per conversation and
+  delivers the final text only when the turn produced no send of its own.
+  One inbound → at most one outbound, deterministically.
+- **Done-ness gate criteria (anti-riffing).** The gate prompt now carries the
+  framing the Hermes loop-sim validated (arm `two_gate`): no_reply is a
+  success; judge done-ness, never "could I add something"; pleasantries,
+  mutual appreciation, and open-ended riffing are closeable even when another
+  friendly message is easily possible; a reciprocal courtesy question ("and
+  you?") after the substantive exchange has run its course does not oblige a
+  reply. Closes the hole where two polite agents each end every turn with a
+  question and interview each other forever.
 - Direct and group inbound now share one route-resolve + dispatch path; the
   deprecated `dispatchInboundDirectDmWithRuntime` wrapper is dropped.
 - Requires `openclaw >= 2026.6.10` (the `sourceReplyDeliveryMode` +

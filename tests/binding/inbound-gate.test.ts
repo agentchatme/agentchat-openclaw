@@ -31,6 +31,10 @@ vi.mock('openclaw/plugin-sdk/inbound-reply-dispatch', () => ({
 
 import { createInboundBridge } from '../../src/binding/inbound-bridge.js'
 import { resetThreadClosuresForTest } from '../../src/binding/thread-closures.js'
+import {
+  recordAgentSend,
+  resetSendTrackerForTest,
+} from '../../src/binding/send-tracker.js'
 import type { GateCaller } from '../../src/binding/gate.js'
 import type { NormalizedMessage } from '../../src/inbound.js'
 import type { AgentchatChannelConfig } from '../../src/config-schema.js'
@@ -92,12 +96,12 @@ function makeChannelRuntime(): unknown {
   }
 }
 
-function makeBridge(gateCaller: GateCaller) {
+function makeBridge(gateCaller: GateCaller, runtime = makeRuntimeStub()) {
   return createInboundBridge({
     accountId: 'default',
     config,
     logger,
-    runtime: makeRuntimeStub(),
+    runtime,
     channelRuntime: makeChannelRuntime() as never,
     gatewayCfg: {},
     selfHandle: 'self-agent',
@@ -112,14 +116,26 @@ describe('inbound reply gate', () => {
   beforeEach(() => {
     process.env.OPENCLAW_PROFILE = `inbound-gate-${Math.random().toString(36).slice(2)}`
     delete process.env.AGENTCHAT_REPLY_GATE_ENABLED // gate on by default
+    delete process.env.AGENTCHAT_REPLY_GATE_FAIL_OPEN // fail-closed by default
+    delete process.env.AGENTCHAT_SOURCE_REPLY_MODE // automatic by default
     recordSpy.mockClear()
   })
 
   afterEach(() => {
     resetThreadClosuresForTest()
+    resetSendTrackerForTest()
     delete process.env.OPENCLAW_PROFILE
     delete process.env.AGENTCHAT_REPLY_GATE_ENABLED
+    delete process.env.AGENTCHAT_REPLY_GATE_FAIL_OPEN
+    delete process.env.AGENTCHAT_SOURCE_REPLY_MODE
   })
+
+  function dispatchedMode(): string | undefined {
+    const arg = recordSpy.mock.calls[0]?.[0] as
+      | { replyOptions?: { sourceReplyDeliveryMode?: string } }
+      | undefined
+    return arg?.replyOptions?.sourceReplyDeliveryMode
+  }
 
   it('does NOT dispatch a turn when the gate says no_reply', async () => {
     const bridge = makeBridge(noReplyCaller)
@@ -127,17 +143,34 @@ describe('inbound reply gate', () => {
     expect(recordSpy).not.toHaveBeenCalled()
   })
 
-  it('dispatches with message_tool_only when the gate says reply', async () => {
+  it('dispatches with automatic delivery by default when the gate says reply', async () => {
+    // automatic so the gated reply lands even when the agent's tool profile
+    // strips the message tool (the loop is already prevented by the gate).
     const bridge = makeBridge(replyCaller)
     await bridge(makeMessage())
     expect(recordSpy).toHaveBeenCalledTimes(1)
-    const arg = recordSpy.mock.calls[0]?.[0] as
-      | { replyOptions?: { sourceReplyDeliveryMode?: string } }
-      | undefined
-    expect(arg?.replyOptions?.sourceReplyDeliveryMode).toBe('message_tool_only')
+    expect(dispatchedMode()).toBe('automatic')
   })
 
-  it('fails open (dispatches) when the gate caller throws', async () => {
+  it('uses message_tool_only delivery when opted in via env', async () => {
+    process.env.AGENTCHAT_SOURCE_REPLY_MODE = 'message_tool_only'
+    const bridge = makeBridge(replyCaller)
+    await bridge(makeMessage())
+    expect(recordSpy).toHaveBeenCalledTimes(1)
+    expect(dispatchedMode()).toBe('message_tool_only')
+  })
+
+  it('fails CLOSED (no dispatch) by default when the gate caller throws', async () => {
+    // A model outage must not reseed a loop: silence under uncertainty.
+    const bridge = makeBridge(async () => {
+      throw new Error('provider down')
+    })
+    await bridge(makeMessage())
+    expect(recordSpy).not.toHaveBeenCalled()
+  })
+
+  it('fails open (dispatches) when opted in via env and the caller throws', async () => {
+    process.env.AGENTCHAT_REPLY_GATE_FAIL_OPEN = '1'
     const bridge = makeBridge(async () => {
       throw new Error('provider down')
     })
@@ -158,5 +191,65 @@ describe('inbound reply gate', () => {
     const bridge = makeBridge(noReplyCaller)
     await bridge(makeMessage({ conversationKind: 'group', conversationId: 'group_abc' }))
     expect(recordSpy).not.toHaveBeenCalled()
+  })
+
+  // ── Single-send invariant ─────────────────────────────────────────────
+  // Hermes never double-sends: its invoker discards the turn text and the
+  // tool is the only wire path. Our equivalent: the final-turn-text delivery
+  // runs ONLY when the turn produced no send of its own.
+
+  it('suppresses the final turn text when the agent already sent via a tool this turn', async () => {
+    recordSpy.mockImplementationOnce(async (params: unknown) => {
+      // Simulate the agent turn: a message-tool send lands mid-turn, then the
+      // framework hands the final turn text (self-narration) to `deliver`.
+      recordAgentSend('default', 'conv_abc', Date.now())
+      const p = params as { delivery: { deliver: (x: { text: string }) => Promise<void> } }
+      await p.delivery.deliver({ text: "I've responded to @peer-agent!" })
+    })
+    const runtime = makeRuntimeStub()
+    const bridge = makeBridge(replyCaller, runtime)
+    await bridge(makeMessage())
+    expect(recordSpy).toHaveBeenCalledTimes(1)
+    expect(runtime.sendMessage).not.toHaveBeenCalled()
+  })
+
+  it('delivers the final turn text when the turn made no send of its own', async () => {
+    recordSpy.mockImplementationOnce(async (params: unknown) => {
+      const p = params as { delivery: { deliver: (x: { text: string }) => Promise<void> } }
+      await p.delivery.deliver({ text: 'Paris' })
+    })
+    const runtime = makeRuntimeStub()
+    const bridge = makeBridge(replyCaller, runtime)
+    await bridge(makeMessage())
+    expect(runtime.sendMessage).toHaveBeenCalledTimes(1)
+    const arg = (runtime.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as {
+      content?: { text?: string }
+    }
+    expect(arg?.content?.text).toBe('Paris')
+  })
+
+  it('does not suppress based on sends from before this turn', async () => {
+    // A send in a previous turn must not swallow this turn's reply.
+    recordAgentSend('default', 'conv_abc', Date.now() - 60_000)
+    recordSpy.mockImplementationOnce(async (params: unknown) => {
+      const p = params as { delivery: { deliver: (x: { text: string }) => Promise<void> } }
+      await p.delivery.deliver({ text: 'a fresh reply' })
+    })
+    const runtime = makeRuntimeStub()
+    const bridge = makeBridge(replyCaller, runtime)
+    await bridge(makeMessage())
+    expect(runtime.sendMessage).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not suppress when the mid-turn send went to a different conversation', async () => {
+    recordSpy.mockImplementationOnce(async (params: unknown) => {
+      recordAgentSend('default', 'conv_other', Date.now())
+      const p = params as { delivery: { deliver: (x: { text: string }) => Promise<void> } }
+      await p.delivery.deliver({ text: 'reply to the origin thread' })
+    })
+    const runtime = makeRuntimeStub()
+    const bridge = makeBridge(replyCaller, runtime)
+    await bridge(makeMessage())
+    expect(runtime.sendMessage).toHaveBeenCalledTimes(1)
   })
 })

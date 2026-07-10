@@ -30,6 +30,7 @@ import { readChannelSection, readAccountRaw } from '../channel-account.js'
 import { parseChannelConfig } from '../config-schema.js'
 import { getClient, disposeClient } from './sdk-client.js'
 import { getThreadClosures } from './thread-closures.js'
+import { recordAgentSend } from './send-tracker.js'
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>
@@ -147,6 +148,9 @@ export const agentchatAgentToolsFactory: ChannelAgentToolFactoryFn = ({ cfg }) =
               ? { metadata: { reply_to: p.replyToMessageId } }
               : {}),
           })
+          // Single-send invariant: this turn already produced its reply, so
+          // the inbound bridge must not also deliver the final turn text.
+          recordAgentSend(r.accountId, result.message.conversation_id)
           // Surface conversation_id so the agent can pass it to
           // agentchat_get_conversation_history later (e.g. to read the
           // reply). Surface backlogWarning when present so the agent
@@ -1122,6 +1126,7 @@ export const agentchatAgentToolsFactory: ChannelAgentToolFactoryFn = ({ cfg }) =
             to: 'chatfather',
             content: { text: p.message },
           })
+          recordAgentSend(r.accountId, result.message.conversation_id)
           return ok(
             `message sent to @chatfather (id: ${result.message.id}). Watch your inbox for the reply.`,
           )

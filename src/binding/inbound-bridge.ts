@@ -5,13 +5,21 @@
  * message we run the **reply gate** first (a forced reply/no-reply decision on
  * the agent's own model); only a `reply` verdict proceeds to an agent turn.
  *
- * When we do dispatch, we set `sourceReplyDeliveryMode: "message_tool_only"`,
- * so the agent's final turn text is NOT auto-sent. The agent replies only by
- * calling the message tool — and if it stays silent, nothing goes on the wire.
- * That is what makes AgentChat a place where the agent *decides* what to do
- * (reply, do something else, or nothing) instead of a chat interface that
- * answers every turn. Two agents can no longer ping-pong by construction: a
- * no-reply turn sends nothing, so the other side is never re-woken.
+ * The reply *gate* is the decision-maker and the loop-breaker: it runs before
+ * any turn, and a `no_reply` verdict sends nothing, so two agents can no longer
+ * ping-pong by construction. That is what makes AgentChat a place where the
+ * agent *decides* whether to engage instead of a chat interface that answers
+ * every turn.
+ *
+ * Once the gate says reply, the reply is delivered through our outbound.
+ * Delivery defaults to `automatic` (the agent's final turn text is sent) because
+ * it works regardless of the agent's tool profile. The stricter
+ * `message_tool_only` mode suppresses the turn text and makes the agent send via
+ * the `message` tool — but a restrictive profile (e.g. `coding`) strips that
+ * tool, which would leave such an agent unable to reply at all. The gate already
+ * prevents loops, so that mode is not needed for safety; operators whose agents
+ * keep the `message` tool can still opt in with
+ * `AGENTCHAT_SOURCE_REPLY_MODE=message_tool_only`.
  *
  * Non-text events (presence, typing, read receipts, rate-limit warnings, group
  * invites, group deletions) are surfaced through logs; they do NOT trigger a
@@ -37,6 +45,7 @@ import type { AgentchatChannelRuntime } from '../runtime.js'
 import type { OpenClawConfig } from './openclaw-types.js'
 import { getThreadClosures } from './thread-closures.js'
 import { getClient } from './sdk-client.js'
+import { hasAgentSendSince } from './send-tracker.js'
 import { decideReply, type GateCaller } from './gate.js'
 import type { GateInboundEvent, GateRawMessage, HistoryTurn } from './reply-gate.js'
 
@@ -192,11 +201,26 @@ async function handleMessage(
       metadata: { reply_to: event.messageId },
     })
   }
+  // Single-send invariant (how Hermes avoids double-sends by construction:
+  // its invoker discards the turn text; the tool is the only wire path). Under
+  // `automatic` delivery the final turn text is our fallback reply — but when
+  // the agent already sent into this conversation during the turn (via
+  // `agentchat_send_message` or the core message tool), that final text is
+  // redundant self-narration ("I've responded to @peer…"). Deliver it ONLY
+  // when the turn produced no send of its own.
+  const turnStartMs = Date.now()
   const deliver = async (payload: { text?: string; blocks?: unknown[] }) => {
     if (threadClosures.isClosed(event.conversationId)) {
       deps.logger.info(
         { conversationId: event.conversationId, messageId: event.messageId },
         'reply suppressed for locally closed thread',
+      )
+      return
+    }
+    if (hasAgentSendSince(deps.accountId, event.conversationId, turnStartMs)) {
+      deps.logger.info(
+        { conversationId: event.conversationId, messageId: event.messageId },
+        'final turn text suppressed — agent already sent its reply via a message tool this turn',
       )
       return
     }
@@ -248,7 +272,7 @@ async function handleMessage(
       if (!decision.reply) return
     }
 
-    // ── Dispatch (message_tool_only: agent sends via the tool, not auto) ──
+    // ── Dispatch the gated reply (mode per AGENTCHAT_SOURCE_REPLY_MODE) ──
     const { storePath, body: envelopeBody } = buildEnvelope({
       channel: 'AgentChat',
       from: conversationLabel,
@@ -292,10 +316,12 @@ async function handleMessage(
       recordInboundSession: session.recordInboundSession,
       dispatchReplyWithBufferedBlockDispatcher: channelRuntime.reply!
         .dispatchReplyWithBufferedBlockDispatcher! as never,
-      // The agent replies only by calling the message tool; its final turn
-      // text is not auto-delivered. This `deliver` fires only if the framework
-      // falls back to automatic source-reply delivery (e.g. message tool
-      // unavailable); a no_reply/silent turn sends nothing.
+      // Under `automatic` (the default) the framework hands the agent's final
+      // turn text to this `deliver`, which sends it to the source. Under the
+      // opt-in `message_tool_only` mode the turn text is suppressed and the
+      // agent sends via the message tool instead, so `deliver` only fires on a
+      // framework fallback. Either way a gated `no_reply` turn never runs, so
+      // nothing is sent.
       delivery: {
         deliver: async (payload) => {
           await deliver(payload as { text?: string; blocks?: unknown[] })
@@ -311,7 +337,7 @@ async function handleMessage(
           )
         },
       },
-      replyOptions: { sourceReplyDeliveryMode: 'message_tool_only' },
+      replyOptions: { sourceReplyDeliveryMode: resolveSourceReplyMode() },
       record: {
         onRecordError: (err: unknown) => {
           deps.logger.error(
@@ -374,6 +400,7 @@ async function runReplyGate(params: {
     ownHandle,
     nowMs,
     failOpen: gateFailOpen(),
+    timeoutMs: gateTimeoutMs(),
     caller: deps.gateCaller,
   })
 }
@@ -431,6 +458,7 @@ function readSeq(m: GateRawMessage): number {
 }
 
 const OFF_TOKENS = new Set(['0', 'false', 'off', 'no'])
+const ON_TOKENS = new Set(['1', 'true', 'on', 'yes'])
 
 /** Reply gate kill switch — set `AGENTCHAT_REPLY_GATE_ENABLED=0` to disable. */
 function gateEnabled(): boolean {
@@ -438,12 +466,52 @@ function gateEnabled(): boolean {
 }
 
 /**
- * On a gate failure, reply (fail-open, default) or stay silent (fail-closed via
- * `AGENTCHAT_REPLY_GATE_FAIL_OPEN=0`). Fail-open is self-correcting: a dropped
- * reply reads as a dead agent, and the gate re-runs on the next inbound.
+ * On a gate failure (model error / timeout / unparseable output), stay silent
+ * (fail-CLOSED, the default) or reply anyway (fail-open via
+ * `AGENTCHAT_REPLY_GATE_FAIL_OPEN=1`).
+ *
+ * Fail-closed is the safe default on a shared platform. If the model is down, a
+ * fail-open gate keeps voting "reply"; the compose then also fails and OpenClaw
+ * surfaces that error as a *sent* message, so two agents trade error messages
+ * forever — the very loop the gate exists to prevent. Silence under uncertainty
+ * cannot loop, and the gate re-runs on the next inbound once the model recovers.
  */
 function gateFailOpen(): boolean {
-  return !OFF_TOKENS.has((process.env.AGENTCHAT_REPLY_GATE_FAIL_OPEN ?? '').trim().toLowerCase())
+  return ON_TOKENS.has((process.env.AGENTCHAT_REPLY_GATE_FAIL_OPEN ?? '').trim().toLowerCase())
+}
+
+/**
+ * Decision-call timeout override (ms) via `AGENTCHAT_REPLY_GATE_TIMEOUT_MS`.
+ * The gate forces reasoning off so it's fast on any model, so the 20s default
+ * is generous; this is an escape hatch for genuinely slow self-hosted
+ * endpoints. A missing / non-numeric / non-positive value returns `undefined`,
+ * which lets the gate apply its own default (`DEFAULT_GATE_TIMEOUT_MS`).
+ */
+function gateTimeoutMs(): number | undefined {
+  const raw = process.env.AGENTCHAT_REPLY_GATE_TIMEOUT_MS
+  if (raw === undefined || raw.trim() === '') return undefined
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : undefined
+}
+
+/** Source-reply delivery modes OpenClaw supports for a channel turn. */
+type SourceReplyMode = 'automatic' | 'message_tool_only'
+
+/**
+ * Delivery mode for a gated reply. Default `automatic`: the gate already decided
+ * a reply is warranted, so the agent's final turn text is delivered through our
+ * outbound — which works no matter how the agent's tool profile is configured.
+ *
+ * `message_tool_only` (opt-in via `AGENTCHAT_SOURCE_REPLY_MODE=message_tool_only`)
+ * suppresses the turn text and requires the agent to send via the `message`
+ * tool. It gives the agent deliberate send control, but a restrictive tool
+ * profile (e.g. `coding`) strips that tool and the agent goes mute — so it is
+ * NOT the default. The reply gate, not this mode, is what prevents loops.
+ */
+function resolveSourceReplyMode(): SourceReplyMode {
+  return (process.env.AGENTCHAT_SOURCE_REPLY_MODE ?? '').trim().toLowerCase() === 'message_tool_only'
+    ? 'message_tool_only'
+    : 'automatic'
 }
 
 function handleGroupInvite(deps: InboundBridgeDeps, event: NormalizedGroupInvite): void {
