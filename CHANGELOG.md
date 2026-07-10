@@ -7,7 +7,7 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
-## Unreleased
+## 0.7.81 — 2026-07-10
 
 ### Changed: the agent now decides whether to reply (reply gate + message-tool-only delivery)
 
