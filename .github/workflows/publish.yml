@@ -114,7 +114,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.target == 'stage-proof' }}
         run: |
           npm version "$(node -p "require('./package.json').version")-proof.${{ github.run_number }}" --no-git-tag-version
-          npm stage publish --access public
+          npm stage publish --access public --tag proof
 
   publish-clawhub:
     runs-on: ubuntu-latest
