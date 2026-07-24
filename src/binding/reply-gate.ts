@@ -114,6 +114,13 @@ export interface GateInboundEvent {
   readonly conversationKind: 'direct' | 'group'
   readonly senderHandle: string
   readonly contentText: string
+  /** Group's human-readable name (server-resolved) — names the room instead of
+   *  an opaque id. Optional so callers predating the context block still work. */
+  readonly groupName?: string | null
+  readonly memberCount?: number | null
+  /** Handles @-mentioned, parsed server-side. The recipient tests its OWN
+   *  handle for membership (never a raw substring of the text). */
+  readonly mentions?: readonly string[]
 }
 
 /** A rehydrated conversation turn (OpenAI-style). */
@@ -311,16 +318,40 @@ export function buildDecisionMessages(params: {
   ]
 }
 
-function buildUserContent(params: {
+/**
+ * Render a message's arrival time as an unambiguous absolute UTC stamp,
+ * e.g. `2026-07-24 14:57 UTC`.
+ *
+ * Agents have no clock of their own. The gate reasons in *relative* pace
+ * (`formatGap`), but the composing turn also needs the *absolute* time to judge
+ * staleness and business-hours context, so it is surfaced alongside the pace
+ * signal in the compose turn. `ms` is epoch milliseconds (the inbound's
+ * `createdAt`/`receivedAt`).
+ */
+export function formatReceivedAt(ms: number): string {
+  if (!Number.isFinite(ms)) return 'an unknown time'
+  const iso = new Date(ms).toISOString() // e.g. 2026-07-24T14:57:10.000Z
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`
+}
+
+/**
+ * The compact conversation-context header — type, relationship, pace, turn
+ * depth, and group-addressing — derived purely from signals already in hand.
+ *
+ * Shared VERBATIM by the reply-gate's decision prompt (`buildUserContent`) and
+ * the compose turn (`inbound-bridge`), so the model that WRITES the reply sees
+ * the same signals the gate judged on instead of a decontextualised one-liner.
+ * Pure. The absolute arrival time is added by the compose turn on top of these
+ * lines (via `formatReceivedAt`) — it is not part of the gate's tuned prompt.
+ */
+export function formatConversationContext(params: {
   handle: string
   event: GateInboundEvent
-  history: readonly HistoryTurn[]
   signals: ConversationSignals | null
-  maxHistory: number
-}): string {
-  const { handle, event, history, signals, maxHistory } = params
-  const kind = event.conversationKind === 'group' ? 'group' : 'direct'
-  const lines: string[] = [`Conversation type: ${kind}`]
+  priorCount: number
+}): string[] {
+  const { handle, event, signals, priorCount } = params
+  const lines: string[] = [`Conversation type: ${formatConversationLabel(event)}`]
 
   if (signals) {
     lines.push(`Relationship: ${relationshipPhrase(signals)}`)
@@ -333,16 +364,50 @@ function buildUserContent(params: {
     }
   }
 
-  lines.push(`Prior messages in this thread: ${history.length}`)
+  lines.push(`Prior messages in this thread: ${priorCount}`)
 
-  if (kind === 'group') {
-    const mentioned = (event.contentText || '')
-      .toLowerCase()
-      .includes(`@${handle.toLowerCase()}`)
-    lines.push(
-      `Message directly addresses you: ${mentioned ? 'yes' : 'not explicitly'}`,
-    )
+  // Mention: state the positive fact ONLY when true. A "not mentioned" line is
+  // deliberately omitted — negative framing biases some models toward silence
+  // and others toward noise, so we drop the confusion entirely (a DM, where you
+  // are always the addressee, carries no such line either). Membership is
+  // tested against the server's word-boundary-parsed list, never a raw substring.
+  if (
+    event.conversationKind === 'group' &&
+    handle &&
+    (event.mentions ?? []).includes(handle.toLowerCase())
+  ) {
+    lines.push('You were @-mentioned in this message.')
   }
+
+  return lines
+}
+
+/** The room label: "direct", or a named group ("group \"Ops\" (5 members)"),
+ *  falling back to a bare "group" when the server supplied no name. Shared by
+ *  the gate header and the compose turn's gate-disabled fallback. */
+export function formatConversationLabel(event: GateInboundEvent): string {
+  if (event.conversationKind !== 'group') return 'direct'
+  let label = event.groupName ? `group "${event.groupName}"` : 'group'
+  if (event.memberCount != null) {
+    label += ` (${event.memberCount} member${event.memberCount === 1 ? '' : 's'})`
+  }
+  return label
+}
+
+function buildUserContent(params: {
+  handle: string
+  event: GateInboundEvent
+  history: readonly HistoryTurn[]
+  signals: ConversationSignals | null
+  maxHistory: number
+}): string {
+  const { handle, event, history, signals, maxHistory } = params
+  const lines: string[] = formatConversationContext({
+    handle,
+    event,
+    signals,
+    priorCount: history.length,
+  })
 
   lines.push('')
   const rendered = renderHistory(history, maxHistory)

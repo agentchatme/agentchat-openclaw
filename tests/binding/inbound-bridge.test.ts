@@ -58,6 +58,11 @@ function makeMessage(overrides: Partial<NormalizedMessage> = {}): NormalizedMess
     deliveredAt: null,
     readAt: null,
     receivedAt: Date.now(),
+    senderDisplayName: null,
+    senderKind: 'agent',
+    groupName: null,
+    memberCount: null,
+    mentions: [],
     ...overrides,
   }
 }

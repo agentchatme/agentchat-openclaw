@@ -152,29 +152,55 @@ describe('buildDecisionMessages', () => {
     expect(out[1]?.content).not.toContain('Pace:')
   })
 
-  it('flags explicit group addressing', () => {
+  it('states a mention only when the agent is in the server-parsed list', () => {
     const out = buildDecisionMessages({
       handle: 'me',
-      event: { conversationKind: 'group', senderHandle: 'bob', contentText: 'hey @me look here' },
+      event: {
+        conversationKind: 'group',
+        senderHandle: 'bob',
+        contentText: 'hey @me look here',
+        mentions: ['me'],
+      },
       history: [],
       signals,
     })
-    expect(out[1]?.content).toContain('Message directly addresses you: yes')
+    expect(out[1]?.content).toContain('You were @-mentioned in this message.')
   })
 
-  it('marks group messages not addressed to the agent', () => {
+  it('omits the mention line entirely when not mentioned (no negative framing)', () => {
     const out = buildDecisionMessages({
       handle: 'me',
-      event: { conversationKind: 'group', senderHandle: 'bob', contentText: 'anyone around?' },
+      event: {
+        conversationKind: 'group',
+        senderHandle: 'bob',
+        contentText: 'anyone around?',
+        mentions: [],
+      },
       history: [],
       signals,
     })
-    expect(out[1]?.content).toContain('Message directly addresses you: not explicitly')
+    expect(out[1]?.content).not.toContain('@-mentioned')
+    expect(out[1]?.content.toLowerCase()).not.toContain('addresses you')
   })
 
-  it('omits the addressing line for direct conversations', () => {
+  it('names the room when the server supplies a group name', () => {
+    const out = buildDecisionMessages({
+      handle: 'me',
+      event: {
+        conversationKind: 'group',
+        senderHandle: 'bob',
+        contentText: 'hi',
+        groupName: 'Ops',
+      },
+      history: [],
+      signals,
+    })
+    expect(out[1]?.content).toContain('Conversation type: group "Ops"')
+  })
+
+  it('shows no mention line for direct conversations', () => {
     const out = buildDecisionMessages({ handle: 'me', event, history: [], signals })
-    expect(out[1]?.content).not.toContain('Message directly addresses you')
+    expect(out[1]?.content).not.toContain('@-mentioned')
   })
 
   it('renders the tail of history as you/peer lines, newest-trimmed', () => {

@@ -47,7 +47,18 @@ import { getThreadClosures } from './thread-closures.js'
 import { getClient } from './sdk-client.js'
 import { hasAgentSendSince } from './send-tracker.js'
 import { decideReply, type GateCaller } from './gate.js'
-import type { GateInboundEvent, GateRawMessage, HistoryTurn } from './reply-gate.js'
+import {
+  computeConversationSignals,
+  formatConversationContext,
+  formatConversationLabel,
+  formatReceivedAt,
+} from './reply-gate.js'
+import type {
+  GateDecision,
+  GateInboundEvent,
+  GateRawMessage,
+  HistoryTurn,
+} from './reply-gate.js'
 
 /** How many recent messages to fetch for the gate's signals + history. */
 const GATE_HISTORY_LIMIT = 30
@@ -247,8 +258,9 @@ async function handleMessage(
     // Forced reply/no-reply decision BEFORE the agent turn. `no_reply` ends
     // here — no turn, nothing sent. This is the loop-breaker: silence is a
     // first-class outcome, so two agents stop instead of trading acks forever.
+    let gateContext: string[] | null = null
     if (gateEnabled()) {
-      const decision = await runReplyGate({
+      const { decision, context } = await runReplyGate({
         deps,
         event,
         body,
@@ -270,13 +282,42 @@ async function handleMessage(
         'reply gate decision',
       )
       if (!decision.reply) return
+      gateContext = context
     }
+
+    // ── Pipe context into the compose turn ──────────────────────────────
+    // Absolute arrival time ALWAYS (a stateless agent has no clock); the gate's
+    // relationship/pace/addressing signals too when the gate ran. This enriches
+    // the AGENT-FACING body only — RawBody/CommandBody below stay the untouched
+    // message text so any command parsing sees the raw content.
+    const contextHeader = [formatSenderLine(event), `Received: ${formatReceivedAt(ts)}`]
+    if (gateContext) {
+      contextHeader.push(...gateContext)
+    } else {
+      // Gate disabled: no signals to pipe, but still name the room and flag a
+      // mention so the compose turn isn't context-blind.
+      contextHeader.push(
+        `Conversation type: ${formatConversationLabel({
+          conversationKind: event.conversationKind,
+          senderHandle,
+          contentText: body,
+          groupName: event.groupName,
+          memberCount: event.memberCount,
+          mentions: event.mentions,
+        })}`,
+      )
+      const self = (selfHandle ?? '').replace(/^@/, '').toLowerCase()
+      if (event.conversationKind === 'group' && self && event.mentions.includes(self)) {
+        contextHeader.push('You were @-mentioned in this message.')
+      }
+    }
+    const agentBody = `${contextHeader.join('\n')}\n\n${body}`
 
     // ── Dispatch the gated reply (mode per AGENTCHAT_SOURCE_REPLY_MODE) ──
     const { storePath, body: envelopeBody } = buildEnvelope({
       channel: 'AgentChat',
       from: conversationLabel,
-      body,
+      body: agentBody,
       timestamp: ts,
     })
     const finalize = (
@@ -286,7 +327,7 @@ async function handleMessage(
     ).finalizeInboundContext
     const ctxPayload = finalize({
       Body: envelopeBody,
-      BodyForAgent: body,
+      BodyForAgent: agentBody,
       RawBody: body,
       CommandBody: body,
       From: `@${senderHandle}`,
@@ -359,6 +400,15 @@ async function handleMessage(
  * Run the reply gate for one inbound message: fetch recent history (best-effort)
  * and ask the agent's own model whether a reply is warranted.
  */
+/** One-line resolved sender identity for the compose header: display name +
+ *  handle, flagging a system agent so the model weights its words accordingly. */
+function formatSenderLine(event: NormalizedMessage): string {
+  const who = event.senderDisplayName
+    ? `${event.senderDisplayName} (@${event.sender})`
+    : `@${event.sender}`
+  return `From: ${event.senderKind === 'system' ? `${who}, a system agent` : who}`
+}
+
 async function runReplyGate(params: {
   deps: InboundBridgeDeps
   event: NormalizedMessage
@@ -367,7 +417,7 @@ async function runReplyGate(params: {
   selfHandle: string | undefined
   senderHandle: string
   nowMs: number
-}): ReturnType<typeof decideReply> {
+}): Promise<{ decision: GateDecision; context: string[] }> {
   const { deps, event, body, agentId, selfHandle, senderHandle, nowMs } = params
   const ownHandle = selfHandle ?? ''
 
@@ -383,18 +433,23 @@ async function runReplyGate(params: {
     )
   }
 
+  const bareHandle = ownHandle.replace(/^@/, '')
   const gateEvent: GateInboundEvent = {
     conversationKind: event.conversationKind,
     senderHandle,
     contentText: body,
+    groupName: event.groupName,
+    memberCount: event.memberCount,
+    mentions: event.mentions,
   }
+  const history = translateHistory(rawMessages, ownHandle, event.conversationKind, event.messageId)
 
-  return decideReply({
+  const decision = await decideReply({
     cfg: deps.gatewayCfg as OpenClawConfig,
     agentId,
-    handle: ownHandle.replace(/^@/, ''),
+    handle: bareHandle,
     event: gateEvent,
-    history: translateHistory(rawMessages, ownHandle, event.conversationKind, event.messageId),
+    history,
     rawMessages,
     triggerMessageId: event.messageId,
     ownHandle,
@@ -403,6 +458,23 @@ async function runReplyGate(params: {
     timeoutMs: gateTimeoutMs(),
     caller: deps.gateCaller,
   })
+
+  // Pipe the SAME signals the gate judged on into the compose turn. Cheap and
+  // pure — over the (≤GATE_HISTORY_LIMIT) messages already fetched — so the
+  // model that writes the reply is no longer flying blind on when/who/pace.
+  const signals = computeConversationSignals(rawMessages, {
+    ownHandle,
+    triggerMessageId: event.messageId,
+    nowMs,
+  })
+  const context = formatConversationContext({
+    handle: bareHandle,
+    event: gateEvent,
+    signals,
+    priorCount: history.length,
+  })
+
+  return { decision, context }
 }
 
 /**

@@ -66,6 +66,31 @@ const messageContentSchema = z
   })
   .passthrough()
 
+// Platform-authored trusted context block (server `message.context`). Every
+// field is optional/nullable so a message predating the enrichment still
+// validates — a missing block degrades the renderer to the bare-handle path.
+const messageContextSchema = z
+  .object({
+    sender: z
+      .object({
+        handle: z.string(),
+        display_name: z.string().nullable().optional(),
+        kind: z.enum(['agent', 'system']).optional(),
+      })
+      .passthrough()
+      .optional(),
+    conversation: z
+      .object({
+        type: z.enum(['direct', 'group']).optional(),
+        group_name: z.string().nullable().optional(),
+        member_count: z.number().int().nullable().optional(),
+      })
+      .passthrough()
+      .optional(),
+    mentions: z.array(z.string()).optional(),
+  })
+  .passthrough()
+
 const messageSchema = z
   .object({
     id: z.string(),
@@ -76,6 +101,7 @@ const messageSchema = z
     type: z.enum(['text', 'structured', 'file', 'system']),
     content: messageContentSchema,
     metadata: z.record(z.string(), z.unknown()).default({}),
+    context: messageContextSchema.optional(),
     // Per-recipient delivery state lives in `message_deliveries` since
     // migration 011 — the `messages` row no longer carries `status`,
     // `delivered_at`, or `read_at`. Fresh-send envelopes over WS omit
@@ -179,6 +205,17 @@ export interface NormalizedMessage {
   readonly deliveredAt: string | null
   readonly readAt: string | null
   readonly receivedAt: UnixMillis
+  // ─ Platform-authored trusted context (server `message.context`) ─
+  /** Sender's resolved display name, or null when unset / no context block. */
+  readonly senderDisplayName: string | null
+  /** 'system' = platform agent (weight its words as authoritative); 'agent' = peer. */
+  readonly senderKind: 'agent' | 'system'
+  /** Group's human-readable name (null for DMs / when the server omitted it). */
+  readonly groupName: string | null
+  readonly memberCount: number | null
+  /** Handles @-mentioned, parsed server-side (word-boundary). Test your OWN
+   *  handle for membership — never substring-match the raw text. */
+  readonly mentions: readonly string[]
 }
 
 export interface NormalizedReadReceipt {
@@ -345,6 +382,11 @@ function normalizeMessageNew(frame: InboundFrame): NormalizedMessage {
     deliveredAt: msg.delivered_at ?? null,
     readAt: msg.read_at ?? null,
     receivedAt: frame.receivedAt,
+    senderDisplayName: msg.context?.sender?.display_name ?? null,
+    senderKind: msg.context?.sender?.kind === 'system' ? 'system' : 'agent',
+    groupName: msg.context?.conversation?.group_name ?? null,
+    memberCount: msg.context?.conversation?.member_count ?? null,
+    mentions: (msg.context?.mentions ?? []).map((m) => m.toLowerCase()),
   }
 }
 
