@@ -76,6 +76,11 @@ function makeMessage(overrides: Partial<NormalizedMessage> = {}): NormalizedMess
     deliveredAt: null,
     readAt: null,
     receivedAt: Date.now(),
+    senderDisplayName: null,
+    senderKind: 'agent',
+    groupName: null,
+    memberCount: null,
+    mentions: [],
     ...overrides,
   }
 }
@@ -191,6 +196,77 @@ describe('inbound reply gate', () => {
     const bridge = makeBridge(noReplyCaller)
     await bridge(makeMessage({ conversationKind: 'group', conversationId: 'group_abc' }))
     expect(recordSpy).not.toHaveBeenCalled()
+  })
+
+  // ── Context pipe ──────────────────────────────────────────────────────
+  // The gate already computes when/who/pace; those signals are piped into the
+  // agent-facing body so the composing turn is no longer context-blind.
+
+  function dispatchedCtx(): Record<string, unknown> | undefined {
+    return (recordSpy.mock.calls[0]?.[0] as { ctxPayload?: Record<string, unknown> })?.ctxPayload
+  }
+
+  it('pipes arrival time + gate signals into BodyForAgent, leaving RawBody untouched', async () => {
+    const bridge = makeBridge(replyCaller)
+    await bridge(makeMessage())
+    expect(recordSpy).toHaveBeenCalledTimes(1)
+    const ctx = dispatchedCtx()
+    const bodyForAgent = String(ctx?.['BodyForAgent'] ?? '')
+    // Absolute arrival time (a stateless agent has no clock of its own).
+    expect(bodyForAgent).toContain('Received:')
+    expect(bodyForAgent).toContain('UTC')
+    // Gate signals piped verbatim (history mock is empty → first contact).
+    expect(bodyForAgent).toContain('Conversation type: direct')
+    expect(bodyForAgent).toContain('Relationship: first contact')
+    // Original message text is preserved under the header…
+    expect(bodyForAgent).toContain('can you review the spec?')
+    // …and the raw fields used for command parsing stay clean.
+    expect(ctx?.['RawBody']).toBe('can you review the spec?')
+    expect(ctx?.['CommandBody']).toBe('can you review the spec?')
+  })
+
+  it('still stamps arrival time + type when the gate is disabled (no signals to pipe)', async () => {
+    process.env.AGENTCHAT_REPLY_GATE_ENABLED = '0'
+    const bridge = makeBridge(replyCaller)
+    await bridge(makeMessage())
+    const bodyForAgent = String(dispatchedCtx()?.['BodyForAgent'] ?? '')
+    expect(bodyForAgent).toContain('Received:')
+    expect(bodyForAgent).toContain('Conversation type: direct')
+    // No gate ran, so no relationship/pace signal is fabricated.
+    expect(bodyForAgent).not.toContain('Relationship:')
+    expect(bodyForAgent).toContain('can you review the spec?')
+  })
+
+  it('surfaces resolved sender identity, group name, and mention', async () => {
+    const bridge = makeBridge(replyCaller)
+    await bridge(
+      makeMessage({
+        conversationKind: 'group',
+        conversationId: 'group_ops',
+        sender: 'bob',
+        senderDisplayName: 'Bob Builder',
+        groupName: 'Ops',
+        mentions: ['self-agent'], // config.agentHandle
+      }),
+    )
+    const bodyForAgent = String(dispatchedCtx()?.['BodyForAgent'] ?? '')
+    expect(bodyForAgent).toContain('From: Bob Builder (@bob)')
+    expect(bodyForAgent).toContain('group "Ops"')
+    expect(bodyForAgent).toContain('You were @-mentioned in this message.')
+  })
+
+  it('flags a system sender in the header', async () => {
+    const bridge = makeBridge(replyCaller)
+    await bridge(
+      makeMessage({
+        sender: 'chatfather',
+        senderDisplayName: 'Chatfather',
+        senderKind: 'system',
+      }),
+    )
+    expect(String(dispatchedCtx()?.['BodyForAgent'] ?? '')).toContain(
+      'From: Chatfather (@chatfather), a system agent',
+    )
   })
 
   // ── Single-send invariant ─────────────────────────────────────────────

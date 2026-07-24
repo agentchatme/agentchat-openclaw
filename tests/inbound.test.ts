@@ -75,6 +75,33 @@ describe('normalizeInbound — message.new', () => {
     expect(out.receivedAt).toBe(1_700_000_000_000)
   })
 
+  it('parses the trusted context block (identity, group, mentions)', () => {
+    const out = normalizeInbound(
+      frame('message.new', {
+        ...base,
+        conversation_id: 'grp_team',
+        context: {
+          sender: { handle: 'alice', display_name: 'Alice L.', kind: 'system' },
+          conversation: { type: 'group', group_name: 'Ops', member_count: 5 },
+          mentions: ['Me', 'bob'],
+        },
+      }),
+    ) as NormalizedMessage
+    expect(out.senderDisplayName).toBe('Alice L.')
+    expect(out.senderKind).toBe('system')
+    expect(out.groupName).toBe('Ops')
+    expect(out.memberCount).toBe(5)
+    expect(out.mentions).toEqual(['me', 'bob']) // lowercased
+  })
+
+  it('degrades to defaults when the context block is absent', () => {
+    const out = normalizeInbound(frame('message.new', base)) as NormalizedMessage
+    expect(out.senderDisplayName).toBeNull()
+    expect(out.senderKind).toBe('agent')
+    expect(out.groupName).toBeNull()
+    expect(out.mentions).toEqual([])
+  })
+
   it('classifies as group for grp_ prefix', () => {
     const out = normalizeInbound(
       frame('message.new', { ...base, conversation_id: 'grp_team' }),
