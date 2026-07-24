@@ -47,79 +47,102 @@ function profileToEntry(agent: {
   }
 }
 
+/**
+ * Directory implementations are module-level functions, not object methods.
+ *
+ * OpenClaw's runtime directory surface forwards `self` / `listPeersLive` /
+ * `listGroupsLive` / `listGroupMembers` as **detached** function references
+ * (`createRuntimeDirectoryLiveAdapter` in the plugin SDK pulls the method off
+ * the adapter and calls it standalone). A detached method has no `this`, so an
+ * implementation that reached a sibling via `this.listGroups!(...)` threw
+ * `Cannot read properties of undefined (reading 'listGroups')` and silently
+ * failed the caller — e.g. resolving a group target for `addParticipant`,
+ * which is why adding a member to a group crashed client-side.
+ *
+ * Standalone functions are `this`-free by construction, so they behave
+ * identically whether invoked as `adapter.listGroupsLive(...)` or forwarded
+ * detached. The `*Live` variants are literal aliases of their base impl so the
+ * two can never drift.
+ */
+
+type SelfFn = NonNullable<ChannelDirectoryAdapter['self']>
+type ListFn = NonNullable<ChannelDirectoryAdapter['listPeersLive']>
+type MembersFn = NonNullable<ChannelDirectoryAdapter['listGroupMembers']>
+
+const directorySelf: SelfFn = async ({ cfg, accountId }) => {
+  const config = resolveAccount(cfg, accountId)
+  if (!config) return null
+  const client = getClient({ accountId: accountId ?? 'default', config })
+  try {
+    const me = await client.getMe()
+    return profileToEntry(me)
+  } catch {
+    return null
+  }
+}
+
+const listPeers: ListFn = async ({ cfg, accountId, query, limit }) => {
+  const config = resolveAccount(cfg, accountId)
+  if (!config) return []
+  const q = (query ?? '').trim()
+  if (q.length < 2) return []
+  const client = getClient({ accountId: accountId ?? 'default', config })
+  try {
+    const result = await client.searchAgents(q, { limit: limit ?? 20 })
+    return result.agents.map(profileToEntry)
+  } catch {
+    return []
+  }
+}
+
+const listGroups: ListFn = async ({ cfg, accountId, query, limit }) => {
+  const config = resolveAccount(cfg, accountId)
+  if (!config) return []
+  const client = getClient({ accountId: accountId ?? 'default', config })
+  try {
+    const convs = await client.listConversations()
+    const q = (query ?? '').trim().toLowerCase()
+    const groupRows = convs.filter((c) => c.type === 'group')
+    const filtered = q
+      ? groupRows.filter((c) => (c.group_name ?? '').toLowerCase().includes(q))
+      : groupRows
+    const cap = limit ?? 50
+    return filtered.slice(0, cap).map((c) => ({
+      kind: 'group' as const,
+      id: c.id,
+      name: c.group_name ?? 'Untitled group',
+      ...(c.group_avatar_url ? { avatarUrl: c.group_avatar_url } : {}),
+    }))
+  } catch {
+    return []
+  }
+}
+
+const listGroupMembers: MembersFn = async ({ cfg, accountId, groupId, limit }) => {
+  const config = resolveAccount(cfg, accountId)
+  if (!config) return []
+  const client = getClient({ accountId: accountId ?? 'default', config })
+  try {
+    const group = await client.getGroup(groupId)
+    const cap = limit ?? 256
+    return group.members.slice(0, cap).map((m) => ({
+      kind: 'user' as const,
+      id: m.handle,
+      handle: m.handle,
+      name: m.display_name ?? m.handle,
+    }))
+  } catch {
+    return []
+  }
+}
+
 export const agentchatDirectoryAdapter: ChannelDirectoryAdapter = {
-  async self({ cfg, accountId }) {
-    const config = resolveAccount(cfg, accountId)
-    if (!config) return null
-    const client = getClient({ accountId: accountId ?? 'default', config })
-    try {
-      const me = await client.getMe()
-      return profileToEntry(me)
-    } catch {
-      return null
-    }
-  },
-
-  async listPeers({ cfg, accountId, query, limit }) {
-    const config = resolveAccount(cfg, accountId)
-    if (!config) return []
-    const q = (query ?? '').trim()
-    if (q.length < 2) return []
-    const client = getClient({ accountId: accountId ?? 'default', config })
-    try {
-      const result = await client.searchAgents(q, { limit: limit ?? 20 })
-      return result.agents.map(profileToEntry)
-    } catch {
-      return []
-    }
-  },
-
-  async listPeersLive(params) {
-    return this.listPeers!(params)
-  },
-
-  async listGroups({ cfg, accountId, query, limit }) {
-    const config = resolveAccount(cfg, accountId)
-    if (!config) return []
-    const client = getClient({ accountId: accountId ?? 'default', config })
-    try {
-      const convs = await client.listConversations()
-      const q = (query ?? '').trim().toLowerCase()
-      const groupRows = convs.filter((c) => c.type === 'group')
-      const filtered = q
-        ? groupRows.filter((c) => (c.group_name ?? '').toLowerCase().includes(q))
-        : groupRows
-      const cap = limit ?? 50
-      return filtered.slice(0, cap).map((c) => ({
-        kind: 'group' as const,
-        id: c.id,
-        name: c.group_name ?? 'Untitled group',
-        ...(c.group_avatar_url ? { avatarUrl: c.group_avatar_url } : {}),
-      }))
-    } catch {
-      return []
-    }
-  },
-
-  async listGroupsLive(params) {
-    return this.listGroups!(params)
-  },
-
-  async listGroupMembers({ cfg, accountId, groupId, limit }) {
-    const config = resolveAccount(cfg, accountId)
-    if (!config) return []
-    const client = getClient({ accountId: accountId ?? 'default', config })
-    try {
-      const group = await client.getGroup(groupId)
-      const cap = limit ?? 256
-      return group.members.slice(0, cap).map((m) => ({
-        kind: 'user' as const,
-        id: m.handle,
-        handle: m.handle,
-        name: m.display_name ?? m.handle,
-      }))
-    } catch {
-      return []
-    }
-  },
+  self: directorySelf,
+  listPeers,
+  // `*Live` are literal aliases of the base impls — never `this.listPeers!`,
+  // which breaks when the runtime forwards the method detached.
+  listPeersLive: listPeers,
+  listGroups,
+  listGroupsLive: listGroups,
+  listGroupMembers,
 }
