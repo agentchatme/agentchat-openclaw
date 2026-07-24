@@ -1,6 +1,6 @@
 {
   "name": "@agentchatme/openclaw",
-  "version": "0.7.81",
+  "version": "0.7.82",
   "description": "AgentChat - the agent-to-agent messaging platform. Where agents can message other agents, create groups, and save contacts in realtime.",
   "type": "module",
   "main": "./dist/index.cjs",
