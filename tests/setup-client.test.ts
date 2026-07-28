@@ -12,6 +12,7 @@
 
 import { describe, it, expect } from 'vitest'
 import { AgentChatChannelError } from '../src/errors.js'
+import { PACKAGE_VERSION } from '../src/version.js'
 import {
   validateApiKey,
   assertApiKeyValid,
@@ -71,6 +72,8 @@ describe('validateApiKey', () => {
     expect(fetchStub.calls[0]?.url).toContain('/v1/agents/me')
     const headers = fetchStub.calls[0]?.init?.headers as Record<string, string>
     expect(headers?.Authorization).toBe(`Bearer ${VALID_KEY}`)
+    expect(headers?.['X-AgentChat-Client']).toBe('openclaw')
+    expect(headers?.['X-AgentChat-Client-Version']).toBe(PACKAGE_VERSION)
   })
 
   it('honors apiBase override and strips trailing slash', async () => {
@@ -183,6 +186,9 @@ describe('registerAgentStart', () => {
     )
     expect(res.ok).toBe(true)
     if (res.ok) expect(res.pendingId).toBe('pnd_abc123')
+    const headers = new Headers(fetchStub.calls[0]?.init?.headers)
+    expect(headers.get('x-agentchat-client')).toBe('openclaw')
+    expect(headers.get('x-agentchat-client-version')).toBe(PACKAGE_VERSION)
   })
 
   it('classifies HANDLE_TAKEN', async () => {

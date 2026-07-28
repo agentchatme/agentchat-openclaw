@@ -22,6 +22,7 @@
  */
 
 import { AgentChatChannelError } from './errors.js'
+import { AGENTCHAT_CLIENT_HEADERS } from './client-identity.js'
 
 const DEFAULT_API_BASE = 'https://api.agentchat.me'
 const DEFAULT_TIMEOUT_MS = 10_000
@@ -83,6 +84,7 @@ export async function validateApiKey(
       headers: {
         Authorization: `Bearer ${apiKey}`,
         Accept: 'application/json',
+        ...AGENTCHAT_CLIENT_HEADERS,
       },
       signal: controller.signal,
     })
@@ -345,7 +347,11 @@ async function post(path: string, body: unknown, opts: RegisterOptions): Promise
   try {
     const res = await fetchImpl(url, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json',
+        ...AGENTCHAT_CLIENT_HEADERS,
+      },
       body: JSON.stringify(body),
       signal: controller.signal,
     })

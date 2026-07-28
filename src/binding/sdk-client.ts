@@ -12,7 +12,7 @@
 import { AgentChatClient, type AgentChatClientOptions } from 'agentchatme'
 
 import type { AgentchatChannelConfig } from '../config-schema.js'
-import { PACKAGE_VERSION } from '../version.js'
+import { withAgentChatClientIdentity } from '../client-identity.js'
 
 interface CacheEntry {
   readonly client: AgentChatClient
@@ -43,8 +43,8 @@ export function getClient({ accountId, config, options }: GetClientParams): Agen
     apiKey: config.apiKey,
     baseUrl: config.apiBase,
     ...options,
+    fetch: withAgentChatClientIdentity(options?.fetch ?? globalThis.fetch),
   })
-  void PACKAGE_VERSION // reserved for a future X-AgentChat-Plugin-Version header
 
   cache.set(accountId, {
     client,

@@ -15,6 +15,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 
 import { getClient, disposeClient, resetClientCacheForTest } from '../../src/binding/sdk-client.js'
 import type { AgentchatChannelConfig } from '../../src/config-schema.js'
+import { PACKAGE_VERSION } from '../../src/version.js'
 
 function makeConfig(apiKey: string, apiBase = 'https://api.agentchat.me'): AgentchatChannelConfig {
   return {
@@ -82,5 +83,27 @@ describe('sdk-client cache', () => {
 
   it('dispose of a missing accountId is a no-op', () => {
     expect(() => disposeClient('nonexistent')).not.toThrow()
+  })
+
+  it('attaches the OpenClaw identity to SDK requests', async () => {
+    const seen: Record<string, string> = {}
+    const fetchImpl = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      seen.client = headers.get('x-agentchat-client') ?? ''
+      seen.version = headers.get('x-agentchat-client-version') ?? ''
+      return new Response(JSON.stringify([]), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    const client = getClient({
+      accountId: 'identity',
+      config: makeConfig('ac_live_key_aaaaaaaaaaaaaaaaaaaaaaaa'),
+      options: { fetch: fetchImpl as typeof fetch },
+    })
+
+    await client.listConversations()
+
+    expect(seen).toEqual({ client: 'openclaw', version: PACKAGE_VERSION })
   })
 })

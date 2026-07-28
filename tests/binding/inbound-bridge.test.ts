@@ -11,6 +11,9 @@
  *   - Dispatcher is invoked for real inbound messages from peers.
  */
 
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest'
 
 import { createInboundBridge } from '../../src/binding/inbound-bridge.js'
@@ -109,8 +112,12 @@ function makeChannelRuntimeStub(opts: {
 }
 
 describe('inbound bridge', () => {
+  let workspaceDir: string
+  let gatewayCfg: { agents: { defaults: { workspace: string } } }
+
   beforeEach(() => {
-    process.env.OPENCLAW_PROFILE = `inbound-bridge-${Math.random().toString(36).slice(2)}`
+    workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-inbound-bridge-'))
+    gatewayCfg = { agents: { defaults: { workspace: workspaceDir } } }
     // These tests cover dispatch wiring; the reply gate is exercised in
     // tests/binding/inbound-gate.test.ts and tests/binding/gate.test.ts.
     process.env.AGENTCHAT_REPLY_GATE_ENABLED = '0'
@@ -118,8 +125,8 @@ describe('inbound bridge', () => {
 
   afterEach(() => {
     resetThreadClosuresForTest()
-    delete process.env.OPENCLAW_PROFILE
     delete process.env.AGENTCHAT_REPLY_GATE_ENABLED
+    fs.rmSync(workspaceDir, { recursive: true, force: true })
   })
 
   it('ignores messages from our own handle (self-echo filter)', async () => {
@@ -131,7 +138,7 @@ describe('inbound bridge', () => {
       logger: emptyLogger,
       runtime,
       channelRuntime: makeChannelRuntimeStub({ dispatcher }) as never,
-      gatewayCfg: {},
+      gatewayCfg,
       selfHandle: 'self-agent',
     })
     await bridge(makeMessage({ sender: 'self-agent' }))
@@ -148,7 +155,7 @@ describe('inbound bridge', () => {
       logger: emptyLogger,
       runtime,
       channelRuntime: makeChannelRuntimeStub({ dispatcher }) as never,
-      gatewayCfg: {},
+      gatewayCfg,
       selfHandle: 'self-agent',
     })
     await bridge(makeMessage({ sender: 'peer-agent' }))
@@ -158,14 +165,14 @@ describe('inbound bridge', () => {
   it('does not dispatch messages for locally closed threads', async () => {
     const dispatcher = vi.fn().mockResolvedValue(undefined)
     const runtime = makeRuntimeStub()
-    getThreadClosures({}, 'default').close('conv_closed', 'stop')
+    getThreadClosures(gatewayCfg, 'default').close('conv_closed', 'stop')
     const bridge = createInboundBridge({
       accountId: 'default',
       config,
       logger: emptyLogger,
       runtime,
       channelRuntime: makeChannelRuntimeStub({ dispatcher }) as never,
-      gatewayCfg: {},
+      gatewayCfg,
       selfHandle: 'self-agent',
     })
     await bridge(makeMessage({ sender: 'peer-agent', conversationId: 'conv_closed' }))
@@ -176,7 +183,7 @@ describe('inbound bridge', () => {
   it('suppresses delivery when the thread is closed after dispatch starts but before reply delivery', async () => {
     const runtime = makeRuntimeStub()
     const dispatcher = vi.fn(async (params: { dispatcherOptions: { deliver: (payload: { text?: string }) => Promise<void> } }) => {
-      getThreadClosures({}, 'default').close('conv_inflight', 'closed mid-flight')
+      getThreadClosures(gatewayCfg, 'default').close('conv_inflight', 'closed mid-flight')
       await params.dispatcherOptions.deliver({ text: 'hello back' })
     })
     const bridge = createInboundBridge({
@@ -185,7 +192,7 @@ describe('inbound bridge', () => {
       logger: emptyLogger,
       runtime,
       channelRuntime: makeChannelRuntimeStub({ dispatcher }) as never,
-      gatewayCfg: {},
+      gatewayCfg,
       selfHandle: 'self-agent',
     })
     await bridge(makeMessage({ sender: 'peer-agent', conversationId: 'conv_inflight' }))
@@ -201,7 +208,7 @@ describe('inbound bridge', () => {
       logger: emptyLogger,
       runtime: makeRuntimeStub(),
       channelRuntime: makeChannelRuntimeStub({ dispatcher }) as never,
-      gatewayCfg: {},
+      gatewayCfg,
       selfHandle: 'self-agent',
     })
     await bridge(makeMessage({ content: {} }))
@@ -220,7 +227,7 @@ describe('inbound bridge', () => {
       runtime: makeRuntimeStub(),
       // No channelRuntime → no dispatcher available.
       channelRuntime: undefined,
-      gatewayCfg: {},
+      gatewayCfg,
       selfHandle: 'self-agent',
     })
     await expect(bridge(makeMessage())).resolves.toBeUndefined()
@@ -248,7 +255,7 @@ describe('inbound bridge', () => {
       logger: emptyLogger,
       runtime: makeRuntimeStub(),
       channelRuntime: channelRuntime as never,
-      gatewayCfg: {},
+      gatewayCfg,
       selfHandle: 'self-agent',
     })
     await bridge(
@@ -270,7 +277,7 @@ describe('inbound bridge', () => {
       logger: emptyLogger,
       runtime: makeRuntimeStub(),
       channelRuntime: makeChannelRuntimeStub({ dispatcher }) as never,
-      gatewayCfg: {},
+      gatewayCfg,
       selfHandle: 'self-agent',
     })
     const typing: NormalizedInbound = {

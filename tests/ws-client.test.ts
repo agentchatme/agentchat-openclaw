@@ -22,6 +22,7 @@ import { AgentchatWsClient } from '../src/ws-client.js'
 import { parseChannelConfig, type AgentchatChannelConfig } from '../src/config-schema.js'
 import type { Logger } from '../src/log.js'
 import { createNoopMetrics } from '../src/metrics.js'
+import { PACKAGE_VERSION } from '../src/version.js'
 
 const VALID_KEY = 'ac_live_' + 'x'.repeat(20)
 
@@ -208,6 +209,8 @@ describe('AgentchatWsClient — happy path', () => {
     expect(JSON.parse(sock.sent[0]!)).toEqual({
       type: 'hello',
       api_key: VALID_KEY,
+      client: 'openclaw',
+      client_version: PACKAGE_VERSION,
     })
 
     sock.doMessage({ type: 'hello.ok', payload: {} })

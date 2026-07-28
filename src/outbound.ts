@@ -33,6 +33,7 @@ import { CircuitBreaker, retryWithPolicy, type CircuitBreakerOptions, type Retry
 import type { AgentchatChannelConfig } from './config-schema.js'
 import type { UnixMillis } from './types.js'
 import { PACKAGE_VERSION } from './version.js'
+import { AGENTCHAT_CLIENT_HEADERS } from './client-identity.js'
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
@@ -223,6 +224,7 @@ export class OutboundAdapter {
       'authorization': `Bearer ${this.config.apiKey}`,
       'content-type': 'application/json',
       'user-agent': `@agentchatme/openclaw/${PACKAGE_VERSION} (+attempt=${attempt})`,
+      ...AGENTCHAT_CLIENT_HEADERS,
     }
 
     let res: Response

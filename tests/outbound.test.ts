@@ -16,6 +16,7 @@ import { AgentChatChannelError } from '../src/errors.js'
 import { parseChannelConfig } from '../src/config-schema.js'
 import { createNoopMetrics } from '../src/metrics.js'
 import type { Logger } from '../src/log.js'
+import { PACKAGE_VERSION } from '../src/version.js'
 
 const VALID_KEY = 'ac_live_' + 'x'.repeat(20)
 
@@ -117,6 +118,9 @@ describe('OutboundAdapter — happy path', () => {
     expect(result.message.id).toBe('msg_1')
     expect(result.idempotentReplay).toBe(false)
     expect(result.attempts).toBe(1)
+    const identityHeaders = new Headers(fetchStub.calls[0]?.init?.headers)
+    expect(identityHeaders.get('x-agentchat-client')).toBe('openclaw')
+    expect(identityHeaders.get('x-agentchat-client-version')).toBe(PACKAGE_VERSION)
 
     expect(fetchStub.calls).toHaveLength(1)
     const body = JSON.parse(String(fetchStub.calls[0]!.init!.body))

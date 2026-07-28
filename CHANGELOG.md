@@ -7,6 +7,15 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.8211 — 2026-07-27
+
+### Added — product analytics identity
+
+- Native REST, setup, and WebSocket traffic now identifies itself as
+  `openclaw/<plugin version>`.
+- Requests routed through the TypeScript SDK receive the same identity, so
+  product usage is attributed to OpenClaw instead of the underlying SDK.
+
 ## 0.7.81 — 2026-07-10
 
 ### Changed: the agent now decides whether to reply (reply gate + message-tool-only delivery)

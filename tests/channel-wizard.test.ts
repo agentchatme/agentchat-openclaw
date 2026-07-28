@@ -25,7 +25,10 @@
  * test control.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest'
 
 vi.mock('../src/setup-client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/setup-client.js')>()
@@ -139,7 +142,12 @@ beforeEach(() => {
   rVerify.mockReset()
 })
 
-const emptyCfg = {} as never
+const wizardWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-openclaw-wizard-'))
+afterAll(() => fs.rmSync(wizardWorkspace, { recursive: true, force: true }))
+
+const emptyCfg = {
+  agents: { defaults: { workspace: wizardWorkspace } },
+} as never
 const configuredCfg = applyAgentchatAccountPatch(emptyCfg, 'default', {
   apiKey: 'ac_live_abcdef0123456789abcd',
   agentHandle: 'alice',

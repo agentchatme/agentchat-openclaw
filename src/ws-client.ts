@@ -49,6 +49,8 @@ import {
 } from './state-machine.js'
 import type { AgentchatChannelConfig } from './config-schema.js'
 import type { UnixMillis } from './types.js'
+import { AGENTCHAT_CLIENT_NAME } from './client-identity.js'
+import { PACKAGE_VERSION } from './version.js'
 
 // HELLO handshake must resolve faster than the server's 5s cutoff — we give
 // ourselves 4s so a clean close + reconnect happens before the server drops.
@@ -344,7 +346,12 @@ export class AgentchatWsClient {
     // reject any non-hello frame before `hello.ok` and close 1008.
     try {
       this.ws.send(
-        JSON.stringify({ type: 'hello', api_key: this.config.apiKey }),
+        JSON.stringify({
+          type: 'hello',
+          api_key: this.config.apiKey,
+          client: AGENTCHAT_CLIENT_NAME,
+          client_version: PACKAGE_VERSION,
+        }),
       )
     } catch (err) {
       this.emitError(
