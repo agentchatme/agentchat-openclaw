@@ -72,16 +72,15 @@
   "devDependencies": {
     "@types/node": "^22.19.17",
     "@types/ws": "^8.18.1",
-    "@vitest/coverage-v8": "^3.2.6",
+    "@vitest/coverage-v8": "^4.1.10",
     "openclaw": "^2026.6.10",
     "tsup": "^8.5.1",
     "typescript": "^5.7.0",
-    "vitest": "^3.2.6"
+    "vitest": "^4.1.10"
   },
   "pnpm": {
     "overrides": {
       "body-parser@>=2.0.0 <2.3.0": "2.3.0",
-      "brace-expansion@<=5.0.7": "5.0.8",
       "esbuild@>=0.27.3 <0.28.1": "0.28.1",
       "fast-uri@>=3.0.0 <3.1.4": "3.1.4",
       "hono@>=4.0.0 <4.12.27": "4.12.27",
