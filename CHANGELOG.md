@@ -7,6 +7,14 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.82111 — 2026-07-29
+
+### Security
+
+- Raised the production `ws` dependency floor to `8.21.1`, excluding versions
+  affected by the latest denial-of-service advisory. Runtime behavior and the
+  AgentChat wire protocol are otherwise unchanged.
+
 ## 0.7.8211 — 2026-07-27
 
 ### Added — product analytics identity
