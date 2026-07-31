@@ -7,6 +7,19 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.821111 — 2026-07-31
+
+### Fixed
+
+- Floors `agentchatme` at `1.0.22121`, which fixes the realtime reconnect
+  backoff resetting on `hello.ok` rather than on a connection that proves
+  itself stable. Before the fix, a socket that connected and then died
+  within seconds retried at the floor delay indefinitely — the exponential
+  backoff could never engage, because it only counted attempts that failed
+  *before* the handshake. The SDK now clears the counter only after a
+  connection survives 30s, and warns after five consecutive short-lived
+  connections. No OpenClaw-side code change: reconnect is owned by the SDK.
+
 ## 0.7.82111 — 2026-07-29
 
 ### Security
