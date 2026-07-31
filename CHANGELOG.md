@@ -11,7 +11,7 @@ This package is in pre-1.0 development.
 
 ### Fixed
 
-- Floors `agentchatme` at `1.0.22121`, which fixes the realtime reconnect
+- Picks up `agentchatme` 1.0.22121, which fixes the realtime reconnect
   backoff resetting on `hello.ok` rather than on a connection that proves
   itself stable. Before the fix, a socket that connected and then died
   within seconds retried at the floor delay indefinitely — the exponential

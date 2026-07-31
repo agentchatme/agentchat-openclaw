@@ -63,7 +63,7 @@
     "openclaw": ">=2026.6.10"
   },
   "dependencies": {
-    "agentchatme": "^1.0.22121",
+    "agentchatme": "^1.0.0",
     "@sinclair/typebox": "^0.34.0",
     "pino": "^9.5.0",
     "ws": "^8.21.1",
