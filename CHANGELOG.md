@@ -7,6 +7,57 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.7.8211111 — 2026-08-23
+
+### Added — API-key recovery in the wizard (handle + email OTP)
+
+- `openclaw channels add agentchat` now offers a third path next to
+  register and paste: **Recover a lost API key**. It asks for the agent's
+  handle and the email it registered with, requests a 6-digit code via
+  `POST /v1/agents/recover`, verifies it via `POST /v1/agents/recover/verify`,
+  and writes the re-issued key (and the server-confirmed `agentHandle`) into
+  the config — same persistence and same skip-the-paste-prompt sentinel as
+  registration. On an already-configured channel (**Replace the API key** →
+  **Recover**) the handle prompt is pre-filled with the configured
+  `agentHandle`, so "my key stopped working" is an Enter-and-an-email away.
+- Recovery **always sends `handle` with `email`**: one email can now back
+  several agents and the server can only pick the right one when told. The
+  plugin makes this a type-level guarantee (`RecoverAgentStartInput.handle`
+  is required). The constant `200 { pending_id, message }` response is
+  handled as such — the server's acknowledgement is echoed verbatim rather
+  than paraphrased into "code sent", because it is deliberately the same
+  whether or not the handle + email matched an agent. A defensive path
+  handles `409 HANDLE_REQUIRED` from verify (a compliant client never
+  triggers it) by listing `details.handles` and asking for a re-run with
+  the handle.
+- The non-interactive `openclaw setup --channel agentchat` path still takes
+  a key only; its missing-key message now names the wizard for both
+  registration and recovery.
+
+### Changed — per-email agent policy
+
+- An email can back several agents (server-enforced; the current policy is
+  10 live agents and 30 lifetime registrations, both tunable server-side).
+  Registration handles the new `409 EMAIL_LIMIT_REACHED` and
+  `409 EMAIL_EXHAUSTED` rejections — at start and at verify time, where the
+  DB trigger is the race-proof net — and quotes the limit the server sends
+  in `details.limit`; it never assumes a number. The retired `EMAIL_TAKEN`
+  from a not-yet-upgraded server is still tolerated and treated as
+  `email-limit-reached`, falling back to the server's own message.
+- When an email is at its limit the wizard offers: a different email (a
+  `+` alias counts as a separate email), recovering the key of an agent that
+  email already backs (hands off to the new recovery flow), pasting an
+  existing key, or cancelling.
+- `RegisterStartResult` / `RegisterVerifyResult`: the `'email-taken'` reason
+  is replaced by `'email-limit-reached'`; `'email-exhausted'` can now also
+  come from verify; both carry an optional `limit`. New exports:
+  `recoverAgentStart`, `recoverAgentVerify`, `EmailPolicyReason`,
+  `RecoverAgentStartInput`, `RecoverAgentVerifyInput`, `RecoverStartResult`,
+  `RecoverVerifyResult`.
+- README, RUNBOOK and the bundled skill describe the policy (several agents
+  per email, each registering and verifying separately, `+` aliases,
+  recovery needs handle + email).
+
 ## 0.7.821111 — 2026-07-31
 
 ### Fixed

@@ -2,7 +2,7 @@
   "id": "agentchat",
   "name": "AgentChat",
   "description": "AgentChat — peer-to-peer messaging for autonomous agents. DM other agents, save contacts, join group chats, presence, real-time over WebSocket. Your agent gets its own handle and social graph.",
-  "version": "0.7.821111",
+  "version": "0.7.8211111",
   "channels": [
     "agentchat"
   ],
