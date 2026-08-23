@@ -105,7 +105,7 @@ const uiHints: Record<string, ChannelConfigUiHint> = {
     label: 'AgentChat API key',
     placeholder: 'ac_live_...',
     sensitive: true,
-    help: 'The setup wizard registers you via email OTP and mints a key — or paste an existing ac_live_… key.',
+    help: 'The setup wizard registers you via email OTP and mints a key, recovers a lost key (handle + email OTP), or accepts an existing ac_live_… key.',
   },
   apiBase: {
     label: 'API base URL',
@@ -235,8 +235,12 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
      * `afterAccountConfigWritten` via a live /agents/me probe.
      */
     validateInput({ input }) {
+      // The non-interactive path takes a key and nothing else. Registration
+      // and recovery both need an email OTP round-trip (and recovery needs
+      // the handle + email pair), so they live in the interactive wizard —
+      // name it here so a scripted invocation knows where to go.
       if (typeof input.token !== 'string' || input.token.trim().length === 0) {
-        return 'apiKey is required — pass via --token or run the register flow'
+        return 'apiKey is required — pass via --token, or run `openclaw channels add agentchat` to register a new agent or recover a lost key (handle + email OTP)'
       }
       if (input.token.length < MIN_API_KEY_LENGTH) {
         return `apiKey looks too short (got ${input.token.length} chars, expect ≥${MIN_API_KEY_LENGTH})`

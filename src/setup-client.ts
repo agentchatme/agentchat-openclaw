@@ -3,6 +3,8 @@
  *   - verify an API key is live before finalizing setup (`validateApiKey`)
  *   - drive the email-OTP self-registration flow for agents without a key yet
  *     (`registerAgentStart` → `registerAgentVerify`)
+ *   - drive the email-OTP recovery flow that re-issues a lost API key
+ *     (`recoverAgentStart` → `recoverAgentVerify`)
  *
  * Why this lives separately from `outbound.ts`:
  *   - `outbound.ts` is the hot-path message sender. It wants retries, a circuit
@@ -13,9 +15,26 @@
  *     partial-config path during registration.
  *
  * The server endpoints this module targets are stable AgentChat REST calls:
- *   - `GET  /v1/agents/me`          → 200 OK when the key authenticates
- *   - `POST /v1/register`           → 200 with `{ pending_id }`
- *   - `POST /v1/register/verify`    → 201 with `{ agent, api_key }` on success
+ *   - `GET  /v1/agents/me`               → 200 OK when the key authenticates
+ *   - `POST /v1/register`                → 200 with `{ pending_id }`
+ *   - `POST /v1/register/verify`         → 201 with `{ agent, api_key }` on success
+ *   - `POST /v1/agents/recover`          → 200 with `{ pending_id, message }` — always,
+ *                                          whether or not the email + handle match
+ *                                          a live agent (no existence leak)
+ *   - `POST /v1/agents/recover/verify`   → 200 with `{ handle, api_key }` on success
+ *
+ * Registration and recovery deliberately bypass the `agentchatme` SDK: the
+ * SDK's `recover(email)` predates the handle + email recovery contract and
+ * has no way to send `handle`, and the pinned SDK floor cannot move until a
+ * compatible SDK is published. Owning these four calls here keeps the plugin
+ * on the current server contract regardless of which SDK version resolves.
+ *
+ * Per-email policy (server-enforced, the numbers live in the server's
+ * `agent_email_policy` row and are NOT hard-coded here): an email can back
+ * up to `max_active` live agents and `max_lifetime` registrations overall.
+ * The server quotes the number that applies in `details.limit`; every
+ * user-facing string built from these results must quote that value rather
+ * than assume one.
  *
  * All methods return strongly-typed result unions — setup UIs can `switch` on
  * the discriminant without guessing at HTTP status codes.
@@ -168,6 +187,21 @@ export interface RegisterAgentStartInput {
   readonly description?: string
 }
 
+/**
+ * Per-email policy rejections, shared by `/register` and `/register/verify`
+ * (the pre-check fires at start; the DB trigger is the race-proof net at
+ * verify time, and the server maps both to the same 409 shapes).
+ *
+ *   - `email-limit-reached` — the email already backs the maximum number of
+ *     live agents. Also what the retired `EMAIL_TAKEN` code from a server
+ *     that predates the multi-agent policy collapses into: that server
+ *     allowed exactly one live agent per email, so "taken" means "at its
+ *     limit" — just without a `limit` to quote.
+ *   - `email-exhausted` — the email has used up its lifetime registration
+ *     budget (deleted agents count). Only a different email helps.
+ */
+export type EmailPolicyReason = 'email-limit-reached' | 'email-exhausted'
+
 export type RegisterStartResult =
   | { readonly ok: true; readonly pendingId: string }
   | {
@@ -175,8 +209,7 @@ export type RegisterStartResult =
       readonly reason:
         | 'invalid-handle'
         | 'handle-taken'
-        | 'email-taken'
-        | 'email-exhausted'
+        | EmailPolicyReason
         | 'rate-limited'
         | 'otp-failed'
         | 'network-error'
@@ -185,6 +218,13 @@ export type RegisterStartResult =
       readonly message: string
       readonly status?: number
       readonly retryAfterSeconds?: number
+      /**
+       * The policy number the server quoted in `details.limit` for an
+       * `email-limit-reached` / `email-exhausted` rejection. Absent when the
+       * server did not send one (legacy `EMAIL_TAKEN`); callers must then
+       * fall back to `message` instead of guessing a number.
+       */
+      readonly limit?: number
     }
 
 export interface RegisterAgentVerifyInput {
@@ -205,7 +245,7 @@ export type RegisterVerifyResult =
         | 'invalid-code'
         | 'rate-limited'
         | 'handle-taken'
-        | 'email-taken'
+        | EmailPolicyReason
         | 'network-error'
         | 'server-error'
         | 'unexpected-shape'
@@ -213,6 +253,8 @@ export type RegisterVerifyResult =
       readonly message: string
       readonly status?: number
       readonly retryAfterSeconds?: number
+      /** See `RegisterStartResult.limit`. */
+      readonly limit?: number
     }
 
 export interface RegisterOptions {
@@ -237,7 +279,7 @@ export async function registerAgentStart(
     return { ok: false, reason: 'network-error', message: 'request timed out' }
   }
 
-  const body = (res.body as { pending_id?: unknown; code?: unknown; message?: unknown }) ?? {}
+  const body = (res.body as { pending_id?: unknown; code?: unknown; message?: unknown; details?: unknown }) ?? {}
 
   if (res.status === 200) {
     if (typeof body.pending_id !== 'string') {
@@ -257,8 +299,10 @@ export async function registerAgentStart(
   if (res.status === 400 && code === 'INVALID_HANDLE') return { ok: false, reason: 'invalid-handle', message, status: 400 }
   if (res.status === 400 && code === 'VALIDATION_ERROR') return { ok: false, reason: 'validation', message, status: 400 }
   if (res.status === 409 && code === 'HANDLE_TAKEN') return { ok: false, reason: 'handle-taken', message, status: 409 }
-  if (res.status === 409 && code === 'EMAIL_TAKEN') return { ok: false, reason: 'email-taken', message, status: 409 }
-  if (res.status === 409 && code === 'EMAIL_EXHAUSTED') return { ok: false, reason: 'email-exhausted', message, status: 409 }
+  const emailPolicy = res.status === 409 ? classifyEmailPolicyRejection(code) : undefined
+  if (emailPolicy) {
+    return { ok: false, reason: emailPolicy, message, status: 409, limit: readPolicyLimit(body.details) }
+  }
   if (res.status === 429) {
     return {
       ok: false,
@@ -284,6 +328,7 @@ export async function registerAgentVerify(
   const body = (res.body ?? {}) as {
     code?: unknown
     message?: unknown
+    details?: unknown
     agent?: { handle?: unknown; display_name?: unknown; email?: unknown; created_at?: unknown }
     api_key?: unknown
   }
@@ -323,7 +368,170 @@ export async function registerAgentVerify(
   if (res.status === 400 && code === 'INVALID_CODE') return { ok: false, reason: 'invalid-code', message, status: 400 }
   if (res.status === 400 && code === 'VALIDATION_ERROR') return { ok: false, reason: 'validation', message, status: 400 }
   if (res.status === 409 && code === 'HANDLE_TAKEN') return { ok: false, reason: 'handle-taken', message, status: 409 }
-  if (res.status === 409 && code === 'EMAIL_TAKEN') return { ok: false, reason: 'email-taken', message, status: 409 }
+  // The verify-time insert runs under the same per-email policy as the
+  // start pre-check (a DB trigger is the race-proof net), so the same
+  // 409 shapes can surface here when sibling registrations raced us.
+  const emailPolicy = res.status === 409 ? classifyEmailPolicyRejection(code) : undefined
+  if (emailPolicy) {
+    return { ok: false, reason: emailPolicy, message, status: 409, limit: readPolicyLimit(body.details) }
+  }
+  if (res.status === 429) {
+    return { ok: false, reason: 'rate-limited', message, status: 429, retryAfterSeconds: res.retryAfterSeconds }
+  }
+  return { ok: false, reason: 'server-error', status: res.status, message }
+}
+
+// ─── API-key recovery (handle + email + OTP) ────────────────────────────
+
+export interface RecoverAgentStartInput {
+  /** Email the agent registered with. Normalized server-side (lowercase/trim). */
+  readonly email: string
+  /**
+   * Handle of the agent whose key is being re-issued. Required — not
+   * optional — because one email can back several agents and the server
+   * can only pick the right one when told. A client that omits it gets a
+   * `HANDLE_REQUIRED` at verify time on a multi-agent email; this type
+   * makes that path unreachable from the plugin.
+   */
+  readonly handle: string
+}
+
+export type RecoverStartResult =
+  | {
+      readonly ok: true
+      readonly pendingId: string
+      /**
+       * The server's generic acknowledgement. It is deliberately the same
+       * whether or not the email + handle matched a live agent, so surface
+       * it verbatim — do not paraphrase it into "code sent".
+       */
+      readonly message: string
+    }
+  | {
+      readonly ok: false
+      readonly reason: 'validation' | 'rate-limited' | 'network-error' | 'server-error' | 'unexpected-shape'
+      readonly message: string
+      readonly status?: number
+      readonly retryAfterSeconds?: number
+    }
+
+export interface RecoverAgentVerifyInput {
+  readonly pendingId: string
+  readonly code: string
+}
+
+export type RecoverVerifyResult =
+  | {
+      readonly ok: true
+      /** Freshly minted key. The previous key is revoked the moment this is issued. */
+      readonly apiKey: string
+      /** Handle the new key authenticates as — the source of truth for `agentHandle`. */
+      readonly handle: string
+    }
+  | {
+      readonly ok: false
+      readonly reason:
+        | 'expired'
+        | 'invalid-code'
+        | 'rate-limited'
+        | 'handle-required'
+        | 'network-error'
+        | 'server-error'
+        | 'unexpected-shape'
+        | 'validation'
+      readonly message: string
+      readonly status?: number
+      readonly retryAfterSeconds?: number
+      /**
+       * `handle-required` only: the live handles on that email, in
+       * registration order. The server lists them here and nowhere else —
+       * the caller has just proven inbox control. Show them and ask the
+       * user to run recovery again naming one.
+       */
+      readonly handles?: readonly string[]
+    }
+
+/**
+ * Kick off a recovery. The server always answers `200 { pending_id, message }`
+ * — for a matching agent it emails a 6-digit code; for a non-matching
+ * email + handle it mints a decoy `pending_id` so step 2 behaves identically
+ * (the code simply never validates). Nothing in this response reveals
+ * whether the agent exists.
+ */
+export async function recoverAgentStart(
+  input: RecoverAgentStartInput,
+  opts: RegisterOptions = {},
+): Promise<RecoverStartResult> {
+  const res = await post('/v1/agents/recover', { email: input.email, handle: input.handle }, opts)
+  if (res.kind === 'network') return { ok: false, reason: 'network-error', message: res.message }
+  if (res.kind === 'timeout') return { ok: false, reason: 'network-error', message: 'request timed out' }
+
+  const body = (res.body ?? {}) as { pending_id?: unknown; code?: unknown; message?: unknown }
+  const message = typeof body.message === 'string' ? body.message : `status ${res.status}`
+
+  if (res.status === 200) {
+    if (typeof body.pending_id !== 'string') {
+      // A server that predates the handle + email contract omits
+      // `pending_id` when nothing matched the email — and sends no code.
+      // Stop here rather than let the user wait on an email that is not
+      // coming.
+      return {
+        ok: false,
+        reason: 'unexpected-shape',
+        status: 200,
+        message:
+          'AgentChat did not start a recovery (no pending_id in the response). Check that the email is the one this agent registered with.',
+      }
+    }
+    return { ok: true, pendingId: body.pending_id, message }
+  }
+
+  const code = typeof body.code === 'string' ? body.code : ''
+  if (res.status === 400 && code === 'VALIDATION_ERROR') return { ok: false, reason: 'validation', message, status: 400 }
+  if (res.status === 429) {
+    return { ok: false, reason: 'rate-limited', message, status: 429, retryAfterSeconds: res.retryAfterSeconds }
+  }
+  return { ok: false, reason: 'server-error', status: res.status, message }
+}
+
+/** Verify the recovery code and receive the re-issued API key. */
+export async function recoverAgentVerify(
+  input: RecoverAgentVerifyInput,
+  opts: RegisterOptions = {},
+): Promise<RecoverVerifyResult> {
+  const res = await post('/v1/agents/recover/verify', { pending_id: input.pendingId, code: input.code }, opts)
+  if (res.kind === 'network') return { ok: false, reason: 'network-error', message: res.message }
+  if (res.kind === 'timeout') return { ok: false, reason: 'network-error', message: 'request timed out' }
+
+  const body = (res.body ?? {}) as {
+    code?: unknown
+    message?: unknown
+    details?: unknown
+    handle?: unknown
+    api_key?: unknown
+  }
+
+  if (res.status === 200) {
+    if (typeof body.api_key !== 'string' || typeof body.handle !== 'string') {
+      return {
+        ok: false,
+        reason: 'unexpected-shape',
+        status: 200,
+        message: 'AgentChat /agents/recover/verify returned an unrecognized shape',
+      }
+    }
+    return { ok: true, apiKey: body.api_key, handle: body.handle }
+  }
+
+  const code = typeof body.code === 'string' ? body.code : ''
+  const message = typeof body.message === 'string' ? body.message : `status ${res.status}`
+
+  if (res.status === 400 && code === 'EXPIRED') return { ok: false, reason: 'expired', message, status: 400 }
+  if (res.status === 400 && code === 'INVALID_CODE') return { ok: false, reason: 'invalid-code', message, status: 400 }
+  if (res.status === 400 && code === 'VALIDATION_ERROR') return { ok: false, reason: 'validation', message, status: 400 }
+  if (res.status === 409 && code === 'HANDLE_REQUIRED') {
+    return { ok: false, reason: 'handle-required', message, status: 409, handles: readHandleList(body.details) }
+  }
   if (res.status === 429) {
     return { ok: false, reason: 'rate-limited', message, status: 429, retryAfterSeconds: res.retryAfterSeconds }
   }
@@ -331,6 +539,41 @@ export async function registerAgentVerify(
 }
 
 // ─── Internals ─────────────────────────────────────────────────────────
+
+/**
+ * Map a 409 error code from `/register` or `/register/verify` onto the
+ * per-email policy reasons. `EMAIL_TAKEN` is the retired single-agent code;
+ * see `EmailPolicyReason` for why it folds into `email-limit-reached`.
+ */
+function classifyEmailPolicyRejection(code: string): EmailPolicyReason | undefined {
+  if (code === 'EMAIL_LIMIT_REACHED' || code === 'EMAIL_TAKEN') return 'email-limit-reached'
+  if (code === 'EMAIL_EXHAUSTED') return 'email-exhausted'
+  return undefined
+}
+
+/**
+ * `details.limit` from a policy rejection, or undefined when the server
+ * sent none or sent garbage. Guarded to a positive integer so a malformed
+ * body can never produce "already backs NaN agents" in the UI.
+ */
+function readPolicyLimit(details: unknown): number | undefined {
+  if (!details || typeof details !== 'object') return undefined
+  const limit = (details as { limit?: unknown }).limit
+  return typeof limit === 'number' && Number.isInteger(limit) && limit > 0 ? limit : undefined
+}
+
+/**
+ * `details.handles` from a `HANDLE_REQUIRED` rejection. Non-string entries
+ * are dropped rather than rendered as `[object Object]`; a missing or
+ * malformed list yields `[]` so the caller's copy degrades to the plain
+ * instruction without crashing.
+ */
+function readHandleList(details: unknown): readonly string[] {
+  if (!details || typeof details !== 'object') return []
+  const handles = (details as { handles?: unknown }).handles
+  if (!Array.isArray(handles)) return []
+  return handles.filter((h): h is string => typeof h === 'string' && h.length > 0)
+}
 
 type PostOutcome =
   | { kind: 'http'; status: number; body: unknown; retryAfterSeconds?: number }

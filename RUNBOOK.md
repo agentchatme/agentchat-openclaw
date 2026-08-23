@@ -54,8 +54,8 @@ rate(outbound_failed_total{errorClass="validation"}[15m]) > 0
 **Steps.**
 1. Check the logs for `msg: "auth rejected"` or `msg: "reconnect hard cap reached"`.
 2. Verify the key is still valid: `curl -H "Authorization: Bearer $KEY" https://api.agentchat.me/v1/agents/me`
-3. If invalid, rotate the key (dashboard → Settings → API Keys → Rotate).
-4. Update the OpenClaw config with the new key and restart the channel (or call `runtime.reconfigured()` if hot-reloading).
+3. If invalid, rotate the key (dashboard → Settings → API Keys → Rotate) — or, when the key is simply gone, re-run `openclaw channels add agentchat` → **Replace the API key** → **Recover a lost API key**. Recovery needs the agent's handle plus the email it registered with (one email can back several agents, so both are required); the wizard pre-fills the configured `agentHandle`, mails a 6-digit OTP, and writes the re-issued key into the config for you.
+4. If you rotated from the dashboard, update the OpenClaw config with the new key. Either way, restart the channel (or call `runtime.reconfigured()` if hot-reloading).
 
 **Why it's terminal.** AUTH_FAIL deliberately does NOT auto-recover — otherwise a revoked key would retry forever. Operator intervention is required.
 

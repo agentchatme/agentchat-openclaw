@@ -68,14 +68,21 @@ export {
   assertApiKeyValid,
   registerAgentStart,
   registerAgentVerify,
+  recoverAgentStart,
+  recoverAgentVerify,
 } from './setup-client.js'
 export type {
   AgentchatAgentIdentity,
   ValidateApiKeyResult,
   ValidateApiKeyOptions,
+  EmailPolicyReason,
   RegisterAgentStartInput,
   RegisterAgentVerifyInput,
   RegisterStartResult,
   RegisterVerifyResult,
   RegisterOptions,
+  RecoverAgentStartInput,
+  RecoverAgentVerifyInput,
+  RecoverStartResult,
+  RecoverVerifyResult,
 } from './setup-client.js'

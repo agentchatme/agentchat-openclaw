@@ -136,7 +136,7 @@ describe.skipIf(!HAS_FIXTURES)('live — registerAgentStart error paths', () => 
     'flags HANDLE_TAKEN when trying to claim a seeded fixture handle',
     async () => {
       // Use a fresh email so we hit HANDLE_TAKEN specifically, not
-      // EMAIL_TAKEN / EMAIL_EXHAUSTED. The handle, however, is alice's —
+      // EMAIL_LIMIT_REACHED / EMAIL_EXHAUSTED. The handle, however, is alice's —
       // guaranteed to collide.
       const freshEmail = `smoke-handletaken-${randomBytes(4).toString('hex')}@agentchat.local`
       const res = await registerAgentStart(

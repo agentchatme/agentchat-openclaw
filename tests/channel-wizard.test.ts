@@ -9,13 +9,21 @@
  * a real TTY.
  *
  * Coverage:
- *   - `prepare` dispatch: register-or-paste menu when unconfigured,
+ *   - `prepare` dispatch: register / paste / recover menu when unconfigured,
  *     edit menu (keep / change-base / replace-key) when re-run against
  *     an already-configured account.
  *   - The change-base flow: accepts a valid URL, rejects invalid input
  *     at the validate step, resets to default when blank.
  *   - `runRegisterFlow` happy path (email → handle → OTP → minted key)
- *     and the key retryable start-errors (handle-taken, email-taken).
+ *     and the key retryable start-errors (handle-taken, the per-email
+ *     policy branch with its retry / recover / paste / cancel choices,
+ *     quoting the server's `details.limit` and falling back to the server
+ *     message for a legacy EMAIL_TAKEN).
+ *   - `runRecoverFlow`: always sends handle + email; the handle defaults to
+ *     the configured `agentHandle`; OTP retry; every terminal failure
+ *     (rate-limited start, legacy no-pending_id start, expired, too many
+ *     codes, HANDLE_REQUIRED listing the sibling handles) ends with the
+ *     fall-back-to-paste note and no cfg change.
  *   - `finalize` validation against the live `/v1/agents/me` probe —
  *     success path captures the handle; failure path notes the warning
  *     without throwing so the config still persists.
@@ -37,10 +45,14 @@ vi.mock('../src/setup-client.js', async (importOriginal) => {
     validateApiKey: vi.fn(),
     registerAgentStart: vi.fn(),
     registerAgentVerify: vi.fn(),
+    recoverAgentStart: vi.fn(),
+    recoverAgentVerify: vi.fn(),
   }
 })
 
 import {
+  recoverAgentStart,
+  recoverAgentVerify,
   registerAgentStart,
   registerAgentVerify,
   validateApiKey,
@@ -53,7 +65,16 @@ import {
 
 type Scripted =
   | { kind: 'note'; contains?: string }
-  | { kind: 'text'; contains?: string; value: string }
+  | {
+      kind: 'text'
+      contains?: string
+      value: string
+      /**
+       * When present, asserts the prompt's pre-filled `initialValue`:
+       * a string must match exactly, `null` asserts there is none.
+       */
+      initialValue?: string | null
+    }
   | { kind: 'select'; contains?: string; value: unknown }
   | { kind: 'confirm'; contains?: string; value: boolean }
   | { kind: 'progress' }
@@ -96,9 +117,18 @@ function scripted(steps: Scripted[]) {
     },
     text: async (params: {
       message: string
+      initialValue?: string
       validate?: (v: string) => string | undefined
     }) => {
       const entry = take('text', params.message)
+      if ('initialValue' in entry) {
+        const expected = entry.initialValue ?? undefined
+        if (params.initialValue !== expected) {
+          throw new Error(
+            `text prompt "${params.message}" had initialValue ${JSON.stringify(params.initialValue)}; script expected ${JSON.stringify(expected)}`,
+          )
+        }
+      }
       if (params.validate) {
         const err = params.validate(entry.value)
         if (err) {
@@ -135,11 +165,15 @@ function scripted(steps: Scripted[]) {
 const vMock = validateApiKey as unknown as ReturnType<typeof vi.fn>
 const rStart = registerAgentStart as unknown as ReturnType<typeof vi.fn>
 const rVerify = registerAgentVerify as unknown as ReturnType<typeof vi.fn>
+const recStart = recoverAgentStart as unknown as ReturnType<typeof vi.fn>
+const recVerify = recoverAgentVerify as unknown as ReturnType<typeof vi.fn>
 
 beforeEach(() => {
   vMock.mockReset()
   rStart.mockReset()
   rVerify.mockReset()
+  recStart.mockReset()
+  recVerify.mockReset()
 })
 
 const wizardWorkspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-openclaw-wizard-'))
@@ -375,8 +409,14 @@ describe('agentchatSetupWizard.prepare — register flow retryable errors', () =
     expect(s.remaining()).toBe(0)
   })
 
-  it('returns user-chose-paste when the user picks "paste existing key" after email-taken', async () => {
-    rStart.mockResolvedValueOnce({ ok: false, reason: 'email-taken' })
+  it('quotes the server limit on email-limit-reached and returns user-chose-paste when the user picks "paste"', async () => {
+    rStart.mockResolvedValueOnce({
+      ok: false,
+      reason: 'email-limit-reached',
+      status: 409,
+      message: 'This email already backs 10 active agents. Delete one, or register with a different email.',
+      limit: 10,
+    })
 
     const s = scripted([
       { kind: 'select', contains: 'How would you like to configure', value: 'register' },
@@ -385,7 +425,8 @@ describe('agentchatSetupWizard.prepare — register flow retryable errors', () =
       { kind: 'text', contains: 'Choose a handle', value: 'alice' },
       { kind: 'text', contains: 'Display name', value: '' },
       { kind: 'progress' },
-      { kind: 'select', contains: 'already registered', value: 'paste' },
+      // The number comes from `details.limit`, never from a constant.
+      { kind: 'select', contains: 'alice@example.com already backs 10 active agents', value: 'paste' },
     ])
 
     const result = await agentchatSetupWizard.prepare!({
@@ -397,6 +438,505 @@ describe('agentchatSetupWizard.prepare — register flow retryable errors', () =
 
     // When the user chose paste, prepare returns undefined (no cfg change)
     // and the framework's credential prompt fires on the next step.
+    expect(result).toBeUndefined()
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('falls back to the server message for a legacy EMAIL_TAKEN (no limit) rejection', async () => {
+    rStart.mockResolvedValueOnce({
+      ok: false,
+      reason: 'email-limit-reached',
+      status: 409,
+      message: 'An account is already registered with this email. Delete it first to create a new one.',
+    })
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'register' },
+      { kind: 'note', contains: 'register a new agent' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'text', contains: 'Choose a handle', value: 'alice' },
+      { kind: 'text', contains: 'Display name', value: '' },
+      { kind: 'progress' },
+      { kind: 'select', contains: 'An account is already registered with this email', value: 'cancel' },
+      { kind: 'note', contains: 'Falling back to credential entry' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeUndefined()
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('re-prompts for a different email on email-exhausted (quoting the lifetime limit) and completes', async () => {
+    rStart
+      .mockResolvedValueOnce({
+        ok: false,
+        reason: 'email-exhausted',
+        status: 409,
+        message: 'This email has reached the maximum of 30 account registrations.',
+        limit: 30,
+      })
+      .mockResolvedValueOnce({ ok: true, pendingId: 'pnd_3' })
+    rVerify.mockResolvedValueOnce({
+      ok: true,
+      agent: {
+        id: 'agt_3',
+        handle: 'alice',
+        email: 'alice+bot2@example.com',
+        createdAt: '2026-04-21T00:00:00Z',
+      },
+      apiKey: 'ac_live_0123456789abcdef0123',
+    })
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'register' },
+      { kind: 'note', contains: 'register a new agent' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'text', contains: 'Choose a handle', value: 'alice' },
+      { kind: 'text', contains: 'Display name', value: '' },
+      { kind: 'progress' },
+      { kind: 'select', contains: 'has used all 30 of its lifetime account registrations', value: 'retry' },
+      { kind: 'text', contains: 'Email', value: 'alice+bot2@example.com' },
+      { kind: 'progress' },
+      { kind: 'text', contains: 'verification code', value: '123456' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'AgentChat account created' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeDefined()
+    expect(rStart).toHaveBeenCalledTimes(2)
+    // Handle + display name were kept; only the email changed.
+    expect(rStart.mock.calls[1]?.[0]).toMatchObject({ email: 'alice+bot2@example.com', handle: 'alice' })
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('hands off to recovery when the user picks "recover" on email-limit-reached', async () => {
+    rStart.mockResolvedValueOnce({
+      ok: false,
+      reason: 'email-limit-reached',
+      status: 409,
+      message: 'at limit',
+      limit: 10,
+    })
+    recStart.mockResolvedValueOnce({
+      ok: true,
+      pendingId: 'pnd_r1',
+      message: 'If an account is registered with this email, a verification code has been sent.',
+    })
+    recVerify.mockResolvedValueOnce({ ok: true, handle: 'alice-codex', apiKey: 'ac_live_recovered0000000000' })
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'register' },
+      { kind: 'note', contains: 'register a new agent' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'text', contains: 'Choose a handle', value: 'alice-new' },
+      { kind: 'text', contains: 'Display name', value: '' },
+      { kind: 'progress' },
+      { kind: 'select', contains: 'already backs 10 active agents', value: 'recover' },
+      { kind: 'note', contains: 'recover a lost API key' },
+      // Nothing is configured yet, so there is no default handle to offer.
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'alice-codex', initialValue: null },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'progress' },
+      { kind: 'text', contains: 'recovery code', value: '123456' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'AgentChat API key recovered' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeDefined()
+    expect(recStart).toHaveBeenCalledWith(
+      { email: 'alice@example.com', handle: 'alice-codex' },
+      expect.anything(),
+    )
+    const { cfg } = result as { cfg: unknown }
+    expect(readAgentchatConfigField(cfg as never, 'default', 'apiKey')).toBe('ac_live_recovered0000000000')
+    expect(readAgentchatConfigField(cfg as never, 'default', 'agentHandle')).toBe('alice-codex')
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('aborts with the quoted limit when the verify-time trigger rejects on email-limit-reached', async () => {
+    rStart.mockResolvedValueOnce({ ok: true, pendingId: 'pnd_4' })
+    rVerify.mockResolvedValueOnce({
+      ok: false,
+      reason: 'email-limit-reached',
+      status: 409,
+      message: 'at limit',
+      limit: 10,
+    })
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'register' },
+      { kind: 'note', contains: 'register a new agent' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'text', contains: 'Choose a handle', value: 'alice' },
+      { kind: 'text', contains: 'Display name', value: '' },
+      { kind: 'progress' },
+      { kind: 'text', contains: 'verification code', value: '123456' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'reached its limit of 10 active agents while you were verifying' },
+      { kind: 'note', contains: 'Falling back to credential entry' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeUndefined()
+    expect(s.remaining()).toBe(0)
+  })
+})
+
+describe('agentchatSetupWizard.prepare — recover flow', () => {
+  const RECOVERED_KEY = 'ac_live_recovered0000000000'
+  const GENERIC_ACK = 'If an account is registered with this email, a verification code has been sent.'
+
+  it('recovers a key from the unconfigured menu, always sending handle + email', async () => {
+    recStart.mockResolvedValueOnce({ ok: true, pendingId: 'pnd_r1', message: GENERIC_ACK })
+    recVerify.mockResolvedValueOnce({ ok: true, handle: 'alice', apiKey: RECOVERED_KEY })
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'recover' },
+      { kind: 'note', contains: 'recover a lost API key' },
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'alice', initialValue: null },
+      { kind: 'text', contains: 'Email @alice registered with', value: 'Alice@Example.com' },
+      { kind: 'progress' },
+      { kind: 'text', contains: 'recovery code (check Alice@Example.com', value: '123456' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'AgentChat API key recovered' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeDefined()
+    expect(recStart).toHaveBeenCalledTimes(1)
+    expect(recStart).toHaveBeenCalledWith({ email: 'Alice@Example.com', handle: 'alice' }, expect.anything())
+    expect(recVerify).toHaveBeenCalledWith({ pendingId: 'pnd_r1', code: '123456' }, expect.anything())
+
+    const { cfg, credentialValues } = result as {
+      cfg: unknown
+      credentialValues: Record<string, string>
+    }
+    expect(readAgentchatConfigField(cfg as never, 'default', 'apiKey')).toBe(RECOVERED_KEY)
+    expect(readAgentchatConfigField(cfg as never, 'default', 'agentHandle')).toBe('alice')
+    // Same sentinel as register: the credential step must not re-prompt.
+    expect(credentialValues.token).toBe(RECOVERED_KEY)
+    expect(credentialValues._agentchatJustRegistered).toBe('1')
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('defaults the handle to the configured agentHandle when re-run on a configured account', async () => {
+    recStart.mockResolvedValueOnce({ ok: true, pendingId: 'pnd_r2', message: GENERIC_ACK })
+    recVerify.mockResolvedValueOnce({ ok: true, handle: 'alice', apiKey: RECOVERED_KEY })
+
+    const s = scripted([
+      { kind: 'select', contains: 'already configured', value: 'replace-key' },
+      { kind: 'select', contains: 'How would you like to configure', value: 'recover' },
+      { kind: 'note', contains: '@alice is configured here' },
+      // Pre-filled with the stored handle; Enter (scripted as the same value) keeps it.
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'alice', initialValue: 'alice' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'progress' },
+      { kind: 'text', contains: 'recovery code', value: '123456' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'AgentChat API key recovered' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: configuredCfg,
+      accountId: 'default',
+      credentialValues: { token: 'ac_live_abcdef0123456789abcd' },
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeDefined()
+    expect(recStart).toHaveBeenCalledWith({ email: 'alice@example.com', handle: 'alice' }, expect.anything())
+    const { cfg } = result as { cfg: unknown }
+    // The old key is replaced in place.
+    expect(readAgentchatConfigField(cfg as never, 'default', 'apiKey')).toBe(RECOVERED_KEY)
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('lets the user override the default handle and writes the handle the server answered with', async () => {
+    recStart.mockResolvedValueOnce({ ok: true, pendingId: 'pnd_r3', message: GENERIC_ACK })
+    recVerify.mockResolvedValueOnce({ ok: true, handle: 'alice-codex', apiKey: RECOVERED_KEY })
+
+    const s = scripted([
+      { kind: 'select', contains: 'already configured', value: 'replace-key' },
+      { kind: 'select', contains: 'How would you like to configure', value: 'recover' },
+      { kind: 'note', contains: 'recover a lost API key' },
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'alice-codex', initialValue: 'alice' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'progress' },
+      { kind: 'text', contains: 'recovery code', value: '123456' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'AgentChat API key recovered' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: configuredCfg,
+      accountId: 'default',
+      credentialValues: { token: 'ac_live_abcdef0123456789abcd' },
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(recStart).toHaveBeenCalledWith({ email: 'alice@example.com', handle: 'alice-codex' }, expect.anything())
+    const { cfg } = (result ?? {}) as { cfg?: unknown }
+    expect(readAgentchatConfigField(cfg as never, 'default', 'agentHandle')).toBe('alice-codex')
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('rejects a malformed handle at the validate step before any network call', async () => {
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'recover' },
+      { kind: 'note', contains: 'recover a lost API key' },
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'Not_A_Handle' },
+    ])
+
+    await expect(
+      agentchatSetupWizard.prepare!({
+        cfg: emptyCfg,
+        accountId: 'default',
+        credentialValues: {},
+        prompter: s.prompter as never,
+      } as never),
+    ).rejects.toThrow(/Must start with a lowercase letter/)
+    expect(recStart).not.toHaveBeenCalled()
+  })
+
+  it('echoes the server acknowledgement verbatim and retries a mistyped code', async () => {
+    recStart.mockResolvedValueOnce({ ok: true, pendingId: 'pnd_r4', message: GENERIC_ACK })
+    recVerify
+      .mockResolvedValueOnce({ ok: false, reason: 'invalid-code', status: 400, message: 'Invalid or expired verification code' })
+      .mockResolvedValueOnce({ ok: true, handle: 'alice', apiKey: RECOVERED_KEY })
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'recover' },
+      { kind: 'note', contains: 'recover a lost API key' },
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'alice' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'progress' },
+      { kind: 'text', contains: 'recovery code', value: '000000' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'That code did not match' },
+      { kind: 'text', contains: 'attempt 2/3', value: '123456' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'AgentChat API key recovered' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeDefined()
+    expect(recVerify).toHaveBeenCalledTimes(2)
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('gives up after three wrong codes and falls back to credential entry', async () => {
+    recStart.mockResolvedValueOnce({ ok: true, pendingId: 'pnd_r5', message: GENERIC_ACK })
+    recVerify.mockResolvedValue({ ok: false, reason: 'invalid-code', status: 400, message: 'nope' })
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'recover' },
+      { kind: 'note', contains: 'recover a lost API key' },
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'alice' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'progress' },
+      { kind: 'text', contains: 'recovery code', value: '000001' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'That code did not match' },
+      { kind: 'text', contains: 'attempt 2/3', value: '000002' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'That code did not match' },
+      { kind: 'text', contains: 'attempt 3/3', value: '000003' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'Too many incorrect codes' },
+      { kind: 'note', contains: 'Falling back to credential entry' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeUndefined()
+    expect(recVerify).toHaveBeenCalledTimes(3)
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('stops on a rate-limited start and quotes Retry-After', async () => {
+    recStart.mockResolvedValueOnce({
+      ok: false,
+      reason: 'rate-limited',
+      status: 429,
+      message: 'slow down',
+      retryAfterSeconds: 3600,
+    })
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'recover' },
+      { kind: 'note', contains: 'recover a lost API key' },
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'alice' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'Too many recovery attempts from this network. Try again in 3600s.' },
+      { kind: 'note', contains: 'Falling back to credential entry' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeUndefined()
+    expect(recVerify).not.toHaveBeenCalled()
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('stops before asking for a code when a legacy server returns no pending_id', async () => {
+    recStart.mockResolvedValueOnce({
+      ok: false,
+      reason: 'unexpected-shape',
+      status: 200,
+      message: 'AgentChat did not start a recovery (no pending_id in the response). Check that the email is the one this agent registered with.',
+    })
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'recover' },
+      { kind: 'note', contains: 'recover a lost API key' },
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'alice' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'no pending_id' },
+      { kind: 'note', contains: 'Falling back to credential entry' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeUndefined()
+    expect(recVerify).not.toHaveBeenCalled()
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('stops on an expired code', async () => {
+    recStart.mockResolvedValueOnce({ ok: true, pendingId: 'pnd_r6', message: GENERIC_ACK })
+    recVerify.mockResolvedValueOnce({ ok: false, reason: 'expired', status: 400, message: 'expired' })
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'recover' },
+      { kind: 'note', contains: 'recover a lost API key' },
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'alice' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'progress' },
+      { kind: 'text', contains: 'recovery code', value: '123456' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'This recovery code expired' },
+      { kind: 'note', contains: 'Falling back to credential entry' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeUndefined()
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('prints the sibling handles and asks for a re-run on a defensive HANDLE_REQUIRED', async () => {
+    recStart.mockResolvedValueOnce({ ok: true, pendingId: 'pnd_r7', message: GENERIC_ACK })
+    recVerify.mockResolvedValueOnce({
+      ok: false,
+      reason: 'handle-required',
+      status: 409,
+      message: 'This email backs more than one agent. Run recovery again with the handle you want to recover.',
+      handles: ['alice', 'alice-codex'],
+    })
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'recover' },
+      { kind: 'note', contains: 'recover a lost API key' },
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'alice' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'progress' },
+      { kind: 'text', contains: 'recovery code', value: '123456' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'Run recovery again and enter the handle you want to recover.\n\nAgents on this email:\n  @alice\n  @alice-codex' },
+      { kind: 'note', contains: 'Falling back to credential entry' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
+    expect(result).toBeUndefined()
+    expect(s.remaining()).toBe(0)
+  })
+
+  it('reports a thrown transport error under the recovery title, not registration', async () => {
+    recStart.mockRejectedValueOnce(new Error('socket hang up'))
+
+    const s = scripted([
+      { kind: 'select', contains: 'How would you like to configure', value: 'recover' },
+      { kind: 'note', contains: 'recover a lost API key' },
+      { kind: 'text', contains: 'Handle of the agent to recover', value: 'alice' },
+      { kind: 'text', contains: 'Email', value: 'alice@example.com' },
+      { kind: 'progress' },
+      { kind: 'note', contains: 'Recovery failed\nsocket hang up' },
+      { kind: 'note', contains: 'Falling back to credential entry' },
+    ])
+
+    const result = await agentchatSetupWizard.prepare!({
+      cfg: emptyCfg,
+      accountId: 'default',
+      credentialValues: {},
+      prompter: s.prompter as never,
+    } as never)
+
     expect(result).toBeUndefined()
     expect(s.remaining()).toBe(0)
   })
@@ -482,6 +1022,8 @@ describe('agentchatSetupWizard.status', () => {
       configured: false,
     } as never)
     expect(lines.join(' ')).toMatch(/not configured/)
+    // The hint must advertise all three entry points, recovery included.
+    expect(lines.join(' ')).toMatch(/recover a lost one/)
   })
 
   it('reports "configured (@handle)" when both key and handle are present', async () => {

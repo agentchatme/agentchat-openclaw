@@ -3,10 +3,19 @@
  *
  * All network calls are stubbed via a fetch mock. We cover:
  *   - validateApiKey: success, 401/403/410/5xx, network/timeout, bad shape
- *   - registerAgentStart: success, 409 HANDLE_TAKEN / EMAIL_TAKEN /
- *     EMAIL_EXHAUSTED, 429 rate-limit with Retry-After, OTP_FAILED 500
+ *   - registerAgentStart: success, 409 HANDLE_TAKEN, the per-email policy
+ *     rejections (EMAIL_LIMIT_REACHED / EMAIL_EXHAUSTED quoting
+ *     `details.limit`, legacy EMAIL_TAKEN folded into email-limit-reached),
+ *     429 rate-limit with Retry-After, OTP_FAILED 500
  *   - registerAgentVerify: success, 400 EXPIRED / INVALID_CODE, 429,
- *     shape validation (missing api_key), 409 HANDLE_TAKEN
+ *     shape validation (missing api_key), 409 HANDLE_TAKEN, verify-time
+ *     per-email policy rejections (the DB trigger path)
+ *   - recoverAgentStart: always sends handle + email, the constant
+ *     `{ pending_id, message }` 200, legacy no-pending_id 200, 400/429,
+ *     network/timeout
+ *   - recoverAgentVerify: success `{ handle, api_key }`, 400 EXPIRED /
+ *     INVALID_CODE, 409 HANDLE_REQUIRED with `details.handles`, 429,
+ *     shape validation
  *   - assertApiKeyValid throws AgentChatChannelError with the right class
  */
 
@@ -18,6 +27,8 @@ import {
   assertApiKeyValid,
   registerAgentStart,
   registerAgentVerify,
+  recoverAgentStart,
+  recoverAgentVerify,
 } from '../src/setup-client.js'
 
 interface StubResponse {
@@ -203,16 +214,114 @@ describe('registerAgentStart', () => {
     if (!res.ok) expect(res.reason).toBe('handle-taken')
   })
 
-  it('classifies EMAIL_EXHAUSTED (3 accounts already registered)', async () => {
+  it('classifies EMAIL_LIMIT_REACHED and carries the server-quoted limit', async () => {
     const fetchStub = makeFetch([
-      { status: 409, body: { code: 'EMAIL_EXHAUSTED', message: 'max reached' } },
+      {
+        status: 409,
+        body: {
+          code: 'EMAIL_LIMIT_REACHED',
+          message: 'This email already backs 10 active agents. Delete one, or register with a different email.',
+          details: { limit: 10 },
+        },
+      },
     ])
     const res = await registerAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
       { fetch: fetchStub },
     )
     expect(res.ok).toBe(false)
-    if (!res.ok) expect(res.reason).toBe('email-exhausted')
+    if (!res.ok) {
+      expect(res.reason).toBe('email-limit-reached')
+      expect(res.status).toBe(409)
+      expect(res.limit).toBe(10)
+      expect(res.message).toContain('10 active agents')
+    }
+  })
+
+  it('classifies EMAIL_EXHAUSTED and carries the server-quoted lifetime limit', async () => {
+    const fetchStub = makeFetch([
+      {
+        status: 409,
+        body: {
+          code: 'EMAIL_EXHAUSTED',
+          message: 'This email has reached the maximum of 30 account registrations.',
+          details: { limit: 30 },
+        },
+      },
+    ])
+    const res = await registerAgentStart(
+      { email: 'alice@example.com', handle: 'alice' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('email-exhausted')
+      expect(res.limit).toBe(30)
+    }
+  })
+
+  it('folds legacy EMAIL_TAKEN (pre-policy server) into email-limit-reached with no limit', async () => {
+    const fetchStub = makeFetch([
+      {
+        status: 409,
+        body: {
+          code: 'EMAIL_TAKEN',
+          message: 'An account is already registered with this email. Delete it first to create a new one.',
+        },
+      },
+    ])
+    const res = await registerAgentStart(
+      { email: 'alice@example.com', handle: 'alice' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('email-limit-reached')
+      expect(res.limit).toBeUndefined()
+      // The server message is the fallback copy — it must survive intact.
+      expect(res.message).toBe(
+        'An account is already registered with this email. Delete it first to create a new one.',
+      )
+    }
+  })
+
+  it('never surfaces a malformed details.limit (string / zero / fraction / missing)', async () => {
+    for (const details of [
+      { limit: '10' },
+      { limit: 0 },
+      { limit: 2.5 },
+      { limit: -1 },
+      {},
+      null,
+      'garbage',
+    ]) {
+      const fetchStub = makeFetch([
+        { status: 409, body: { code: 'EMAIL_LIMIT_REACHED', message: 'limit', details } },
+      ])
+      const res = await registerAgentStart(
+        { email: 'alice@example.com', handle: 'alice' },
+        { fetch: fetchStub },
+      )
+      expect(res.ok).toBe(false)
+      if (!res.ok) {
+        expect(res.reason).toBe('email-limit-reached')
+        expect(res.limit).toBeUndefined()
+      }
+    }
+  })
+
+  it('does not treat EMAIL_LIMIT_REACHED on a non-409 status as a policy rejection', async () => {
+    // Defensive: the policy reasons are 409-only on the server. A 500 that
+    // happens to echo the code must not be presented as "at limit".
+    const fetchStub = makeFetch([
+      { status: 500, body: { code: 'EMAIL_LIMIT_REACHED', message: 'boom', details: { limit: 10 } } },
+    ])
+    const res = await registerAgentStart(
+      { email: 'alice@example.com', handle: 'alice' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.reason).not.toBe('email-limit-reached')
   })
 
   it('honors Retry-After on 429', async () => {
@@ -331,5 +440,321 @@ describe('registerAgentVerify', () => {
     )
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.reason).toBe('handle-taken')
+  })
+
+  it('classifies verify-time EMAIL_LIMIT_REACHED (DB trigger) with the quoted limit', async () => {
+    const fetchStub = makeFetch([
+      {
+        status: 409,
+        body: { code: 'EMAIL_LIMIT_REACHED', message: 'at limit', details: { limit: 10 } },
+      },
+    ])
+    const res = await registerAgentVerify(
+      { pendingId: 'pnd_abc', code: '123456' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('email-limit-reached')
+      expect(res.limit).toBe(10)
+    }
+  })
+
+  it('classifies verify-time EMAIL_EXHAUSTED (DB trigger)', async () => {
+    const fetchStub = makeFetch([
+      {
+        status: 409,
+        body: { code: 'EMAIL_EXHAUSTED', message: 'exhausted', details: { limit: 30 } },
+      },
+    ])
+    const res = await registerAgentVerify(
+      { pendingId: 'pnd_abc', code: '123456' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('email-exhausted')
+      expect(res.limit).toBe(30)
+    }
+  })
+
+  it('folds verify-time legacy EMAIL_TAKEN into email-limit-reached', async () => {
+    const fetchStub = makeFetch([
+      { status: 409, body: { code: 'EMAIL_TAKEN', message: 'An account was already registered with this email' } },
+    ])
+    const res = await registerAgentVerify(
+      { pendingId: 'pnd_abc', code: '123456' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('email-limit-reached')
+      expect(res.limit).toBeUndefined()
+    }
+  })
+})
+
+describe('recoverAgentStart', () => {
+  it('POSTs handle + email to /v1/agents/recover and returns pendingId + the server message', async () => {
+    const fetchStub = makeFetch([
+      {
+        status: 200,
+        body: {
+          pending_id: 'pnd_rec1',
+          message: 'If an account is registered with this email, a verification code has been sent.',
+        },
+      },
+    ])
+    const res = await recoverAgentStart(
+      { email: 'alice@example.com', handle: 'alice' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.pendingId).toBe('pnd_rec1')
+      expect(res.message).toBe(
+        'If an account is registered with this email, a verification code has been sent.',
+      )
+    }
+    const call = fetchStub.calls[0]!
+    expect(call.url).toBe('https://api.agentchat.me/v1/agents/recover')
+    expect(call.init?.method).toBe('POST')
+    // The contract: handle is ALWAYS sent alongside email.
+    expect(JSON.parse(String(call.init?.body))).toEqual({ email: 'alice@example.com', handle: 'alice' })
+    const headers = new Headers(call.init?.headers)
+    expect(headers.get('x-agentchat-client')).toBe('openclaw')
+    expect(headers.get('x-agentchat-client-version')).toBe(PACKAGE_VERSION)
+  })
+
+  it('honors apiBase override', async () => {
+    const fetchStub = makeFetch([{ status: 200, body: { pending_id: 'pnd_x', message: 'ok' } }])
+    await recoverAgentStart(
+      { email: 'alice@example.com', handle: 'alice' },
+      { fetch: fetchStub, apiBase: 'https://stage.agentchat.me/' },
+    )
+    expect(fetchStub.calls[0]?.url).toBe('https://stage.agentchat.me/v1/agents/recover')
+  })
+
+  it('stops early on a legacy 200 without pending_id (no code is coming)', async () => {
+    const fetchStub = makeFetch([
+      { status: 200, body: { message: 'If an account is registered with this email, a verification code has been sent.' } },
+    ])
+    const res = await recoverAgentStart(
+      { email: 'alice@example.com', handle: 'alice' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('unexpected-shape')
+      expect(res.status).toBe(200)
+      expect(res.message).toMatch(/no pending_id/)
+    }
+  })
+
+  it('classifies 400 VALIDATION_ERROR', async () => {
+    const fetchStub = makeFetch([
+      { status: 400, body: { code: 'VALIDATION_ERROR', message: 'Invalid request' } },
+    ])
+    const res = await recoverAgentStart(
+      { email: 'not-an-email', handle: 'alice' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('validation')
+      expect(res.status).toBe(400)
+    }
+  })
+
+  it('honors Retry-After on 429', async () => {
+    const fetchStub = makeFetch([
+      {
+        status: 429,
+        body: { code: 'RATE_LIMITED', message: 'slow down' },
+        headers: { 'retry-after': '3600' },
+      },
+    ])
+    const res = await recoverAgentStart(
+      { email: 'alice@example.com', handle: 'alice' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('rate-limited')
+      expect(res.retryAfterSeconds).toBe(3600)
+    }
+  })
+
+  it('classifies 5xx as server-error with the server message', async () => {
+    const fetchStub = makeFetch([{ status: 503, body: { message: 'maintenance' } }])
+    const res = await recoverAgentStart(
+      { email: 'alice@example.com', handle: 'alice' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('server-error')
+      expect(res.status).toBe(503)
+      expect(res.message).toBe('maintenance')
+    }
+  })
+
+  it('returns network-error on fetch throw and on timeout', async () => {
+    const thrown = await recoverAgentStart(
+      { email: 'alice@example.com', handle: 'alice' },
+      { fetch: makeFetch(() => new Error('ECONNRESET')) },
+    )
+    expect(thrown.ok).toBe(false)
+    if (!thrown.ok) expect(thrown.reason).toBe('network-error')
+
+    const aborted = await recoverAgentStart(
+      { email: 'alice@example.com', handle: 'alice' },
+      { fetch: makeFetch(() => Object.assign(new Error('aborted'), { name: 'AbortError' })) },
+    )
+    expect(aborted.ok).toBe(false)
+    if (!aborted.ok) {
+      expect(aborted.reason).toBe('network-error')
+      expect(aborted.message).toBe('request timed out')
+    }
+  })
+})
+
+describe('recoverAgentVerify', () => {
+  it('returns the re-issued key + handle on 200', async () => {
+    const fetchStub = makeFetch([
+      { status: 200, body: { handle: 'alice', api_key: 'ac_' + 'z'.repeat(40) } },
+    ])
+    const res = await recoverAgentVerify(
+      { pendingId: 'pnd_rec1', code: '123456' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.handle).toBe('alice')
+      expect(res.apiKey.startsWith('ac_')).toBe(true)
+    }
+    const call = fetchStub.calls[0]!
+    expect(call.url).toBe('https://api.agentchat.me/v1/agents/recover/verify')
+    expect(JSON.parse(String(call.init?.body))).toEqual({ pending_id: 'pnd_rec1', code: '123456' })
+  })
+
+  it('flags an unexpected success shape (missing api_key or handle)', async () => {
+    for (const body of [{ handle: 'alice' }, { api_key: 'ac_' + 'z'.repeat(40) }, {}]) {
+      const res = await recoverAgentVerify(
+        { pendingId: 'pnd_rec1', code: '123456' },
+        { fetch: makeFetch([{ status: 200, body }]) },
+      )
+      expect(res.ok).toBe(false)
+      if (!res.ok) expect(res.reason).toBe('unexpected-shape')
+    }
+  })
+
+  it('classifies EXPIRED and INVALID_CODE', async () => {
+    const expired = await recoverAgentVerify(
+      { pendingId: 'pnd_rec1', code: '123456' },
+      { fetch: makeFetch([{ status: 400, body: { code: 'EXPIRED', message: 'expired' } }]) },
+    )
+    expect(expired.ok).toBe(false)
+    if (!expired.ok) expect(expired.reason).toBe('expired')
+
+    // A decoy pending (email + handle matched nothing) also lands here —
+    // the server deliberately makes it indistinguishable from a typo.
+    const invalid = await recoverAgentVerify(
+      { pendingId: 'pnd_decoy', code: '123456' },
+      { fetch: makeFetch([{ status: 400, body: { code: 'INVALID_CODE', message: 'Invalid or expired verification code' } }]) },
+    )
+    expect(invalid.ok).toBe(false)
+    if (!invalid.ok) expect(invalid.reason).toBe('invalid-code')
+  })
+
+  it('classifies 409 HANDLE_REQUIRED and carries details.handles in order', async () => {
+    const fetchStub = makeFetch([
+      {
+        status: 409,
+        body: {
+          code: 'HANDLE_REQUIRED',
+          message: 'This email backs more than one agent. Run recovery again with the handle you want to recover.',
+          details: { handles: ['alice', 'alice-codex', 'alice-claude'] },
+        },
+      },
+    ])
+    const res = await recoverAgentVerify(
+      { pendingId: 'pnd_amb', code: '123456' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('handle-required')
+      expect(res.status).toBe(409)
+      expect(res.handles).toEqual(['alice', 'alice-codex', 'alice-claude'])
+      expect(res.message).toMatch(/more than one agent/)
+    }
+  })
+
+  it('degrades a malformed HANDLE_REQUIRED details.handles to an empty list', async () => {
+    for (const details of [undefined, null, {}, { handles: 'alice' }, { handles: [1, null, { h: 'x' }] }]) {
+      const res = await recoverAgentVerify(
+        { pendingId: 'pnd_amb', code: '123456' },
+        { fetch: makeFetch([{ status: 409, body: { code: 'HANDLE_REQUIRED', message: 'ambiguous', details } }]) },
+      )
+      expect(res.ok).toBe(false)
+      if (!res.ok) {
+        expect(res.reason).toBe('handle-required')
+        expect(res.handles).toEqual([])
+      }
+    }
+    // Mixed lists keep only the strings.
+    const mixed = await recoverAgentVerify(
+      { pendingId: 'pnd_amb', code: '123456' },
+      {
+        fetch: makeFetch([
+          { status: 409, body: { code: 'HANDLE_REQUIRED', message: 'ambiguous', details: { handles: ['alice', 7, '', 'bob'] } } },
+        ]),
+      },
+    )
+    expect(mixed.ok).toBe(false)
+    if (!mixed.ok) expect(mixed.handles).toEqual(['alice', 'bob'])
+  })
+
+  it('honors Retry-After on 429 (verify-attempt cap)', async () => {
+    const fetchStub = makeFetch([
+      {
+        status: 429,
+        body: { code: 'OTP_ATTEMPTS_EXCEEDED', message: 'too many attempts' },
+        headers: { 'retry-after': '600' },
+      },
+    ])
+    const res = await recoverAgentVerify(
+      { pendingId: 'pnd_rec1', code: '000000' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('rate-limited')
+      expect(res.retryAfterSeconds).toBe(600)
+    }
+  })
+
+  it('maps other rejections (e.g. 404 AGENT_NOT_FOUND) to server-error with the message', async () => {
+    const fetchStub = makeFetch([{ status: 404, body: { code: 'AGENT_NOT_FOUND', message: 'Account not found' } }])
+    const res = await recoverAgentVerify(
+      { pendingId: 'pnd_rec1', code: '123456' },
+      { fetch: fetchStub },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) {
+      expect(res.reason).toBe('server-error')
+      expect(res.status).toBe(404)
+      expect(res.message).toBe('Account not found')
+    }
+  })
+
+  it('returns network-error on fetch throw', async () => {
+    const res = await recoverAgentVerify(
+      { pendingId: 'pnd_rec1', code: '123456' },
+      { fetch: makeFetch(() => new Error('ECONNREFUSED')) },
+    )
+    expect(res.ok).toBe(false)
+    if (!res.ok) expect(res.reason).toBe('network-error')
   })
 })
