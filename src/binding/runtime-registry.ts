@@ -1,49 +1,35 @@
 /**
- * Per-account AgentchatChannelRuntime registry.
+ * Per-account doorbell registry.
  *
- * OpenClaw's gateway starts one runtime per `(channelId, accountId)` pair at
- * channel enable. On shutdown it stops them. We hold the Runtime instance here
- * so binding adapters (outbound, actions) can dispatch through the same
- * WebSocket the gateway started, rather than re-opening a new transport per
- * call.
+ * OpenClaw's gateway starts one doorbell per `(channelId, accountId)` pair at
+ * channel enable and stops it on shutdown. The registry holds the live
+ * socket runtime and its invoker so the status adapter can report them, and
+ * serializes start/stop per account so a start-during-stop never races.
  *
- * Keying is `accountId`-only; `channelId` is always `"agentchat"` for this
- * plugin, so it does not contribute to the key.
+ * Keying is `accountId`-only; `channelId` is always `"agentchat"` here.
  */
 
 import type { Logger } from '../log.js'
 import type { AgentchatChannelConfig } from '../config-schema.js'
 import { AgentchatChannelRuntime, type ChannelRuntimeHandlers } from '../runtime.js'
+import type { AgentInvoker } from '../doorbell/invoker.js'
 
-interface RegistryEntry {
+export interface DoorbellEntry {
   readonly runtime: AgentchatChannelRuntime
+  readonly invoker: AgentInvoker | null
   readonly config: AgentchatChannelConfig
   readonly logger: Logger
-  readonly abortController: AbortController
 }
 
-const registry = new Map<string, RegistryEntry>()
+const registry = new Map<string, DoorbellEntry>()
 
-/**
- * Per-account mutex. Every `registerRuntime` / `unregisterRuntime` call for
- * the same account runs through this queue, so concurrent starts or a
- * start-during-stop never race. The entries are raw promise tails — we
- * drop them after the operation resolves to keep the map bounded.
- */
+/** Per-account mutex: every register/unregister for the same account runs through this queue. */
 const accountLocks = new Map<string, Promise<unknown>>()
 
 function withAccountLock<T>(accountId: string, op: () => Promise<T>): Promise<T> {
   const prev = accountLocks.get(accountId) ?? Promise.resolve()
-  // Swallow the prior result/error so one caller's failure doesn't poison
-  // the next caller's execution.
   const next = prev.catch(() => undefined).then(op)
   accountLocks.set(accountId, next)
-  // Clear the map entry once this op settles AND no later op chained onto
-  // it. The `accountLocks.get === next` check guards against clearing a
-  // newer tail that was appended while we were running. We attach the
-  // `finally` via `.then(undefined, ...)` chaining that owns its own
-  // error handler, because `next.finally(...)` alone would return an
-  // unhandled rejection when `next` rejects and nothing else awaits it.
   next.then(
     () => {
       if (accountLocks.get(accountId) === next) accountLocks.delete(accountId)
@@ -55,118 +41,87 @@ function withAccountLock<T>(accountId: string, op: () => Promise<T>): Promise<T>
   return next
 }
 
-export interface RegisterRuntimeParams {
+export interface RegisterDoorbellParams {
   readonly accountId: string
   readonly config: AgentchatChannelConfig
-  readonly handlers: ChannelRuntimeHandlers
   readonly logger: Logger
+  /** Builds the invoker and the handlers that feed it, given the runtime that will be started. */
+  readonly build: (runtime: AgentchatChannelRuntime) => { invoker: AgentInvoker | null; handlers: ChannelRuntimeHandlers }
+  /** Test seam for the runtime constructor. */
+  readonly createRuntime?: (params: { config: AgentchatChannelConfig; logger: Logger; handlers: ChannelRuntimeHandlers }) => AgentchatChannelRuntime
 }
 
 /**
- * Create and start a runtime for `accountId`. If one is already registered,
- * stop it first (config change path). Returns the live instance.
- *
- * Serialized per-account via `withAccountLock` so two concurrent callers
- * cannot double-start or interleave a start with a stop.
+ * Create and start a doorbell for `accountId`. If one is already registered,
+ * stop it first (config change path). Returns the live entry.
  */
-export function registerRuntime(
-  params: RegisterRuntimeParams,
-): Promise<AgentchatChannelRuntime> {
+export function registerDoorbell(params: RegisterDoorbellParams): Promise<DoorbellEntry> {
   return withAccountLock(params.accountId, async () => {
     const existing = registry.get(params.accountId)
     if (existing) {
-      try {
-        await existing.runtime.stop(Date.now() + 2_000)
-      } catch (err) {
-        params.logger.warn(
-          {
-            err: err instanceof Error ? err.message : String(err),
-            accountId: params.accountId,
-          },
-          'previous runtime stop threw during re-register — replacing anyway',
-        )
-      }
+      await stopEntry(existing, Date.now() + 2_000)
       registry.delete(params.accountId)
     }
 
-    const runtime = new AgentchatChannelRuntime({
-      config: params.config,
-      handlers: params.handlers,
-      logger: params.logger,
-    })
-    // Register BEFORE start so a handler firing on the sync path of
-    // `start()` can find the runtime via `getRuntime`.
-    registry.set(params.accountId, {
-      runtime,
-      config: params.config,
-      logger: params.logger,
-      abortController: new AbortController(),
-    })
+    // The handlers close over the runtime and the runtime over the handlers;
+    // a late-bound reference resolves the cycle. The socket cannot deliver a
+    // frame before `start()`, so the reference is set before any handler runs.
+    let runtimeRef: AgentchatChannelRuntime | null = null
+    let built: { invoker: AgentInvoker | null; handlers: ChannelRuntimeHandlers } | null = null
+    const handlers: ChannelRuntimeHandlers = {
+      onKnock: (source) => built?.handlers.onKnock?.(source),
+      onGroupInvite: (invite) => built?.handlers.onGroupInvite?.(invite),
+      onStateChanged: (next, prev) => built?.handlers.onStateChanged?.(next, prev),
+      onAuthenticated: (at) => built?.handlers.onAuthenticated?.(at),
+      onError: (error) => built?.handlers.onError?.(error),
+    }
+    const create = params.createRuntime ?? ((p) => new AgentchatChannelRuntime(p))
+    runtimeRef = create({ config: params.config, logger: params.logger, handlers })
+    built = params.build(runtimeRef)
+
+    const entry: DoorbellEntry = { runtime: runtimeRef, invoker: built.invoker, config: params.config, logger: params.logger }
+    registry.set(params.accountId, entry)
     try {
-      runtime.start()
+      runtimeRef.start()
     } catch (err) {
-      // Synchronous start failure — back out of the registry so the next
-      // caller can try fresh, and surface the error.
       registry.delete(params.accountId)
+      built.invoker?.stop()
       throw err
     }
-    return runtime
+    return entry
   })
 }
 
-/**
- * Stop and remove the runtime for `accountId`. No-op if absent.
- * `deadlineMs` bounds the graceful-drain wait.
- *
- * Serialized per-account so a concurrent `registerRuntime` cannot race
- * this stop and leave a zombie.
- */
-export function unregisterRuntime(
-  accountId: string,
-  deadlineMs = Date.now() + 5_000,
-): Promise<void> {
+/** Stop and remove the doorbell for `accountId`. No-op if absent. */
+export function unregisterDoorbell(accountId: string, deadlineMs = Date.now() + 5_000): Promise<void> {
   return withAccountLock(accountId, async () => {
     const entry = registry.get(accountId)
     if (!entry) return
     registry.delete(accountId)
-    entry.abortController.abort()
-    try {
-      await entry.runtime.stop(deadlineMs)
-    } catch (err) {
-      entry.logger.error(
-        { err: err instanceof Error ? err.message : String(err), accountId },
-        'runtime.stop threw during unregister',
-      )
-    }
+    await stopEntry(entry, deadlineMs)
   })
 }
 
-/**
- * Return the live runtime for `accountId`, or `undefined` if none. Binding
- * adapters that need to send through the WS use this; a missing runtime means
- * the channel is not started for this account — the caller should fall back
- * to HTTP-only paths.
- */
-export function getRuntime(accountId: string): AgentchatChannelRuntime | undefined {
-  return registry.get(accountId)?.runtime
+async function stopEntry(entry: DoorbellEntry, deadlineMs: number): Promise<void> {
+  entry.invoker?.stop()
+  try {
+    await entry.runtime.stop(deadlineMs)
+  } catch (err) {
+    entry.logger.error({ err: err instanceof Error ? err.message : String(err) }, 'runtime.stop threw during unregister')
+  }
 }
 
-/** List every active account id. Test + introspection hook. */
+export function getDoorbell(accountId: string): DoorbellEntry | undefined {
+  return registry.get(accountId)
+}
+
 export function listActiveAccounts(): string[] {
   return [...registry.keys()]
 }
 
-/** Nuke every runtime. Test hook only. */
+/** Test hook only. */
 export async function resetRegistryForTest(): Promise<void> {
-  const entries = [...registry.entries()]
+  const entries = [...registry.values()]
   registry.clear()
-  await Promise.all(
-    entries.map(async ([, entry]) => {
-      try {
-        await entry.runtime.stop(Date.now() + 500)
-      } catch {
-        /* test teardown — swallow */
-      }
-    }),
-  )
+  await Promise.all(entries.map((entry) => stopEntry(entry, Date.now() + 500).catch(() => undefined)))
 }

@@ -1,53 +1,45 @@
 /**
- * ChannelGatewayAdapter — start/stop the runtime per account.
+ * ChannelGatewayAdapter — start/stop the doorbell per account.
  *
- * This is where the plugin actually becomes functional. OpenClaw calls
- * `startAccount` when a configured account is enabled; we spin up an
- * `AgentchatChannelRuntime`, wire the inbound bridge, and keep it alive
- * until `stopAccount` (or the ctx abort signal) fires.
+ * OpenClaw calls `startAccount` when a configured account is enabled. The
+ * doorbell then:
  *
- * Inbound flow:
- *   WS frame → runtime.normalizeInbound → bridge.onInbound
- *     → OpenClaw dispatch → agent reply → runtime.sendMessage
+ *   socket frame / connect ──► knock ──► coalesce ──► tray ──► gate ──► one turn
  *
- * Outbound flow:
- *   OpenClaw.sendText → binding/outbound.ts → runtime.sendMessage
- *   (the outbound adapter lazy-starts the runtime if the agent calls
- *    sendText before startAccount has fired — e.g. from a cron one-shot)
+ * everything after the knock lives in `../doorbell/invoker.ts`; this file
+ * only wires OpenClaw's context (config, logger, status sink, abort signal,
+ * agent routing, the plugin runtime captured by `setRuntime`) to it and
+ * keeps the account task pending until OpenClaw aborts it.
  *
- * The runtime is registered in `runtime-registry.ts` so the outbound +
- * actions + tool paths can look it up by accountId.
+ * `AGENTCHAT_DOORBELL=off` skips all of it: no socket, no knocks, no turns.
+ * The hosted tools and the manual stay placed, so the agent can still use
+ * AgentChat when something else wakes it.
  */
 
-import type {
-  ChannelGatewayAdapter,
-  ChannelGatewayContext,
-} from './openclaw-types.js'
-
-import { waitUntilAbort } from 'openclaw/plugin-sdk/channel-lifecycle'
+import type { ChannelGatewayAdapter, ChannelGatewayContext } from './openclaw-types.js'
 
 import type { AgentchatResolvedAccount } from '../channel.js'
 import { createLogger, type Logger } from '../log.js'
-import {
-  registerRuntime,
-  unregisterRuntime,
-  getRuntime,
-} from './runtime-registry.js'
-import {
-  createInboundBridge,
-  type ChannelRuntimeLike,
-} from './inbound-bridge.js'
+import { readDoorbellModeFromEnv, readReplyGateEnabledFromEnv, readReplyGateFailOpenFromEnv, readReplyGateTimeoutMsFromEnv } from '../credentials/read-env.js'
+import { multiAccountRefusal } from '../channel-account.js'
+import { registerDoorbell, unregisterDoorbell, getDoorbell } from './runtime-registry.js'
+import { AgentInvoker } from '../doorbell/invoker.js'
+import { MainLineClient } from '../doorbell/main-line.js'
+import { createRuntimeGateCaller, createRuntimeTurnRunner, resolveDoorbellAgentId, type ChannelRuntimeLike } from '../doorbell/model.js'
+import { getClient } from './sdk-client.js'
+import { groupInviteFromRecord } from '../knock-frames.js'
 
 function adaptLog(log: ChannelGatewayContext['log']): Logger | undefined {
   if (!log) return undefined
-  return {
+  const adapted: Logger = {
     trace: (obj, msg) => log.debug?.(formatLogLine(obj, msg)),
     debug: (obj, msg) => log.debug?.(formatLogLine(obj, msg)),
     info: (obj, msg) => log.info(formatLogLine(obj, msg)),
     warn: (obj, msg) => log.warn(formatLogLine(obj, msg)),
     error: (obj, msg) => log.error(formatLogLine(obj, msg)),
-    child: () => adaptLog(log)!,
+    child: () => adapted,
   }
+  return adapted
 }
 
 function formatLogLine(obj: object, msg?: string): string {
@@ -63,6 +55,14 @@ function formatLogLine(obj: object, msg?: string): string {
   return head ? `${head} ${tail}` : tail
 }
 
+/** Resolve when `signal` aborts; run `onAbort` first so cleanup completes before OpenClaw sees the task end. */
+export async function waitUntilAbort(signal: AbortSignal, onAbort: () => Promise<void> | void): Promise<void> {
+  if (!signal.aborted) {
+    await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }))
+  }
+  await onAbort()
+}
+
 export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAccount> = {
   async startAccount(ctx) {
     const account = ctx.account
@@ -71,124 +71,122 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       return
     }
     if (!account.configured || !account.config) {
-      ctx.log?.warn?.(
-        `[agentchat:${ctx.accountId}] account not configured — skipping start`,
+      ctx.log?.warn?.(`[agentchat:${ctx.accountId}] account not configured — skipping start`)
+      return
+    }
+    const config = account.config
+    const logger =
+      adaptLog(ctx.log) ??
+      createLogger({ level: config.observability.logLevel, redactKeys: config.observability.redactKeys })
+
+    if (readDoorbellModeFromEnv() === 'off') {
+      ctx.log?.info?.(
+        `[agentchat:${ctx.accountId}] AGENTCHAT_DOORBELL=off — no socket, no knocks, no turns; the hosted tools and the manual stay placed`,
       )
+      ctx.setStatus({ ...ctx.getStatus(), running: false, connected: false, linked: true })
+      await waitUntilAbort(ctx.abortSignal, () => undefined)
       return
     }
 
-    const logger =
-      adaptLog(ctx.log) ??
-      createLogger({
-        level: account.config.observability.logLevel,
-        redactKeys: account.config.observability.redactKeys,
-      })
-
-    // Runtime and bridge wiring form a small chicken-and-egg: the bridge
-    // handler closes over the runtime (for reply dispatch), and the runtime
-    // closes over the bridge (as its `onInbound` handler). We solve it with
-    // one mutable ref for the runtime, closed over by a single bridge
-    // handler that's constructed once — reused per event, not allocated.
-    let runtimeRef: Awaited<ReturnType<typeof registerRuntime>> | null = null
-    let inboundHandler: ReturnType<typeof createInboundBridge> | null = null
-    const bridge = (event: unknown) => {
-      if (!runtimeRef || !inboundHandler) return
-      void inboundHandler(event as Parameters<ReturnType<typeof createInboundBridge>>[0])
+    // One account per gateway in this release (see `multiAccountRefusal`):
+    // a second account's turn would call the hosted tools as the first.
+    const refusal = multiAccountRefusal(ctx.cfg)
+    if (refusal) {
+      ctx.log?.error?.(`[agentchat:${ctx.accountId}] doorbell not started — ${refusal}`)
+      ctx.setStatus({ ...ctx.getStatus(), running: false, connected: false, lastDisconnect: { at: Date.now(), error: refusal } })
+      await waitUntilAbort(ctx.abortSignal, () => undefined)
+      return
     }
 
-    runtimeRef = await registerRuntime({
-      accountId: ctx.accountId,
-      config: account.config,
-      logger,
-      handlers: {
-        onInbound: bridge,
-        // `runtime` used below is captured AFTER registerRuntime resolves,
-        // but the handler is never invoked before that — the WS has to
-        // authenticate first. Safe to assign synchronously just after.
+    const channelRuntime = ctx.channelRuntime as ChannelRuntimeLike | undefined
+    const agentId = resolveDoorbellAgentId({ cfg: ctx.cfg, accountId: ctx.accountId, channelRuntime })
+    const mainLine = new MainLineClient({ apiKey: config.apiKey, apiBase: config.apiBase })
+    const gateTimeoutMs = readReplyGateTimeoutMsFromEnv()
 
-        onAuthenticated: (at) => {
-          ctx.log?.info?.(`[agentchat:${ctx.accountId}] authenticated at ${new Date(at).toISOString()}`)
-          ctx.setStatus({
-            ...ctx.getStatus(),
-            running: true,
-            connected: true,
-            linked: true,
-            lastConnectedAt: at,
-          })
-        },
-        onError: (err) => {
-          ctx.log?.warn?.(
-            `[agentchat:${ctx.accountId}] runtime error: ${err.message} (class=${err.class_})`,
-          )
-        },
-        onStateChanged: (next) => {
-          const running = next.kind !== 'CLOSED' && next.kind !== 'AUTH_FAIL'
-          const connected = next.kind === 'READY' || next.kind === 'DEGRADED'
-          ctx.setStatus({
-            ...ctx.getStatus(),
-            running,
-            connected,
-            healthState: next.kind,
-          })
-        },
-        onBacklogWarning: (warning) => {
-          ctx.log?.warn?.(
-            `[agentchat:${ctx.accountId}] recipient backlog warning: @${warning.recipientHandle} has ${warning.undeliveredCount} undelivered`,
-          )
-        },
+    await registerDoorbell({
+      accountId: ctx.accountId,
+      config,
+      logger,
+      build: (runtime) => {
+        const invoker = new AgentInvoker({
+          accountId: ctx.accountId,
+          agentId,
+          mainLine,
+          gateCaller: createRuntimeGateCaller({ agentId }),
+          turnRunner: createRuntimeTurnRunner(),
+          logger,
+          gateEnabled: readReplyGateEnabledFromEnv(),
+          gateFailOpen: readReplyGateFailOpenFromEnv(),
+          ...(gateTimeoutMs !== undefined ? { gateTimeoutMs } : {}),
+        })
+        return {
+          invoker,
+          handlers: {
+            onKnock: (source) => invoker.knock(source),
+            onGroupInvite: (invite) => invoker.groupInvite(invite, 'live'),
+            onAuthenticated: (at) => {
+              ctx.log?.info?.(`[agentchat:${ctx.accountId}] authenticated at ${new Date(at).toISOString()} (agent ${agentId})`)
+              ctx.setStatus({ ...ctx.getStatus(), running: true, connected: true, linked: true, lastConnectedAt: at })
+              // Invite frames are live-only (not part of any drain), so an
+              // invite that landed while the socket was down is fetched once
+              // per connect and handed to the invoker, which dedups by id.
+              void catchUpInvites(ctx.accountId, config, invoker, logger)
+            },
+            onError: (err) => {
+              ctx.log?.warn?.(`[agentchat:${ctx.accountId}] runtime error: ${err.message} (class=${err.class_})`)
+            },
+            onStateChanged: (next) => {
+              const running = next.kind !== 'CLOSED' && next.kind !== 'AUTH_FAIL'
+              const connected = next.kind === 'READY' || next.kind === 'DEGRADED'
+              ctx.setStatus({ ...ctx.getStatus(), running, connected, statusState: next.kind })
+              if (runtime.getHealth().state.kind === 'AUTH_FAIL') {
+                ctx.log?.error?.(`[agentchat:${ctx.accountId}] AUTH_FAIL — rotate the key or re-run openclaw channels add agentchat`)
+              }
+            },
+          },
+        }
       },
     })
 
-    // Construct the per-event inbound handler ONCE now that `runtimeRef`
-    // is populated. Reusing it avoids allocating a fresh closure per
-    // inbound frame — at multi-hundred-msg/sec this matters.
-    inboundHandler = createInboundBridge({
-      accountId: ctx.accountId,
-      config: account.config,
-      logger,
-      runtime: runtimeRef,
-      channelRuntime: ctx.channelRuntime as ChannelRuntimeLike | undefined,
-      gatewayCfg: ctx.cfg,
-      selfHandle: account.config.agentHandle,
-    })
-
-    // Keep the channel task pending until OpenClaw aborts. Without this,
-    // startAccount resolves immediately after wiring the runtime — and
-    // OpenClaw's task-runner (server-channels.ts:475 "channel exited")
-    // treats the resolved promise as a graceful exit and triggers
-    // auto-restart with backoff. Each restart calls registerRuntime,
-    // which stops the existing runtime first (DRAIN_REQUESTED), draining
-    // the WebSocket and killing in-flight inbound dispatches before the
-    // LLM can complete. The result is the flap loop we observed:
-    // READY → DRAINING → CONNECTING → AUTHENTICATING → READY → DRAINING
-    // every 1-3 minutes, with auto-restart attempt counter ticking up
-    // until OpenClaw gives up after 10 attempts.
-    //
-    // waitUntilAbort is the canonical OpenClaw plugin-sdk lifecycle
-    // helper — see openclaw/src/plugin-sdk/channel-lifecycle.core.ts:30
-    // and the runPassiveAccountLifecycle pattern used by IRC, Google
-    // Chat, etc. The onAbort callback runs (and is awaited) before the
-    // promise resolves, so our cleanup happens fully before OpenClaw
-    // sees the task complete — no stop/start race.
+    // Keep the channel task pending until OpenClaw aborts it. A resolved
+    // promise would read as "channel exited" and trigger auto-restart.
     await waitUntilAbort(ctx.abortSignal, async () => {
       try {
-        await unregisterRuntime(ctx.accountId, Date.now() + 5_000)
+        await unregisterDoorbell(ctx.accountId, Date.now() + 5_000)
       } catch (err) {
-        ctx.log?.error?.(
-          `[agentchat:${ctx.accountId}] unregisterRuntime failed on abort: ${err instanceof Error ? err.message : String(err)}`,
-        )
+        ctx.log?.error?.(`[agentchat:${ctx.accountId}] unregister failed on abort: ${err instanceof Error ? err.message : String(err)}`)
       }
     })
   },
 
   async stopAccount(ctx) {
-    await unregisterRuntime(ctx.accountId, Date.now() + 5_000)
-    ctx.setStatus({
-      ...ctx.getStatus(),
-      running: false,
-      connected: false,
-    })
+    await unregisterDoorbell(ctx.accountId, Date.now() + 5_000)
+    ctx.setStatus({ ...ctx.getStatus(), running: false, connected: false })
   },
 }
 
-export { getRuntime }
+async function catchUpInvites(
+  accountId: string,
+  config: AgentchatResolvedAccount['config'] & object,
+  invoker: AgentInvoker,
+  logger: Logger,
+): Promise<void> {
+  try {
+    const client = getClient({ accountId, config })
+    const invites: unknown = await client.listGroupInvites()
+    if (!Array.isArray(invites)) return
+    let surfaced = 0
+    for (const row of invites) {
+      const invite = groupInviteFromRecord(row)
+      if (invite && invoker.groupInvite(invite, 'catch-up')) surfaced += 1
+    }
+    if (surfaced > 0) logger.info({ surfaced }, 'pending group invites surfaced on connect')
+  } catch (err) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'pending-invite catch-up failed — live invite frames are unaffected and the agent can still list invites with the hosted tools',
+    )
+  }
+}
+
+export { getDoorbell }

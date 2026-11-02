@@ -51,9 +51,12 @@ export default defineConfig({
     '../credentials/read-env.js',
     '../credentials/read-env.cjs',
     // AGENTS.md anchor — kept as its own runtime file. Consumers in
-    // src/ import './binding/agents-anchor.js'; no parent-relative
-    // variant exists in the source tree today.
+    // src/ import './binding/agents-anchor.js'; src/doorbell/ imports
+    // '../binding/agents-anchor.js'. Both are rewritten to the dist-root
+    // sibling by scripts/fix-cjs-extensions.mjs.
     './binding/agents-anchor.js',
     './binding/agents-anchor.cjs',
+    '../binding/agents-anchor.js',
+    '../binding/agents-anchor.cjs',
   ],
 })

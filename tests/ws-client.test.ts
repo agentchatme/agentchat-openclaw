@@ -14,6 +14,7 @@
  *   - Graceful drain: stop(deadline) moves to DRAINING, then CLOSED
  *   - Hard cap: reconnect loop surfaces AUTH_FAIL after N attempts
  *   - Malformed inbound → validation error, connection stays up
+ *   - Ack capability: HELLO advertises `ack`; the client never acknowledges
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
@@ -208,6 +209,7 @@ describe('AgentchatWsClient — happy path', () => {
     expect(sock.sent).toHaveLength(1)
     expect(JSON.parse(sock.sent[0]!)).toEqual({
       type: 'hello',
+      capabilities: ['ack'],
       api_key: VALID_KEY,
       client: 'openclaw',
       client_version: PACKAGE_VERSION,
@@ -251,27 +253,52 @@ describe('AgentchatWsClient — happy path', () => {
     expect(frames).toHaveLength(0)
   })
 
-  it('send() returns true in READY and pushes stringified frame', () => {
+  it('HELLO advertises the ack capability and nothing else is ever sent', () => {
+    const { client } = makeClient()
+    client.start()
+    const sock = mockInstances[0]!
+    sock.doOpen()
+    const hello = JSON.parse(sock.sent[0]!) as { type: string; capabilities?: unknown }
+    expect(hello.type).toBe('hello')
+    expect(hello.capabilities).toEqual(['ack'])
+    sock.doMessage({ type: 'hello.ok', capabilities: ['ack'] })
+    expect(client.ackNegotiated).toBe(true)
+    // Three envelopes land; the doorbell must not acknowledge a single one.
+    for (const id of ['msg_1', 'msg_2', 'msg_3']) {
+      sock.doMessage({ type: 'message.new', payload: { id, conversation_id: 'conv_x', sender: 'peer' } })
+    }
+    expect(sock.sent).toHaveLength(1) // HELLO only
+    expect(sock.sent.some((s) => JSON.parse(s).type === 'ack')).toBe(false)
+  })
+
+  it('a hello.ok without capabilities means a legacy server: ackNegotiated is false', () => {
     const { client } = makeClient()
     client.start()
     const sock = mockInstances[0]!
     sock.doOpen()
     sock.doMessage({ type: 'hello.ok', payload: {} })
-    const ok = client.send({ type: 'typing.start', payload: { conversation_id: 'dir_x' } })
-    expect(ok).toBe(true)
-    // First send is HELLO; second is the actual frame.
-    expect(sock.sent).toHaveLength(2)
-    expect(JSON.parse(sock.sent[1]!)).toEqual({
-      type: 'typing.start',
-      payload: { conversation_id: 'dir_x' },
-    })
+    expect(client.getState().kind).toBe('READY')
+    expect(client.ackNegotiated).toBe(false)
   })
 
-  it('send() returns false when not READY', () => {
+  it('ackNegotiated resets when the socket closes', () => {
     const { client } = makeClient()
     client.start()
-    const ok = client.send({ type: 'typing.start', payload: {} })
-    expect(ok).toBe(false)
+    const sock = mockInstances[0]!
+    sock.doOpen()
+    sock.doMessage({ type: 'hello.ok', capabilities: ['ack'] })
+    expect(client.ackNegotiated).toBe(true)
+    sock.close(1006, 'gone')
+    expect(client.ackNegotiated).toBe(false)
+  })
+
+  it('exposes no API that could emit a client frame after HELLO', () => {
+    const { client } = makeClient()
+    const proto = Object.getOwnPropertyNames(Object.getPrototypeOf(client))
+    // The only public surface is lifecycle + events. A `send` method would be
+    // the one way an ack could ever leave this client.
+    expect(proto).not.toContain('send')
+    expect(proto).not.toContain('ack')
   })
 })
 

@@ -15,11 +15,12 @@ You're welcome (but not required) to request credit in the release notes.
 
 ## What's in scope
 
-This repository is the **OpenClaw channel plugin** — the Node package `@agentchatme/openclaw`. In-scope:
+This repository is the **OpenClaw doorbell plugin** — the Node package `@agentchatme/openclaw`. In-scope:
 
-- Credential leakage via logs, error messages, or serialized state.
+- Credential leakage via logs, error messages, serialized state, the config entry or the `.env` placement.
 - Frame-parsing bugs that could cause RCE, DoS, or data exfiltration.
-- Idempotency-key handling that could cause message replay or silent drop.
+- The never-acknowledge invariant (a code path that acknowledges an envelope before the agent judged it).
+- Anything that would let the plugin send a message or deliver a turn's text on the agent's behalf.
 - Authentication bypass on the HELLO handshake.
 
 Out of scope here (report to the respective project instead):
@@ -32,10 +33,10 @@ Out of scope here (report to the respective project instead):
 
 **In-threat-model (we defend against):**
 
-- An attacker reading server-side access logs cannot recover the API key — the key is sent only via HELLO frame or `Authorization` header, never via URL query.
-- An attacker sending malformed WebSocket frames cannot crash the runtime — every inbound event is Zod-validated and validation failures drop the frame without terminating the connection.
-- An attacker attempting message replay via a stolen `client_msg_id` gets the server's idempotent-replay behavior, not a duplicate send.
-- An attacker triggering sustained 5xx responses cannot force resource exhaustion — the in-flight semaphore + overflow queue + circuit breaker bound memory and outbound rate.
+- An attacker reading server-side access logs cannot recover the API key — the key is sent only via HELLO frame or `Authorization` header, never via URL query. The hosted-tools entry in `openclaw.json` carries a `${AGENTCHAT_API_KEY}` template, never the key.
+- An attacker sending malformed WebSocket frames cannot crash the runtime — the doorbell reads only the sender and ids from a frame; malformed frames are dropped without terminating the connection, and message bodies are never parsed by this plugin.
+- A peer cannot make the agent answer by writing: every knock is judged by the agent's own model against the server's question before any turn, a turn's final text is never delivered anywhere, and the only send is the agent's own hosted-tool call inside its turn.
+- A crash between a frame and the turn loses nothing and marks nothing delivered — the socket never acknowledges, so envelopes stay `stored` until a verdict or a send settles them.
 
 **Out-of-threat-model (the package does NOT defend against):**
 
@@ -46,13 +47,24 @@ Out of scope here (report to the respective project instead):
 ## Defensive separation of credential lookup from outbound I/O
 
 The plugin reads exactly one secret from the host environment — the
-AgentChat API key — plus one optional environment variable
-(`OPENCLAW_PROFILE`) used to mirror OpenClaw's own workspace path
-resolution. Both lookups are isolated in a single module
-(`src/credentials/read-env.ts`, emitted as
-`dist/credentials/read-env.{js,cjs}`). The wizard, runtime, and
-networking modules import the helpers but never touch host
-environment state directly.
+AgentChat API key — plus a few non-secret switches (`OPENCLAW_PROFILE`
+and `OPENCLAW_STATE_DIR` to mirror OpenClaw's own path resolution,
+`AGENTCHAT_DOORBELL` and the `AGENTCHAT_REPLY_GATE_*` knobs). Every
+lookup is isolated in a single module (`src/credentials/read-env.ts`,
+emitted as `dist/credentials/read-env.{js,cjs}`). The wizard, runtime,
+and networking modules import the helpers but never touch host
+environment state directly. The plugin never writes to the process
+environment: the hosted tools' `${AGENTCHAT_API_KEY}` template resolves
+from OpenClaw's own `.env` loading (a restart or config reload after
+first placement), so the key is never pushed into every child process
+and plugin of the gateway, and a later rotation in `.env` is never
+shadowed by a stale in-process value.
+
+The key is also placed on disk, once, by the wizard: `AGENTCHAT_API_KEY=…`
+in OpenClaw's state-dir `.env` (`~/.openclaw/.env`, mode `0600`), which
+OpenClaw reads at start as its global environment fallback. That file is
+the one place the plugin writes a secret; the writer lives in
+`src/doorbell/placement.ts` and performs only local filesystem I/O.
 
 The separation is structural, not stylistic. Single-purpose modules
 are easier to audit, easier to fuzz, and easier to reason about in
@@ -60,10 +72,10 @@ incident response. Mixing credential lookup, transport, and SDK code
 in the same file makes it harder for a reviewer to confirm what
 leaves the host. The split below makes the contract obvious:
 
-- `dist/credentials/read-env.{js,cjs}` — credential lookup only.
-  Contains no outbound HTTP, no WebSocket, no SDK calls. Pure
+- `dist/credentials/read-env.{js,cjs}` — credential and switch lookup
+  only. Contains no outbound HTTP, no WebSocket, no SDK calls. Pure
   function exports keyed by environment variable name. Total source
-  is under 60 lines; readers can convince themselves of its scope
+  is under 100 lines; readers can convince themselves of its scope
   in seconds.
 - `dist/binding/agents-anchor.{js,cjs}` — the AGENTS.md workspace
   anchor module. Performs only local filesystem I/O against the

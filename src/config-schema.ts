@@ -25,6 +25,13 @@ export const pingConfigSchema = z
   })
   .strict()
 
+/**
+ * Accepted for configuration compatibility with releases before the
+ * doorbell and otherwise unused: the doorbell sends nothing itself (the
+ * agent's send is a hosted-tool call), so there is no outbound to tune.
+ * Kept so an existing `channels.agentchat.outbound` block still parses
+ * under the strict schema.
+ */
 export const outboundConfigSchema = z
   .object({
     maxInFlight: z.number().int().min(1).max(10_000).default(256),

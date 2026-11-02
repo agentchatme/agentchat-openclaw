@@ -32,8 +32,11 @@
  *      post-register/recover sentinel; otherwise the framework's default
  *      prompt runs.
  *   4. `finalize` — calls GET /v1/agents/me once more to confirm the key works,
- *      surfaces the authenticated handle, and never throws on transport errors
- *      (a fresh clone with a proxy should still save config and retry later).
+ *      surfaces the authenticated handle, and places the doorbell: the key in
+ *      OpenClaw's `.env`, the identity line in AGENTS.md, the hosted MCP
+ *      server in `mcp.servers.agentchat` (returned as a config patch for
+ *      OpenClaw to persist). Never throws on transport errors (a fresh clone
+ *      with a proxy should still save config and retry later).
  *
  * Writes go through `applyAgentchatAccountPatch` — the same helper backing
  * `setup.applyAccountConfig`, so the non-interactive `openclaw setup --token
@@ -84,7 +87,9 @@ import {
 // Credential lookup helper — see SECURITY.md for why this lives in a
 // separate module and must not be inlined into the wizard.
 import { readApiKeyFromEnv } from './credentials/read-env.js'
-import { writeAgentsAnchor, removeAgentsAnchor } from './binding/agents-anchor.js'
+import { removeAgentsAnchor } from './binding/agents-anchor.js'
+import { placeDoorbell, formatPlacement } from './doorbell/placement.js'
+import { DEFAULT_API_BASE, withoutHostedMcpEntry } from './doorbell/mcp.js'
 
 /**
  * Sentinel credential-values key used to signal "the register or recover
@@ -95,7 +100,7 @@ import { writeAgentsAnchor, removeAgentsAnchor } from './binding/agents-anchor.j
  */
 const JUST_REGISTERED_SENTINEL = '_agentchatJustRegistered' as const
 
-// Canonical handle shape — mirrors packages/shared/src/validation/handles.ts
+// Canonical handle shape — the AgentChat handle rule (`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
 // HANDLE_REGEX plus the 3–30 length check. Server is authoritative; this is
 // a client-side fast-fail so users don't round-trip an obviously-bad handle.
 const HANDLE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
@@ -1062,46 +1067,38 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
       if (result.ok) {
         spinner.stop(`Authenticated as @${result.agent.handle}`)
 
-        // Write the persistent identity anchor into the workspace
-        // AGENTS.md so the agent is aware of its handle on every turn
-        // of every session — see binding/agents-anchor.ts header for
-        // the full rationale (TL;DR: messageToolHints only fires when
-        // AgentChat is the active channel; AGENTS.md is loaded every
-        // turn regardless of channel context).
-        //
-        // Best-effort by intent: a workspace that's read-only or a
-        // permission error must NOT bounce the wizard back to the user
-        // — they have a working key and config; the anchor is a
-        // nice-to-have that they can repair offline. Substitution
-        // failures (handle didn't land in the file) are the one error
-        // we surface, since they indicate a code regression and
-        // leaving a broken anchor on disk would be worse than the
-        // notice.
-        try {
-          writeAgentsAnchor({ cfg, handle: result.agent.handle })
-        } catch (err) {
-          await prompter.note(
-            [
-              err instanceof Error ? err.message : String(err),
-              '',
-              'Identity anchor write to AGENTS.md failed — your account is configured fine, but the agent will not be told about its handle in non-AgentChat sessions until this is repaired.',
-            ].join('\n'),
-            'AgentChat anchor warning',
-          )
-        }
+        // Place the doorbell: the key in OpenClaw's state-dir `.env` (the
+        // hosted tools' bearer header is a template on it), the identity
+        // line in AGENTS.md (loaded every turn), the manual (bundled), and
+        // the hosted MCP server in `mcp.servers.agentchat`. Best-effort by
+        // intent: a read-only workspace must NOT bounce the wizard — the
+        // key and config are saved; the report says what to repair.
+        const handle = result.agent.handle
+        const placed = placeDoorbell({ cfg, handle, apiKey, apiBase: apiBase ?? DEFAULT_API_BASE })
+        const failed = placed.steps.filter((s) => s.status === 'failed')
+        await prompter.note(
+          [
+            ...formatPlacement(placed.steps),
+            '',
+            placed.mcp === 'added' || placed.steps.some((s) => s.name === 'key' && s.status === 'changed')
+              ? 'Restart the gateway once so its environment carries the key and it connects the hosted tools. Then `openclaw channels status` shows the doorbell and the tools.'
+              : 'The agent is reachable: a peer\'s message rings the doorbell; the agent decides with its own model; it answers through the hosted AgentChat tools.',
+            ...(failed.length > 0
+              ? ['', 'Some placement failed (above). Your account is configured; re-run `openclaw channels add agentchat` after fixing the path, or `openclaw doctor --fix` for the config entry.']
+              : []),
+          ].join('\n'),
+          'AgentChat doorbell placed',
+        )
 
         // If the wizard registered fresh, agentHandle is already in cfg.
         // If the user pasted an existing key, capture the server-known handle
         // so status/log lines render nicely without a manual config edit.
-        const existingHandle = readAgentchatConfigField(cfg, accountId, 'agentHandle')
-        if (!existingHandle && isValidHandleShape(result.agent.handle)) {
-          return {
-            cfg: applyAgentchatAccountPatch(cfg, accountId, {
-              agentHandle: result.agent.handle,
-            }),
-          }
+        let nextCfg = placed.cfg
+        const existingHandle = readAgentchatConfigField(nextCfg, accountId, 'agentHandle')
+        if (!existingHandle && isValidHandleShape(handle)) {
+          nextCfg = applyAgentchatAccountPatch(nextCfg, accountId, { agentHandle: handle })
         }
-        return
+        return { cfg: nextCfg }
       }
 
       spinner.stop(`API key did not pass the live check (${result.reason})`)
@@ -1142,21 +1139,23 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
     lines: ['On the next prompt, choose "Finished" to exit.'],
   },
 
-  // `disable` fires on `openclaw channels remove agentchat`. We strip
-  // the persistent AGENTS.md anchor here so the agent stops being told
-  // it's @handle on AgentChat the moment the channel is removed.
-  // Best-effort: a swallow on FS errors is intentional — the channel
-  // remove must not be blocked by a stale anchor we can't clean up.
-  // Plugin uninstall (`openclaw plugins uninstall`) does not currently
-  // fire any plugin hook (openclaw#5985, #54813) so this only runs
-  // when the user explicitly removes the channel; orphan blocks are
-  // documented in RUNBOOK.md.
+  // `disable` fires on `openclaw channels remove agentchat`. We strip the
+  // AGENTS.md identity line and our own `mcp.servers.agentchat` entry so the
+  // agent stops being told it is @handle on AgentChat and stops seeing the
+  // hosted tools the moment the channel is removed. The key stays in the
+  // channel config and in `.env` (a remove is a pause, not a rotation).
+  // Best-effort: FS errors never block the channel-remove. Plugin uninstall
+  // (`openclaw plugins uninstall`) fires no plugin hook, so this only runs
+  // when the user explicitly removes the channel; orphans are documented in
+  // RUNBOOK.md.
   disable: (cfg) => {
     try {
       removeAgentsAnchor({ cfg })
     } catch {
       // Anchor cleanup is best-effort — never block the channel-remove.
     }
-    return setSetupChannelEnabled(cfg, AGENTCHAT_CHANNEL_ID, false)
+    const apiBase = readAgentchatConfigField(cfg, 'default', 'apiBase') ?? DEFAULT_API_BASE
+    const stripped = withoutHostedMcpEntry(cfg, apiBase).cfg
+    return setSetupChannelEnabled(stripped, AGENTCHAT_CHANNEL_ID, false)
   },
 }

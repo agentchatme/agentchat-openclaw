@@ -948,6 +948,7 @@ describe('agentchatSetupWizard.finalize', () => {
 
     const s = scripted([
       { kind: 'progress' },
+      { kind: 'note', contains: 'AgentChat doorbell placed' },
     ])
 
     const result = await agentchatSetupWizard.finalize!({
@@ -960,9 +961,42 @@ describe('agentchatSetupWizard.finalize', () => {
     } as never)
 
     expect(result).toBeDefined()
-    const patched = (result as { cfg: unknown }).cfg
+    const patched = (result as { cfg: { mcp?: { servers?: Record<string, unknown> } } }).cfg
     expect(readAgentchatConfigField(patched as never, 'default', 'agentHandle')).toBe('alice')
+    // Placement: the hosted tools are registered as a bearer TEMPLATE on the
+    // env var — never the key itself.
+    const entry = patched.mcp?.servers?.agentchat as { url: string; transport: string; headers: { Authorization: string } }
+    expect(entry.url).toBe('https://api.agentchat.me/mcp')
+    expect(entry.transport).toBe('streamable-http')
+    expect(entry.headers.Authorization).toBe('Bearer ${AGENTCHAT_API_KEY}')
+    expect(JSON.stringify(entry)).not.toContain('ac_live_abcdef0123456789abcd')
+    // Placement: the identity line landed in the workspace AGENTS.md with the manual's text.
+    const agents = fs.readFileSync(path.join(wizardWorkspace, 'AGENTS.md'), 'utf8')
+    expect(agents).toContain('I am @alice on AgentChat (api.agentchat.me).')
+    // Placement: the key landed in the (test-redirected) OpenClaw state-dir .env.
+    const dotenv = fs.readFileSync(path.join(process.env.OPENCLAW_STATE_DIR!, '.env'), 'utf8')
+    expect(dotenv).toContain('AGENTCHAT_API_KEY=ac_live_abcdef0123456789abcd')
     expect(s.remaining()).toBe(0)
+  })
+
+  it('disable strips the identity line and our mcp.servers.agentchat entry, keeps a hand-written one', () => {
+    const cfg = {
+      ...(configuredCfg as object),
+      mcp: {
+        servers: {
+          agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}' } },
+          other: { url: 'https://example.invalid/mcp', transport: 'streamable-http' },
+        },
+      },
+    }
+    const disabled = agentchatSetupWizard.disable!(cfg as never) as { mcp: { servers: Record<string, unknown> }; channels: { agentchat: { enabled: boolean } } }
+    expect(disabled.mcp.servers.agentchat).toBeUndefined()
+    expect(disabled.mcp.servers.other).toBeDefined()
+    expect(disabled.channels.agentchat.enabled).toBe(false)
+
+    const hand = { ...(configuredCfg as object), mcp: { servers: { agentchat: { url: 'https://my.proxy/mcp', transport: 'streamable-http' } } } }
+    const kept = agentchatSetupWizard.disable!(hand as never) as { mcp: { servers: Record<string, unknown> } }
+    expect(kept.mcp.servers.agentchat).toEqual({ url: 'https://my.proxy/mcp', transport: 'streamable-http' })
   })
 
   it('surfaces a warning but keeps the config when the key fails live probe', async () => {

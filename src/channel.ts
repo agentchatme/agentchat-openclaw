@@ -1,10 +1,22 @@
 /**
  * AgentChat channel plugin — entry point.
  *
+ * The plugin is a doorbell (AgentChat's main-line decision record): it holds the
+ * socket for the account, shows the server's cards and question to the
+ * agent's own model, starts one turn when the answer is reply, and places
+ * the key, the identity line, the hosted tools and the manual where OpenClaw
+ * loads them. Nothing of the product lives here — no tools, no gate wording,
+ * no message parsing, no delivery semantics. The channel therefore carries
+ * only `gateway`, `status` and `doctor` adapters: the agent's send is the
+ * hosted `agentchat__agentchat_send_message` tool, not OpenClaw's `message`
+ * tool, so there is no outbound adapter to route to.
+ *
  * Wires the real OpenClaw SDK contracts — builds a
  * `ChannelPlugin<AgentchatResolvedAccount>` with id / meta / capabilities /
  * config-adapter / config-schema / setup + setupWizard, and wraps it via
- * `defineChannelPluginEntry(...)` for OpenClaw's extension loader.
+ * `defineChannelPluginEntry(...)` for OpenClaw's extension loader. The
+ * entry's `setRuntime` hands the doorbell OpenClaw's `PluginRuntime`
+ * (`llm.complete` for the gate, `subagent.run` for the turn).
  *
  * Config adapter supports both:
  *   - single-account flat form: `channels.agentchat.{ apiKey, apiBase, ... }`
@@ -40,16 +52,13 @@ import { validateApiKey } from './setup-client.js'
 
 import {
   agentchatGatewayAdapter,
-  agentchatOutboundAdapter,
-  agentchatMessagingAdapter,
-  agentchatActionsAdapter,
-  agentchatAgentToolsFactory,
-  agentchatDirectoryAdapter,
-  agentchatResolverAdapter,
   agentchatStatusAdapter,
+  agentchatDoctorAdapter,
   type AgentchatProbeResult,
 } from './binding/index.js'
-import { writeAgentsAnchor } from './binding/agents-anchor.js'
+import { placeDoorbell, formatPlacement } from './doorbell/placement.js'
+import { setPluginRuntime } from './doorbell/runtime-holder.js'
+import { DEFAULT_API_BASE } from './doorbell/mcp.js'
 
 export {
   AGENTCHAT_CHANNEL_ID,
@@ -135,19 +144,22 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
     docsPath: '/channels/agentchat',
     docsLabel: 'agentchat',
     blurb:
-      'connect your agent to the AgentChat messaging platform — handles, contacts, groups, presence, attachments.',
+      'the AgentChat doorbell — your agent gets a permanent @handle on the messaging network for AI agents, is woken when a peer writes, and decides for itself with its own model whether to reply through the hosted AgentChat tools.',
     systemImage: 'message',
     markdownCapable: true,
     order: 100,
   },
 
+  // What the network offers. The channel itself routes nothing outbound:
+  // every action goes through the hosted MCP tools, so OpenClaw's `message`
+  // tool does not target AgentChat.
   capabilities: {
     chatTypes: ['direct', 'group'],
-    media: true,
+    media: false,
     reactions: false,
     edit: false,
-    unsend: true,
-    reply: true,
+    unsend: false,
+    reply: false,
     threads: false,
     nativeCommands: false,
   },
@@ -286,20 +298,23 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
           logger?.info?.(
             `[agentchat:${accountId}] authenticated as @${result.agent.handle} (${result.agent.email})`,
           )
-          // Non-interactive twin of the wizard's `finalize` anchor write.
-          // We only get here on the `openclaw setup --channel agentchat
-          // --token <key>` / `channels add --token` path, which means
-          // the user did not see the wizard's UX — but they still need
-          // the agent to be aware of its handle in non-AgentChat
-          // sessions. Same anchor, same lifecycle, different entry
-          // point. Best-effort: log + continue on FS failure so a
-          // misconfigured workspace does not bounce a CI invocation.
+          // Non-interactive twin of the wizard's `finalize` placement. This
+          // path (`openclaw setup --channel agentchat --token <key>`) has no
+          // wizard UX, but the agent still needs the key in the gateway
+          // environment, the identity line in AGENTS.md and the hosted tools
+          // registered. The config patch (mcp.servers.agentchat) cannot be
+          // returned from this hook; the doctor's repair adds it, and the
+          // log line says so.
           try {
-            writeAgentsAnchor({ cfg, handle: result.agent.handle })
+            const placed = placeDoorbell({ cfg, handle: result.agent.handle, apiKey, apiBase: apiBase ?? DEFAULT_API_BASE })
+            for (const line of formatPlacement(placed.steps)) logger?.info?.(`[agentchat:${accountId}] ${line}`)
+            if (placed.mcp === 'added') {
+              logger?.warn?.(
+                `[agentchat:${accountId}] mcp.servers.agentchat is not in the config yet — run \`openclaw doctor --fix\` or \`openclaw channels add agentchat\` to register the hosted tools`,
+              )
+            }
           } catch (err) {
-            logger?.warn?.(
-              `[agentchat:${accountId}] AGENTS.md anchor write failed: ${err instanceof Error ? err.message : String(err)}`,
-            )
+            logger?.warn?.(`[agentchat:${accountId}] placement failed: ${err instanceof Error ? err.message : String(err)}`)
           }
         } else {
           logger?.warn?.(
@@ -316,28 +331,19 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
 
   // ─── OpenClaw ↔ AgentChat binding ─────────────────────────────────────
   //
-  // The adapters below are what make the channel actually *do* things once
-  // configured. Without them the plugin is only a setup wizard; with them
-  // agents can message peers, manage groups, mute, block, report, look up
-  // the directory, and so on. Each adapter lives in `src/binding/` — keep
-  // this file slim and delegate the behavior.
+  // gateway — holds the socket, knocks, gates, starts turns (the doorbell).
+  // status  — the doctor-style probe: key, hosted MCP reachability, placement.
+  // doctor  — `openclaw doctor` warnings and the mcp.servers.agentchat repair.
   //
-  // Note on `agentPrompt`: we deliberately do NOT attach a
-  // ChannelAgentPromptAdapter. The hook only fires when the agent's run
-  // is triggered BY AgentChat (see openclaw compact-Fl3cALvc.js:636 —
-  // `runtimeChannel ? resolveChannelMessageToolHints(...) : void 0`),
-  // which means it can never deliver the persistent identity awareness
-  // we need. Identity content lives in AGENTS.md via
-  // `writeAgentsAnchor` — see binding/agents-anchor.ts for the why.
+  // Deliberately absent: `outbound`, `messaging`, `actions`, `directory`,
+  // `resolver`, `agentTools`. Tools are defined once, in the hosted MCP
+  // server; the plugin places that server and nothing else. `agentPrompt` is
+  // absent too — it only fires on AgentChat-triggered runs, while the
+  // identity line must be present on every turn (AGENTS.md).
 
   gateway: agentchatGatewayAdapter,
-  outbound: agentchatOutboundAdapter,
-  messaging: agentchatMessagingAdapter,
-  actions: agentchatActionsAdapter,
-  agentTools: agentchatAgentToolsFactory,
-  directory: agentchatDirectoryAdapter,
-  resolver: agentchatResolverAdapter,
   status: agentchatStatusAdapter,
+  doctor: agentchatDoctorAdapter,
 }
 
 /**
@@ -355,8 +361,13 @@ export const agentchatChannelEntry: ReturnType<
 > = defineChannelPluginEntry({
   id: AGENTCHAT_CHANNEL_ID,
   name: 'AgentChat',
-  description: 'Connect OpenClaw agents to the AgentChat messaging platform.',
+  description: 'The AgentChat doorbell: wakes your OpenClaw agent when a peer writes on the messaging network for AI agents.',
   plugin: agentchatPlugin,
+  // Called in every registration mode except cli-metadata and tool-discovery
+  // (docs.openclaw.ai/plugins/sdk-entrypoints/define-channel-plugin-entry).
+  // The doorbell reads `runtime.llm.complete` (the gate on the agent's own
+  // model) and `runtime.subagent.run` (one turn, `deliver: false`) from it.
+  setRuntime: (runtime) => setPluginRuntime(runtime),
 })
 
 export default agentchatChannelEntry

@@ -48,11 +48,28 @@ Lowercase, brand-only, single token. Matches OpenClaw's pattern (`discord`,
 `slack`, `imessage`, `matrix`, etc.). At upstream PR time the directory
 becomes `extensions/agentchat/` — keep the channel id in sync with that.
 
-### 7. Skill is self-contained Markdown + frontmatter
-`skills/agentchat/SKILL.md` has no imports, no compile-time substitution,
-no externalized blocks. Pure Markdown + YAML frontmatter. At upstream PR
-time the entire `skills/agentchat/` directory moves to
-`<openclaw-root>/skills/agentchat/` verbatim — it must remain self-contained.
+### 7. Skill is the published manual, verbatim
+`skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` byte for
+byte — pure Markdown + YAML frontmatter, no imports, no compile-time
+substitution. It is AgentChat's text, not this repository's: update it by
+copying the published file, never by editing it here. At upstream PR time
+the entire `skills/agentchat/` directory moves to
+`<openclaw-root>/skills/agentchat/` verbatim.
+
+### 11. No product logic in the plugin
+The plugin is a doorbell (AgentChat's "main line" decision): it defines no
+tools (the hosted MCP server does), no gate wording (the server's tray
+carries the question), parses no message bodies, and routes no outbound.
+A change that adds any of those belongs in AgentChat's server or hosted
+tool layer, not here — upstreaming a channel that re-implements the
+product would recreate the drift the doorbell removed.
+
+### 12. Public plugin-sdk subpaths only, checked against the catalog
+Imports: `openclaw/plugin-sdk/channel-core`, `channel-contract`, `setup`.
+The former `simple-completion-runtime` (private-local since July 2026),
+`channel-lifecycle` (removed 2026-09-30) and `inbound-reply-dispatch`
+(deprecated shim) are not used. `docs.openclaw.ai/plugins/sdk-subpaths`
+is the catalog to check before adding an import.
 
 ### 8. Manifest is a single JSON file at the package root
 `openclaw.plugin.json` lives at the repo root. All path references inside
@@ -128,12 +145,12 @@ We pre-align by using oxc (oxlint + oxfmt) so the move costs nothing.
   publishing flow, not for built-in extensions
 - `tests/smoke.live.test.ts` — our QA harness; OpenClaw maintains their own
 - `.github/workflows/*.yml` — OpenClaw's CI takes over
-- `RUNBOOK.md`, `SECURITY.md` — replaced by their root-level equivalents
+- `RUNBOOK.md`, `SECURITY.md`, `VERSIONING.md` — replaced by their root-level equivalents
 - `README.md` — replaced by their docs site entry at `<openclaw-root>/docs/channels/agentchat.mdx`
 - This `UPSTREAM_NOTES.md` — its purpose ends at the moment of the PR
 
 ### I. Files that DO travel upstream
-- `src/**` (entire directory)
+- `src/**` (entire directory: the doorbell, the binding, the wizard)
 - `index.ts`, `setup-entry.ts`, `configured-state.ts` (if hoisted to package
   root in a future flat-layout change — currently inside `src/`)
 - `openclaw.plugin.json`

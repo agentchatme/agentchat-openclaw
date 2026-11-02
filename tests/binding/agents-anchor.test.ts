@@ -21,7 +21,22 @@ import {
   writeAgentsAnchor,
   removeAgentsAnchor,
   resolveWorkspaceDir,
+  hasAgentsAnchorFor,
+  renderAnchorText,
+  ANCHOR_TEMPLATE,
 } from '../../src/binding/agents-anchor.js'
+
+const SKILL_PATH = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'skills', 'agentchat', 'SKILL.md')
+
+/** The fenced text block right after the manual's "### 1. The anchor line (identity)" heading. */
+function anchorBlockFromManual(): string {
+  const manual = fs.readFileSync(SKILL_PATH, 'utf8')
+  const heading = manual.indexOf('### 1. The anchor line (identity)')
+  expect(heading).toBeGreaterThan(0)
+  const fenceOpen = manual.indexOf('```text\n', heading)
+  const fenceClose = manual.indexOf('\n```', fenceOpen + 8)
+  return manual.slice(fenceOpen + '```text\n'.length, fenceClose)
+}
 
 // Build a synthetic OpenClawConfig that points at our temp workspace.
 // Real-world callers pass the live cfg from the wizard or
@@ -108,23 +123,31 @@ describe('agents-anchor', () => {
       expect(content).toContain('<!-- agentchat:start -->')
       expect(content).toContain('<!-- agentchat:end -->')
       expect(content).toContain('@alice')
-      expect(content).toContain('peer-to-peer messaging network')
+      expect(content).toContain('I am @alice on AgentChat (api.agentchat.me).')
     })
 
-    it('substitutes the handle in every templated location (defensive check)', () => {
+    it('substitutes the handle and leaks no placeholder (defensive check)', () => {
       const workspace = path.join(tmpDir, 'workspace')
-      writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'supplier-bot' })
+      writeAgentsAnchor({ cfg: cfgFor(workspace), handle: '@supplier-bot' })
 
       const content = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf-8')
-      // Both bold-form and code-fenced form should carry the literal
-      // handle. Mirrors Path A's `grep -qF "@${HANDLE}"` defense.
-      expect(content).toMatch(/\*\*@supplier-bot\*\*/u)
-      expect(content).toMatch(/`@supplier-bot`/u)
-      // No `${HANDLE}` placeholder leaked — Path A had this exact bug
-      // before they added the verify step.
-      expect(content).not.toContain('${HANDLE}')
-      expect(content).not.toContain('${handle}')
-      expect(content).not.toContain('${AGENTCHAT_HANDLE}')
+      expect(content).toContain('I am @supplier-bot on AgentChat')
+      expect(content).not.toContain('<handle>')
+      expect(content).not.toContain('@@')
+    })
+
+    it('writes the manual\'s anchor text verbatim — lockstep with skills/agentchat/SKILL.md', () => {
+      // The identity line is the main line's text, placed by this plugin. If
+      // the published manual changes its anchor, this test fails until the
+      // template here is updated to match.
+      expect(ANCHOR_TEMPLATE).toBe(anchorBlockFromManual())
+      expect(renderAnchorText('alice')).toBe(anchorBlockFromManual().split('<handle>').join('alice'))
+      const workspace = path.join(tmpDir, 'workspace')
+      writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice' })
+      const content = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf-8')
+      expect(content).toContain(renderAnchorText('alice'))
+      expect(hasAgentsAnchorFor({ cfg: cfgFor(workspace), handle: 'alice' }).present).toBe(true)
+      expect(hasAgentsAnchorFor({ cfg: cfgFor(workspace), handle: 'bob' }).present).toBe(false)
     })
 
     it('preserves pre-existing AGENTS.md content (does not clobber)', () => {
@@ -253,7 +276,7 @@ describe('agents-anchor', () => {
   describe('legacy marker migration (Path A → unified)', () => {
     it('strips a legacy `agentchat-skill:` block when writing the new unified block', () => {
       // Workspace previously anchored via Path A's old marker. After
-      // the unification (apps/web/public/openclaw-skill.md updated to use the
+      // the unification (the published OpenClaw recipe updated to use the
       // new `agentchat:` marker), users who hit the plugin first will
       // have the plugin migrate them silently — no duplicate blocks.
       const workspace = path.join(tmpDir, 'workspace')
@@ -281,7 +304,7 @@ describe('agents-anchor', () => {
       // …new unified block is in place…
       expect(content).toContain('<!-- agentchat:start -->')
       expect(content).toContain('<!-- agentchat:end -->')
-      expect(content).toContain('peer-to-peer messaging network')
+      expect(content).toContain('I am @alice on AgentChat (api.agentchat.me).')
       // …and surrounding user content is preserved.
       expect(content).toContain('# User content')
       expect(content).toContain('## Other user content')
