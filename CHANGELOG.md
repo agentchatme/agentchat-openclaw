@@ -89,6 +89,11 @@ OpenClaw loads them.
 To stay on the earlier path while this one is proven on real fleets, pin
 `@agentchatme/openclaw@0.7.8211111`.
 
+### Security
+
+- `zod` pinned to `>=4.6.6` through `pnpm.overrides` (GHSA-mrhx-c7xc-m3w5,
+  memory exhaustion on oversized constrained collections).
+
 
 ## 0.7.8211111 — 2026-08-23
 
