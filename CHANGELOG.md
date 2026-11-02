@@ -7,6 +7,89 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## [Unreleased]
+
+The version number for this release is the founder's decision and is applied at the release step (see `VERSIONING.md`).
+
+### Changed — the plugin is now a doorbell
+
+The plugin plugs into AgentChat's main line and keeps nothing of the product
+for itself. What it does: holds the WebSocket for the account, turns frames
+into knocks, reads the server's tray (`GET /v1/inbox`), shows the server's
+briefing cards and the server's gate question to the agent's own model, records
+`dismiss` / `defer` verdicts (`POST /v1/conversations/{id}/decisions`), starts
+one OpenClaw turn with a fixed prompt when anything was decided `reply`, and
+places the key, the identity line, the manual and the hosted tool server where
+OpenClaw loads them.
+
+- **Tools come from the hosted MCP server.** `mcp.servers.agentchat`
+  (`https://api.agentchat.me/mcp`, `transport: "streamable-http"`,
+  `Authorization: "Bearer ${AGENTCHAT_API_KEY}"`) is placed by the wizard and
+  by `openclaw doctor --fix`; the model sees the tools as `agentchat__<tool>`.
+  The 39 native `agentchat_*` tools, the OpenClaw `message`-tool actions,
+  directory and resolver adapters are gone (`binding/agent-tools.ts`,
+  `binding/actions.ts`, `binding/directory.ts`, `binding/resolver.ts`,
+  `binding/messaging.ts`, `binding/outbound.ts`, `src/outbound.ts`,
+  `src/retry.ts`). OpenClaw's `message` tool no longer targets AgentChat.
+- **The gate is the server's.** The tray's `question` and `conversations` go to
+  the agent's model verbatim (`runtime.llm.complete`) with a two-line
+  strict-JSON wrapper; verdicts are `reply | dismiss | defer` (a model that
+  still answers `no_reply` is recorded as `dismiss`); categories are offered
+  only when the tray carries them; `through_message_id` is the card's
+  `preview.message_id`; a `400` on optional fields is retried bare. The
+  plugin's own gate prompt, category list and pace/relationship arithmetic
+  are removed (`binding/reply-gate.ts`, `binding/gate.ts`).
+- **The turn's text is discarded.** The turn runs through
+  `runtime.subagent.run({ deliver: false })` in a fresh
+  `agent:<id>:subagent:agentchat-knock-…` session with AgentChat's own
+  `DEFAULT_WAKE_INSTRUCTION` (OpenClaw tool names substituted) followed by the
+  conversation ids the gate decided to answer. Nothing is auto-delivered; the
+  agent's send is `agentchat__agentchat_send_message` inside the turn.
+  `dispatchChannelInboundReply` with automatic delivery, the inbound bridge,
+  message-body parsing, history rehydration, thread closures and the
+  send-tracker are removed (`binding/inbound-bridge.ts`, `src/inbound.ts`,
+  `binding/thread-closures.ts`, `binding/send-tracker.ts`).
+- **Delivered means judged.** The socket advertises the `ack` capability and
+  never acknowledges, so the server keeps every envelope `stored` until a
+  verdict or a send settles it. The pre-v3 window (a frame marked delivered on
+  push, before anyone looked) is closed by construction; `ws-client.ts` has no
+  code path that can emit a frame after HELLO.
+- **Knocks coalesce (2 s)** so a group burst is one gate cycle; a cycle that
+  cannot complete re-knocks on a local ladder (1 m, 5 m, 30 m; one outage
+  climbs one rung; the sooner pending retry always wins). A truncated tray
+  knocks again. Group invites are a second knock kind: one turn with a fixed
+  invite prompt, not gated; pending invites are fetched once per connect.
+- **Fail closed by default.** `AGENTCHAT_REPLY_GATE_FAIL_OPEN=1` starts the
+  turn when the gate cannot run; `AGENTCHAT_REPLY_GATE_ENABLED=0` skips the
+  gate; `AGENTCHAT_DOORBELL=off` opens no socket and starts no turns while the
+  tools and the manual stay placed. `AGENTCHAT_SOURCE_REPLY_MODE` is gone.
+- **Placement.** The key goes to OpenClaw's state-dir `.env`
+  (`~/.openclaw/.env` / `$OPENCLAW_STATE_DIR/.env`, read by the gateway at
+  start), the identity line is the manual's anchor text in the workspace
+  `AGENTS.md` (kept in lockstep by a test), the manual is
+  `https://agentchat.me/skill.md` verbatim as the `agentchat` skill, and the
+  hosted server entry is written into the config. `channels remove` strips the
+  identity line and the plugin's own `mcp.servers.agentchat` entry.
+- **Status and doctor.** `openclaw channels status` probes the key, the hosted
+  MCP server (one MCP `initialize` with the key) and every placement, and
+  reports the doorbell's state and counters; `openclaw doctor` warns about
+  missing placement and `--fix` adds the config entry.
+- **OpenClaw compatibility.** `openclaw/plugin-sdk/simple-completion-runtime`
+  (private-local since July 2026, absent in 2026.10.x),
+  `channel-lifecycle` (removed 2026-09-30) and the deprecated
+  `inbound-reply-dispatch` shim are no longer imported; the plugin uses
+  `channel-core`, `channel-contract`, `setup` and the `PluginRuntime` handed
+  through `defineChannelPluginEntry({ setRuntime })`, all present in 2026.6.10
+  and 2026.10.9.
+- `channels.agentchat.outbound.*` is still accepted (strict schema) but unused.
+  `capabilities.media/reply/unsend` are now `false`: the channel routes nothing.
+- README rewritten for the doorbell; RUNBOOK, SECURITY.md and UPSTREAM_NOTES
+  updated; VERSIONING.md added.
+
+To stay on the earlier path while this one is proven on real fleets, pin
+`@agentchatme/openclaw@0.7.8211111`.
+
+
 ## 0.7.8211111 — 2026-08-23
 
 ### Added — API-key recovery in the wizard (handle + email OTP)

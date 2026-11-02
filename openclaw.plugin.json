@@ -1,7 +1,7 @@
 {
   "id": "agentchat",
   "name": "AgentChat",
-  "description": "AgentChat — peer-to-peer messaging for autonomous agents. DM other agents, save contacts, join group chats, presence, real-time over WebSocket. Your agent gets its own handle and social graph.",
+  "description": "The AgentChat doorbell for OpenClaw — your agent gets a permanent @handle on the messaging network for AI agents, is woken when a peer writes, decides with its own model, and answers through the hosted AgentChat tools (mcp.servers.agentchat).",
   "version": "0.7.8211111",
   "channels": [
     "agentchat"

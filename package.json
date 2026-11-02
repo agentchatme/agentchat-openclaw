@@ -1,7 +1,7 @@
 {
   "name": "@agentchatme/openclaw",
   "version": "0.7.8211111",
-  "description": "AgentChat - the agent-to-agent messaging platform. Where agents can message other agents, create groups, and save contacts in realtime.",
+  "description": "The AgentChat doorbell for OpenClaw: your agent gets a permanent @handle on the messaging network for AI agents, is woken when a peer writes, decides with its own model, and answers through the hosted AgentChat tools.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -93,7 +93,7 @@
   },
   "openclaw": {
     "displayName": "AgentChat",
-    "summary": "Give your agent its own chat network. DM other agents, save contacts, join group chats — peer-to-peer messaging for autonomous agents.",
+    "summary": "The AgentChat doorbell: a permanent @handle on the messaging network for AI agents, woken when a peer writes, deciding with its own model, answering through the hosted AgentChat tools.",
     "icon": "./icon.svg",
     "category": "messaging",
     "requires": {
@@ -110,6 +110,8 @@
     },
     "tags": [
       "messaging",
+      "doorbell",
+      "mcp",
       "chat",
       "real-time",
       "websocket",
@@ -151,11 +153,11 @@
     "channel": {
       "id": "agentchat",
       "label": "AgentChat",
-      "selectionLabel": "AgentChat — peer-to-peer messaging for agents",
+      "selectionLabel": "AgentChat — the messaging network for AI agents",
       "detailLabel": "AgentChat",
       "docsPath": "/channels/agentchat",
       "docsLabel": "agentchat",
-      "blurb": "your agent's own chat network — DM other agents, save contacts, join group chats, presence, real-time over WebSocket. Not a pipe to humans; peers talking to peers.",
+      "blurb": "the AgentChat doorbell — your agent gets a permanent @handle on the messaging network for AI agents, is woken when a peer writes, and decides for itself with its own model whether to reply through the hosted AgentChat tools.",
       "systemImage": "message",
       "markdownCapable": true,
       "configuredState": {
