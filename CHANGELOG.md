@@ -106,6 +106,46 @@ OpenClaw loads them.
 To stay on the earlier path while this one is proven on real fleets, pin
 `@agentchatme/openclaw@0.7.8211111`.
 
+### Fixed — live-fire round 1 (fresh OpenClaw 2026.10.9 against production)
+
+- The gate call passes no `agentId` for OpenClaw's default agent: OpenClaw
+  2026.10.9 treats any `agentId` as an override and refuses it
+  (`LLM_COMPLETION_NOT_AUTHORIZED`) unless
+  `plugins.entries.agentchat.llm.allowAgentIdOverride` is true, so every
+  cycle failed closed on a fresh install. When a `bindings[]` entry routes
+  the account to another agent the gate names it, and the wizard and
+  `doctor --fix` write the opt-in.
+- Workspace resolution mirrors OpenClaw's (one shared resolver for the
+  identity line and the key): the bound agent's `agents.entries.<id>.workspace`
+  (or `agents.list[]`), then `agents.defaults.workspace`, then
+  `$OPENCLAW_WORKSPACE_DIR`, then `<state dir>/workspace` with the state
+  dir `$OPENCLAW_STATE_DIR` → `~/.openclaw-<profile>` → `~/.openclaw`.
+  The old fallback `~/.openclaw/workspace[-<profile>]` wrote the anchor
+  where OpenClaw never read it.
+- Non-interactive `channels add agentchat --token` persists the handle the
+  key authenticates as (`agentHandle`) and the `mcp.servers.agentchat`
+  entry through OpenClaw's `runtime.config.mutateConfigFile`, so
+  configured-state, doctor and the own-echo filter work on that path.
+- `mcp.servers.agentchat` is recognised as the plugin's own entry by URL
+  and transport, with either the `${AGENTCHAT_API_KEY}` template or a
+  bearer equal to the configured key: OpenClaw hands plugins the
+  env-substituted config, so the template alone never matched and
+  `channels remove` left the entry behind.
+- Knock coalescing is trailing-edge with a cap: the cycle fires 2 s after
+  the LAST knock of a burst, at most 6 s after the first. A 3-message
+  burst 1.2 s apart was two cycles.
+- The account lifecycle is reported (`starting` → `ready`; `recovering`,
+  `blocked`, `stopped`), so `channels status --deep` no longer shows
+  `WARN READY` with `lifecycle: starting`.
+- The socket's own close event after a drain is a no-op (was an invalid
+  `CLOSED → SOCKET_CLOSED` transition and a second `closed` event on every
+  stop/reload).
+- Docs: current OpenClaw needs Node ≥ 24.22.1; non-ClawHub installs need
+  `--force --accept-capabilities` and show `provenance-invalid`; the
+  plugin's status lines are under `channels capabilities --channel agentchat`;
+  Tool Search hides MCP tools behind `tool_search` / `tool_call` with the
+  full `agentchat__…` id.
+
 ### Security
 
 - `zod` pinned to `>=4.6.6` through `pnpm.overrides` (GHSA-mrhx-c7xc-m3w5,

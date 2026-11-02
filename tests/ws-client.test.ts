@@ -189,6 +189,28 @@ function makeClient(cfg?: Partial<Record<string, unknown>>) {
   return { client, timers }
 }
 
+function makeClientWithLogs(cfg?: Partial<Record<string, unknown>>) {
+  const logs: Array<{ level: string; msg: string | undefined }> = []
+  const log = (level: string) => (_obj: object, msg?: string) => {
+    logs.push({ level, msg })
+  }
+  const logger: Logger = { trace: log('trace'), debug: log('debug'), info: log('info'), warn: log('warn'), error: log('error'), child: () => logger }
+  const timers = new TimerHarness()
+  const client = new AgentchatWsClient({
+    config: makeConfig(cfg),
+    logger,
+    metrics: createNoopMetrics(),
+    now: () => timers.now,
+    webSocketCtor: MockWebSocket as unknown as typeof import('ws').WebSocket,
+    random: () => 0.5,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
+    setInterval: timers.setInterval,
+    clearInterval: timers.clearInterval,
+  })
+  return { client, timers, logs }
+}
+
 describe('AgentchatWsClient — happy path', () => {
   it('transitions DISCONNECTED → CONNECTING → AUTHENTICATING → READY and emits authenticated', () => {
     const { client } = makeClient()
@@ -290,6 +312,22 @@ describe('AgentchatWsClient — happy path', () => {
     expect(client.ackNegotiated).toBe(true)
     sock.close(1006, 'gone')
     expect(client.ackNegotiated).toBe(false)
+  })
+
+  it('the socket\'s own close after drainCompleted() is a no-op: one closed event, no invalid transition', () => {
+    const { client, logs } = makeClientWithLogs()
+    const closed: number[] = []
+    client.on('closed', () => closed.push(1))
+    client.start()
+    const sock = mockInstances[0]!
+    sock.doOpen()
+    sock.doMessage({ type: 'hello.ok', capabilities: ['ack'] })
+    client.stop()
+    client.drainCompleted() // → CLOSED, emits closed, closes the socket (MockWebSocket.close emits 'close' synchronously)
+    expect(client.getState().kind).toBe('CLOSED')
+    expect(closed).toHaveLength(1)
+    expect(logs.some((l) => l.msg === 'transition.invalid')).toBe(false)
+    expect(logs.some((l) => l.msg === 'socket closed after CLOSED — no-op')).toBe(true)
   })
 
   it('exposes no API that could emit a client frame after HELLO', () => {

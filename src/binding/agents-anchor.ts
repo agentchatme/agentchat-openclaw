@@ -29,14 +29,14 @@
  */
 
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
 
 import type { OpenClawConfig } from './openclaw-types.js'
-// Env access is delegated to the credential helper. This module performs
-// only local filesystem operations against the workspace AGENTS.md file and
-// never touches the host environment directly (SECURITY.md).
-import { readOpenClawProfileFromEnv } from '../credentials/read-env.js'
+// Path resolution is delegated to the shared OpenClaw layout module (which
+// reads the environment through the credential helper). This module
+// performs only local filesystem operations against the workspace AGENTS.md
+// file and never touches the host environment directly (SECURITY.md).
+import { resolveOpenClawWorkspaceDir } from '../openclaw-layout.js'
 
 // Marker fences shared with the universal skill's own placement recipe.
 export const ANCHOR_START = '<!-- agentchat:start -->'
@@ -67,29 +67,18 @@ export function renderAnchorText(handle: string): string {
 }
 
 /**
- * Resolve the workspace dir the way OpenClaw does:
- *   1. `cfg.agents.defaults.workspace` (explicit override)
- *   2. `OPENCLAW_PROFILE` → `~/.openclaw/workspace-${profile}` when set to
- *      anything other than "default" (case-insensitive)
- *   3. fallback: `~/.openclaw/workspace`
- *
- * Per-agent overrides (`cfg.agents.list[].workspace`) are not honoured here;
- * the channel account model gives us an account id, not an agent id.
+ * The workspace OpenClaw loads for the agent this channel wakes — per-agent
+ * `agents.entries.<id>.workspace`, then `agents.defaults.workspace`, then
+ * `$OPENCLAW_WORKSPACE_DIR`, then `<state dir>/workspace` (state dir =
+ * `$OPENCLAW_STATE_DIR`, the profile dir, or `~/.openclaw`). One resolver
+ * for every placement (`../openclaw-layout.ts`).
  */
-export function resolveWorkspaceDir(cfg: OpenClawConfig | undefined): string {
-  const configured = (cfg as { agents?: { defaults?: { workspace?: unknown } } } | undefined)?.agents?.defaults?.workspace
-  if (typeof configured === 'string' && configured.trim().length > 0) {
-    return path.resolve(configured.replace(/^~(?=$|[\\/])/, os.homedir()))
-  }
-  const profile = readOpenClawProfileFromEnv()
-  if (profile) {
-    return path.join(os.homedir(), '.openclaw', `workspace-${profile}`)
-  }
-  return path.join(os.homedir(), '.openclaw', 'workspace')
+export function resolveWorkspaceDir(cfg: OpenClawConfig | undefined, agentId?: string): string {
+  return resolveOpenClawWorkspaceDir(cfg, agentId)
 }
 
-export function agentsAnchorPath(cfg: OpenClawConfig | undefined): string {
-  return path.join(resolveWorkspaceDir(cfg), 'AGENTS.md')
+export function agentsAnchorPath(cfg: OpenClawConfig | undefined, agentId?: string): string {
+  return path.join(resolveWorkspaceDir(cfg, agentId), 'AGENTS.md')
 }
 
 function renderAnchorBlock(handle: string): string {
@@ -102,11 +91,11 @@ function renderAnchorBlock(handle: string): string {
  * Throws when the handle did not land in the file (a regression) or when the
  * workspace is not writable — the caller decides whether to surface it.
  */
-export function writeAgentsAnchor(params: { cfg: OpenClawConfig | undefined; handle: string }): { path: string } {
+export function writeAgentsAnchor(params: { cfg: OpenClawConfig | undefined; handle: string; agentId?: string }): { path: string } {
   const bare = params.handle?.trim().replace(/^@/, '')
   if (!bare) throw new Error('writeAgentsAnchor: handle is empty')
 
-  const workspaceDir = resolveWorkspaceDir(params.cfg)
+  const workspaceDir = resolveWorkspaceDir(params.cfg, params.agentId)
   const filePath = path.join(workspaceDir, 'AGENTS.md')
   fs.mkdirSync(workspaceDir, { recursive: true })
 
@@ -122,8 +111,8 @@ export function writeAgentsAnchor(params: { cfg: OpenClawConfig | undefined; han
 }
 
 /** Idempotent remove. Strips our block (and any legacy block); leaves the rest untouched. */
-export function removeAgentsAnchor(params: { cfg: OpenClawConfig | undefined }): { removed: boolean; path: string } {
-  const filePath = agentsAnchorPath(params.cfg)
+export function removeAgentsAnchor(params: { cfg: OpenClawConfig | undefined; agentId?: string }): { removed: boolean; path: string } {
+  const filePath = agentsAnchorPath(params.cfg, params.agentId)
   if (!fs.existsSync(filePath)) return { removed: false, path: filePath }
   const existing = fs.readFileSync(filePath, 'utf-8')
   const next = stripAnchorBlock(existing)
@@ -133,8 +122,8 @@ export function removeAgentsAnchor(params: { cfg: OpenClawConfig | undefined }):
 }
 
 /** Doctor check: is the current anchor text for this handle present? */
-export function hasAgentsAnchorFor(params: { cfg: OpenClawConfig | undefined; handle: string }): { present: boolean; path: string } {
-  const filePath = agentsAnchorPath(params.cfg)
+export function hasAgentsAnchorFor(params: { cfg: OpenClawConfig | undefined; handle: string; agentId?: string }): { present: boolean; path: string } {
+  const filePath = agentsAnchorPath(params.cfg, params.agentId)
   if (!fs.existsSync(filePath)) return { present: false, path: filePath }
   const content = fs.readFileSync(filePath, 'utf-8')
   return { present: content.includes(renderAnchorBlock(params.handle.trim().replace(/^@/, ''))), path: filePath }

@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest'
 
-import { createRuntimeGateCaller, createRuntimeTurnRunner, resolveDoorbellAgentId, RuntimeUnavailableError } from '../../src/doorbell/model.js'
+import {
+  createRuntimeGateCaller,
+  createRuntimeTurnRunner,
+  resolveDoorbellAgentId,
+  resolveGateAgent,
+  readLlmAgentOverrideOptIn,
+  withLlmAgentOverrideOptIn,
+  LLM_AGENT_OVERRIDE_PATH,
+  RuntimeUnavailableError,
+} from '../../src/doorbell/model.js'
 import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 
 function fakeRuntime(overrides: { completeText?: string; runError?: Error; waitStatus?: string; waitThrows?: boolean } = {}) {
@@ -29,9 +38,9 @@ function fakeRuntime(overrides: { completeText?: string; runError?: Error; waitS
 }
 
 describe('createRuntimeGateCaller', () => {
-  it('runs one tool-free completion on the agent\'s own model: system prompt, one user message, temperature 0, agentId', async () => {
+  it('default path: one tool-free completion on the ambient agent — system prompt, one user message, temperature 0, and NO agentId', async () => {
     const { runtime, calls } = fakeRuntime({ completeText: 'answer' })
-    const caller = createRuntimeGateCaller({ agentId: 'ops', runtime: () => runtime })
+    const caller = createRuntimeGateCaller({ runtime: () => runtime })
     const text = await caller({ systemPrompt: 'Q + wrapper', userContent: 'tray', maxTokens: 2048, timeoutMs: 1000 })
     expect(text).toBe('answer')
     const params = calls.complete[0] as Record<string, unknown>
@@ -39,13 +48,45 @@ describe('createRuntimeGateCaller', () => {
     expect(params.messages).toEqual([{ role: 'user', content: 'tray' }])
     expect(params.maxTokens).toBe(2048)
     expect(params.temperature).toBe(0)
-    expect(params.agentId).toBe('ops')
+    // OpenClaw 2026.10.9 rejects any agentId as an override unless
+    // plugins.entries.agentchat.llm.allowAgentIdOverride is set; the
+    // default path must not send one at all.
+    expect('agentId' in params).toBe(false)
     expect(params.signal).toBeInstanceOf(AbortSignal)
   })
 
+  it('override path: passes agentId only when the account is routed to a non-default agent', async () => {
+    const { runtime, calls } = fakeRuntime({ completeText: 'answer' })
+    const caller = createRuntimeGateCaller({ agentIdOverride: 'ops', runtime: () => runtime })
+    await caller({ systemPrompt: 'Q', userContent: 'tray', maxTokens: 1, timeoutMs: 1 })
+    expect((calls.complete[0] as Record<string, unknown>).agentId).toBe('ops')
+  })
+
   it('throws RuntimeUnavailableError when setRuntime never happened (the gate then fails closed)', async () => {
-    const caller = createRuntimeGateCaller({ agentId: 'main', runtime: () => null })
+    const caller = createRuntimeGateCaller({ runtime: () => null })
     await expect(caller({ systemPrompt: '', userContent: '', maxTokens: 1, timeoutMs: 1 })).rejects.toBeInstanceOf(RuntimeUnavailableError)
+  })
+})
+
+describe('resolveGateAgent + the llm override opt-in', () => {
+  it('no override when the routed agent is the ambient default (or the default is unknown and routing fell back)', () => {
+    expect(resolveGateAgent({ routedAgentId: 'main', ambientAgentId: 'main' })).toEqual({ agentId: 'main', agentIdOverride: undefined })
+    expect(resolveGateAgent({ routedAgentId: 'Main', ambientAgentId: 'main' })).toEqual({ agentId: 'main', agentIdOverride: undefined })
+    expect(resolveGateAgent({ routedAgentId: 'main', ambientAgentId: undefined })).toEqual({ agentId: 'main', agentIdOverride: undefined })
+  })
+
+  it('an override when the account is bound to another agent', () => {
+    expect(resolveGateAgent({ routedAgentId: 'ops', ambientAgentId: 'main' })).toEqual({ agentId: 'ops', agentIdOverride: 'ops' })
+  })
+
+  it('reads and writes plugins.entries.agentchat.llm.allowAgentIdOverride', () => {
+    expect(LLM_AGENT_OVERRIDE_PATH).toBe('plugins.entries.agentchat.llm.allowAgentIdOverride')
+    expect(readLlmAgentOverrideOptIn({})).toBe(false)
+    const written = withLlmAgentOverrideOptIn({ plugins: { entries: { agentchat: { enabled: true } } } })
+    expect(written.changed).toBe(true)
+    expect(written.cfg).toEqual({ plugins: { entries: { agentchat: { enabled: true, llm: { allowAgentIdOverride: true } } } } })
+    expect(readLlmAgentOverrideOptIn(written.cfg)).toBe(true)
+    expect(withLlmAgentOverrideOptIn(written.cfg).changed).toBe(false)
   })
 })
 

@@ -25,7 +25,16 @@ import { multiAccountRefusal } from '../channel-account.js'
 import { registerDoorbell, unregisterDoorbell, getDoorbell } from './runtime-registry.js'
 import { AgentInvoker } from '../doorbell/invoker.js'
 import { MainLineClient } from '../doorbell/main-line.js'
-import { createRuntimeGateCaller, createRuntimeTurnRunner, resolveDoorbellAgentId, type ChannelRuntimeLike } from '../doorbell/model.js'
+import {
+  createRuntimeGateCaller,
+  createRuntimeTurnRunner,
+  resolveDoorbellAgentId,
+  resolveGateAgent,
+  readLlmAgentOverrideOptIn,
+  LLM_AGENT_OVERRIDE_PATH,
+  type ChannelRuntimeLike,
+} from '../doorbell/model.js'
+import { resolveOpenClawDefaultAgentId } from '../openclaw-layout.js'
 import { getClient } from './sdk-client.js'
 import { groupInviteFromRecord } from '../knock-frames.js'
 
@@ -40,6 +49,18 @@ function adaptLog(log: ChannelGatewayContext['log']): Logger | undefined {
     child: () => adapted,
   }
   return adapted
+}
+
+/**
+ * OpenClaw's account lifecycle (`ChannelAccountSnapshot.lifecycle` in
+ * 2026.10.x: starting | ready | recovering | blocked | stopped). The field is
+ * absent from the 2026.6.10 types this package compiles against, so it is
+ * added through a widened type; a gateway that does not know it ignores it.
+ */
+type Lifecycle = 'starting' | 'ready' | 'recovering' | 'blocked' | 'stopped'
+
+function withLifecycle<T extends object>(snapshot: T, lifecycle: Lifecycle): T {
+  return Object.assign({}, snapshot, { lifecycle }) as T
 }
 
 function formatLogLine(obj: object, msg?: string): string {
@@ -79,11 +100,13 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       adaptLog(ctx.log) ??
       createLogger({ level: config.observability.logLevel, redactKeys: config.observability.redactKeys })
 
+    ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: false }, 'starting'))
+
     if (readDoorbellModeFromEnv() === 'off') {
       ctx.log?.info?.(
         `[agentchat:${ctx.accountId}] AGENTCHAT_DOORBELL=off — no socket, no knocks, no turns; the hosted tools and the manual stay placed`,
       )
-      ctx.setStatus({ ...ctx.getStatus(), running: false, connected: false, linked: true })
+      ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, linked: true }, 'stopped'))
       await waitUntilAbort(ctx.abortSignal, () => undefined)
       return
     }
@@ -93,13 +116,24 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     const refusal = multiAccountRefusal(ctx.cfg)
     if (refusal) {
       ctx.log?.error?.(`[agentchat:${ctx.accountId}] doorbell not started — ${refusal}`)
-      ctx.setStatus({ ...ctx.getStatus(), running: false, connected: false, lastDisconnect: { at: Date.now(), error: refusal } })
+      ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, lastDisconnect: { at: Date.now(), error: refusal } }, 'blocked'))
       await waitUntilAbort(ctx.abortSignal, () => undefined)
       return
     }
 
     const channelRuntime = ctx.channelRuntime as ChannelRuntimeLike | undefined
-    const agentId = resolveDoorbellAgentId({ cfg: ctx.cfg, accountId: ctx.accountId, channelRuntime })
+    // Which agent wakes: OpenClaw's routing for this account. The gate call
+    // names that agent only when it differs from OpenClaw's ambient default
+    // — an override OpenClaw must be told to allow (D1, `model.ts`).
+    const { agentId, agentIdOverride } = resolveGateAgent({
+      routedAgentId: resolveDoorbellAgentId({ cfg: ctx.cfg, accountId: ctx.accountId, channelRuntime }),
+      ambientAgentId: resolveOpenClawDefaultAgentId(ctx.cfg),
+    })
+    if (agentIdOverride && !readLlmAgentOverrideOptIn(ctx.cfg)) {
+      ctx.log?.warn?.(
+        `[agentchat:${ctx.accountId}] this account is routed to agent "${agentIdOverride}", not OpenClaw's default — the gate call will be refused (LLM_COMPLETION_NOT_AUTHORIZED) until ${LLM_AGENT_OVERRIDE_PATH} is true; \`openclaw doctor --fix\` writes it`,
+      )
+    }
     const mainLine = new MainLineClient({ apiKey: config.apiKey, apiBase: config.apiBase })
     const gateTimeoutMs = readReplyGateTimeoutMsFromEnv()
 
@@ -112,7 +146,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           accountId: ctx.accountId,
           agentId,
           mainLine,
-          gateCaller: createRuntimeGateCaller({ agentId }),
+          gateCaller: createRuntimeGateCaller({ agentIdOverride }),
           turnRunner: createRuntimeTurnRunner(),
           logger,
           gateEnabled: readReplyGateEnabledFromEnv(),
@@ -126,7 +160,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
             onGroupInvite: (invite) => invoker.groupInvite(invite, 'live'),
             onAuthenticated: (at) => {
               ctx.log?.info?.(`[agentchat:${ctx.accountId}] authenticated at ${new Date(at).toISOString()} (agent ${agentId})`)
-              ctx.setStatus({ ...ctx.getStatus(), running: true, connected: true, linked: true, lastConnectedAt: at })
+              ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: true, linked: true, lastConnectedAt: at }, 'ready'))
               // Invite frames are live-only (not part of any drain), so an
               // invite that landed while the socket was down is fetched once
               // per connect and handed to the invoker, which dedups by id.
@@ -138,8 +172,18 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
             onStateChanged: (next) => {
               const running = next.kind !== 'CLOSED' && next.kind !== 'AUTH_FAIL'
               const connected = next.kind === 'READY' || next.kind === 'DEGRADED'
-              ctx.setStatus({ ...ctx.getStatus(), running, connected, statusState: next.kind })
-              if (runtime.getHealth().state.kind === 'AUTH_FAIL') {
+              const lifecycle: Lifecycle =
+                next.kind === 'READY' || next.kind === 'DEGRADED'
+                  ? 'ready'
+                  : next.kind === 'AUTH_FAIL'
+                    ? 'blocked'
+                    : next.kind === 'CLOSED'
+                      ? 'stopped'
+                      : runtime.getHealth().counters.knocks > 0
+                        ? 'recovering'
+                        : 'starting'
+              ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running, connected, statusState: next.kind }, lifecycle))
+              if (next.kind === 'AUTH_FAIL') {
                 ctx.log?.error?.(`[agentchat:${ctx.accountId}] AUTH_FAIL — rotate the key or re-run openclaw channels add agentchat`)
               }
             },
@@ -161,7 +205,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
 
   async stopAccount(ctx) {
     await unregisterDoorbell(ctx.accountId, Date.now() + 5_000)
-    ctx.setStatus({ ...ctx.getStatus(), running: false, connected: false })
+    ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false }, 'stopped'))
   },
 }
 

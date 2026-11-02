@@ -81,8 +81,13 @@ export function hostedMcpSnippet(apiBase: string = DEFAULT_API_BASE): string {
 
 export type McpEntryState = 'missing' | 'ours' | 'user_managed' | 'disabled'
 
-/** Classify the `mcp.servers.agentchat` entry in an OpenClaw config object. */
-export function describeMcpEntry(cfg: unknown, apiBase: string = DEFAULT_API_BASE): McpEntryState {
+/**
+ * Classify the `mcp.servers.agentchat` entry in an OpenClaw config object.
+ * OpenClaw hands plugins the env-substituted config, so an entry we wrote
+ * with the `${AGENTCHAT_API_KEY}` template comes back carrying the key
+ * itself; `apiKey` lets the classifier recognise it as ours.
+ */
+export function describeMcpEntry(cfg: unknown, apiBase: string = DEFAULT_API_BASE, apiKey?: string): McpEntryState {
   const servers = (cfg as { mcp?: { servers?: unknown } } | undefined)?.mcp?.servers
   if (!servers || typeof servers !== 'object' || Array.isArray(servers)) return 'missing'
   const entry = (servers as Record<string, unknown>)[MCP_SERVER_NAME]
@@ -90,22 +95,28 @@ export function describeMcpEntry(cfg: unknown, apiBase: string = DEFAULT_API_BAS
   if (typeof entry !== 'object' || Array.isArray(entry)) return 'user_managed'
   const record = entry as Record<string, unknown>
   if (record.enabled === false) return 'disabled'
-  return pointsAtUs(record, apiBase) ? 'ours' : 'user_managed'
+  return pointsAtUs(record, apiBase, apiKey) ? 'ours' : 'user_managed'
 }
 
 /**
- * URL is the hosted endpoint, the transport is Streamable HTTP and the auth
- * header references the key variable. Extra keys the user added (timeouts,
- * `toolFilter`) keep the entry "ours"; a different URL or a literal key do
- * not — those are the user's decisions and are never modified.
+ * URL is the hosted endpoint and the transport is Streamable HTTP; the
+ * Authorization header, when present, is either the `${AGENTCHAT_API_KEY}`
+ * template or — after OpenClaw's env substitution — a bearer equal to the
+ * configured key. Extra keys the user added (timeouts, `toolFilter`) keep
+ * the entry "ours"; a different URL, transport or credential do not — those
+ * are the user's decisions and are never modified.
  */
-function pointsAtUs(entry: Record<string, unknown>, apiBase: string): boolean {
+function pointsAtUs(entry: Record<string, unknown>, apiBase: string, apiKey: string | undefined): boolean {
   if (entry.url !== hostedMcpUrl(apiBase)) return false
   if (entry.transport !== 'streamable-http') return false
   const headers = entry.headers
+  if (headers === undefined) return true
   if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return false
   const auth = (headers as Record<string, unknown>).Authorization ?? (headers as Record<string, unknown>).authorization
-  return typeof auth === 'string' && auth.includes(`\${${API_KEY_ENV}}`)
+  if (auth === undefined) return true
+  if (typeof auth !== 'string') return false
+  if (auth === AUTH_HEADER_TEMPLATE || auth.includes(`\${${API_KEY_ENV}}`)) return true
+  return apiKey !== undefined && apiKey.length > 0 && auth.trim() === `Bearer ${apiKey}`
 }
 
 export type McpEntryOutcome = 'added' | 'present' | 'user_managed' | 'disabled'
@@ -119,8 +130,9 @@ export type McpEntryOutcome = 'added' | 'present' | 'user_managed' | 'disabled'
 export function withHostedMcpEntry<T extends object>(
   cfg: T | undefined,
   apiBase: string = DEFAULT_API_BASE,
+  apiKey?: string,
 ): { cfg: T; outcome: McpEntryOutcome } {
-  const state = describeMcpEntry(cfg, apiBase)
+  const state = describeMcpEntry(cfg, apiBase, apiKey)
   const base = (cfg ?? {}) as T
   if (state === 'ours') return { cfg: base, outcome: 'present' }
   if (state === 'user_managed') return { cfg: base, outcome: 'user_managed' }
@@ -133,8 +145,8 @@ export function withHostedMcpEntry<T extends object>(
 }
 
 /** Return a config without the entry when it is ours; a hand-written entry is left alone. */
-export function withoutHostedMcpEntry<T extends object>(cfg: T, apiBase: string = DEFAULT_API_BASE): { cfg: T; removed: boolean } {
-  if (describeMcpEntry(cfg, apiBase) !== 'ours') return { cfg, removed: false }
+export function withoutHostedMcpEntry<T extends object>(cfg: T, apiBase: string = DEFAULT_API_BASE, apiKey?: string): { cfg: T; removed: boolean } {
+  if (describeMcpEntry(cfg, apiBase, apiKey) !== 'ours') return { cfg, removed: false }
   const mcp = { ...((cfg as { mcp?: Record<string, unknown> }).mcp ?? {}) }
   const servers = { ...((mcp.servers as Record<string, unknown> | undefined) ?? {}) }
   delete servers[MCP_SERVER_NAME]

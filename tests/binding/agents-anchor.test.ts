@@ -66,47 +66,47 @@ describe('agents-anchor', () => {
       expect(resolveWorkspaceDir(cfg)).toBe(path.resolve('/some/explicit/path'))
     })
 
-    it('falls back to ~/.openclaw/workspace when config is undefined', () => {
-      const expected = path.join(os.homedir(), '.openclaw', 'workspace')
-      expect(resolveWorkspaceDir(undefined)).toBe(expected)
+    it('falls back to <state dir>/workspace when config is undefined (OPENCLAW_STATE_DIR is set by the test setup)', () => {
+      expect(resolveWorkspaceDir(undefined)).toBe(path.join(path.resolve(process.env.OPENCLAW_STATE_DIR!), 'workspace'))
     })
 
-    it('falls back to default when workspace is empty/whitespace', () => {
-      const expected = path.join(os.homedir(), '.openclaw', 'workspace')
-      expect(resolveWorkspaceDir(cfgFor('   '))).toBe(expected)
+    it('falls back to the state-dir default when workspace is empty/whitespace', () => {
+      expect(resolveWorkspaceDir(cfgFor('   '))).toBe(path.join(path.resolve(process.env.OPENCLAW_STATE_DIR!), 'workspace'))
     })
 
-    it('honors OPENCLAW_PROFILE env var for non-default profiles', () => {
-      // Mirror the resolution in openclaw/dist/workspace-hhTlRYqM.js:49-55.
-      // Diverging here would write the anchor to a path OpenClaw never
-      // reads on dev/staging profiles.
+    it('honors OPENCLAW_PROFILE (~/.openclaw-<profile>/workspace) when no state dir is set', () => {
+      const stateDir = process.env['OPENCLAW_STATE_DIR']
       const original = process.env['OPENCLAW_PROFILE']
       try {
+        delete process.env['OPENCLAW_STATE_DIR']
         process.env['OPENCLAW_PROFILE'] = 'staging'
-        expect(resolveWorkspaceDir(undefined)).toBe(
-          path.join(os.homedir(), '.openclaw', 'workspace-staging'),
-        )
+        expect(resolveWorkspaceDir(undefined)).toBe(path.join(os.homedir(), '.openclaw-staging', 'workspace'))
         process.env['OPENCLAW_PROFILE'] = 'default'
-        expect(resolveWorkspaceDir(undefined)).toBe(
-          path.join(os.homedir(), '.openclaw', 'workspace'),
-        )
+        expect(resolveWorkspaceDir(undefined)).toBe(path.join(os.homedir(), '.openclaw', 'workspace'))
+      } finally {
+        if (original === undefined) delete process.env['OPENCLAW_PROFILE']
+        else process.env['OPENCLAW_PROFILE'] = original
+        if (stateDir !== undefined) process.env['OPENCLAW_STATE_DIR'] = stateDir
+      }
+    })
+
+    it('explicit cfg override beats the environment', () => {
+      const original = process.env['OPENCLAW_PROFILE']
+      try {
+        process.env['OPENCLAW_PROFILE'] = 'staging'
+        expect(resolveWorkspaceDir(cfgFor('/explicit/override'))).toBe(path.resolve('/explicit/override'))
       } finally {
         if (original === undefined) delete process.env['OPENCLAW_PROFILE']
         else process.env['OPENCLAW_PROFILE'] = original
       }
     })
 
-    it('explicit cfg override beats OPENCLAW_PROFILE env', () => {
-      const original = process.env['OPENCLAW_PROFILE']
-      try {
-        process.env['OPENCLAW_PROFILE'] = 'staging'
-        expect(resolveWorkspaceDir(cfgFor('/explicit/override'))).toBe(
-          path.resolve('/explicit/override'),
-        )
-      } finally {
-        if (original === undefined) delete process.env['OPENCLAW_PROFILE']
-        else process.env['OPENCLAW_PROFILE'] = original
+    it('uses the per-agent workspace for the agent the account wakes', () => {
+      const cfg = {
+        agents: { defaults: { workspace: '/default/ws' }, entries: { main: {}, ops: { workspace: '/ops/ws' } } },
       }
+      expect(resolveWorkspaceDir(cfg as never, 'ops')).toBe(path.resolve('/ops/ws'))
+      expect(resolveWorkspaceDir(cfg as never, 'main')).toBe(path.resolve('/default/ws'))
     })
   })
 

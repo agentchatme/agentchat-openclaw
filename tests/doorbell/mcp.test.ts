@@ -35,6 +35,23 @@ describe('hosted MCP entry', () => {
     expect(describeMcpEntry({ mcp: { servers: { agentchat: { ...hostedMcpServerEntry(), headers: { Authorization: 'Bearer ac_live_literal' } } } } })).toBe('user_managed')
   })
 
+  it('recognises our entry after OpenClaw substituted the template (the config a plugin sees carries the key)', () => {
+    const key = 'ac_live_' + 'm'.repeat(24)
+    const substituted = { mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: `Bearer ${key}` } } } } }
+    expect(describeMcpEntry(substituted, 'https://api.agentchat.me', key)).toBe('ours')
+    // without the configured key to compare against, a literal bearer is the user's
+    expect(describeMcpEntry(substituted)).toBe('user_managed')
+    // a different key is somebody else's credential
+    expect(describeMcpEntry(substituted, 'https://api.agentchat.me', 'ac_live_' + 'z'.repeat(24))).toBe('user_managed')
+    // no headers at all: ours by URL + transport
+    expect(describeMcpEntry({ mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http' } } } })).toBe('ours')
+    // wrong transport: not ours
+    expect(describeMcpEntry({ mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'sse' } } } })).toBe('user_managed')
+    // and channels remove strips the substituted entry
+    expect(withoutHostedMcpEntry(substituted, 'https://api.agentchat.me', key).removed).toBe(true)
+    expect(withHostedMcpEntry(substituted, 'https://api.agentchat.me', key).outcome).toBe('present')
+  })
+
   it('adds the entry when missing and never modifies a hand-written one', () => {
     const added = withHostedMcpEntry({ channels: {} })
     expect(added.outcome).toBe('added')

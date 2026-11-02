@@ -64,6 +64,48 @@ describe('KnockCoalescer', () => {
     expect(c.armed).toBe(false)
   })
 
+  it('trailing edge: a slow burst (knocks 1.2 s apart) is ONE cycle, fired 2 s after the last knock', () => {
+    const { clock, c, fires } = make()
+    c.knock()
+    clock.advance(1200)
+    c.knock()
+    clock.advance(1200)
+    c.knock()
+    expect(fires()).toBe(0) // 2.4 s after the first knock: a leading-edge window would have fired already
+    clock.advance(1999)
+    expect(fires()).toBe(0)
+    clock.advance(1)
+    expect(fires()).toBe(1) // 2 s after the LAST knock
+    expect(c.absorbed).toBe(2)
+  })
+
+  it('hard cap: a steady trickle cannot starve the gate — fires at most 6 s after the first knock', () => {
+    const { clock, c, fires } = make()
+    c.knock()
+    for (let i = 0; i < 10; i++) {
+      clock.advance(1000)
+      c.knock()
+      if (fires() > 0) break
+    }
+    expect(fires()).toBe(1)
+    expect(clock.now).toBe(6000)
+    // and the knock that landed after the cap opens a new burst
+    expect(c.armed).toBe(true)
+  })
+
+  it('a knock exactly at the cap fires immediately', () => {
+    const { clock, c, fires } = make()
+    c.knock()
+    clock.advance(5500)
+    c.knock() // debounce would want 7500; cap says 6000
+    clock.advance(500)
+    expect(fires()).toBe(1)
+  })
+
+  it('rejects a cap shorter than the window', () => {
+    expect(() => new KnockCoalescer({ onFire: () => undefined, debounceMs: 2000, maxWindowMs: 1000 })).toThrow(RangeError)
+  })
+
   it('a knock after the fire arms again', () => {
     const { clock, c, fires } = make()
     c.knock()

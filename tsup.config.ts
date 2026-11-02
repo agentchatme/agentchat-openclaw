@@ -20,6 +20,10 @@ export default defineConfig({
     // the local filesystem. See SECURITY.md for the architectural
     // rationale.
     'binding/agents-anchor': 'src/binding/agents-anchor.ts',
+    // OpenClaw layout resolver (state dir, workspace, agent roster) —
+    // pure, shared by the anchor module and the doorbell; its own dist
+    // file so the anchor bundle keeps no inlined copy.
+    'openclaw-layout': 'src/openclaw-layout.ts',
   },
   format: ['esm', 'cjs'],
   dts: true,
@@ -58,5 +62,11 @@ export default defineConfig({
     './binding/agents-anchor.cjs',
     '../binding/agents-anchor.js',
     '../binding/agents-anchor.cjs',
+    // OpenClaw layout — imported as './openclaw-layout.js' from src/ and as
+    // '../openclaw-layout.js' from src/binding/ and src/doorbell/.
+    './openclaw-layout.js',
+    './openclaw-layout.cjs',
+    '../openclaw-layout.js',
+    '../openclaw-layout.cjs',
   ],
 })

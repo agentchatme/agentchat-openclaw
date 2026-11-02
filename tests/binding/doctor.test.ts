@@ -54,3 +54,37 @@ describe('doctor adapter', () => {
     expect((result.config as { mcp?: unknown }).mcp).toBeUndefined()
   })
 })
+
+describe('doctor adapter — the llm override opt-in for a non-default bound agent', () => {
+  const KEY2 = 'ac_live_' + 'e'.repeat(24)
+  const bound = {
+    channels: { agentchat: { apiKey: KEY2, agentHandle: 'alice' } },
+    agents: { entries: { main: { default: true }, ops: {} } },
+    bindings: [{ agentId: 'ops', match: { channel: 'agentchat' } }],
+  }
+
+  it('warns when the opt-in is missing and names the fix', async () => {
+    const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: bound as never, doctorFixCommand: 'openclaw doctor --fix', env: {} })
+    expect(warnings.some((w) => w.includes('gate: this account is bound to agent "ops"') && w.includes('allowAgentIdOverride') && w.includes('(openclaw doctor --fix writes it)'))).toBe(true)
+  })
+
+  it('repairConfig writes the opt-in, and only for a non-default bound agent', async () => {
+    const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: bound as never, doctorFixCommand: 'fix', env: {} })
+    expect(fixed.changes.some((c) => c.startsWith('set plugins.entries.agentchat.llm.allowAgentIdOverride = true'))).toBe(true)
+    expect((fixed.config as unknown as { plugins: { entries: { agentchat: { llm: { allowAgentIdOverride: boolean } } } } }).plugins.entries.agentchat.llm.allowAgentIdOverride).toBe(true)
+    const plain = await agentchatDoctorAdapter.repairConfig!({ cfg: { channels: { agentchat: { apiKey: KEY2 } } } as never, doctorFixCommand: 'fix', env: {} })
+    expect(plain.changes.some((c) => c.includes('allowAgentIdOverride'))).toBe(false)
+  })
+
+  it('classifies the env-substituted entry as ours (no spurious "managed by hand" warning)', async () => {
+    const substituted = {
+      ...bound,
+      bindings: [],
+      mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: `Bearer ${KEY2}` } } } },
+    }
+    const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: substituted as never, doctorFixCommand: 'fix', env: {} })
+    expect(warnings.some((w) => w.includes('mcp:'))).toBe(false)
+    const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: substituted as never, doctorFixCommand: 'fix', env: {} })
+    expect(fixed.changes.some((c) => c.includes('mcp.servers'))).toBe(false)
+  })
+})

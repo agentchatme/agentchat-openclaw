@@ -44,6 +44,8 @@ const bundleReplacements = new Map([
       ['"../credentials/read-env.js"', '"./credentials/read-env.js"'],
       ["'../binding/agents-anchor.js'", "'./binding/agents-anchor.js'"],
       ['"../binding/agents-anchor.js"', '"./binding/agents-anchor.js"'],
+      ["'../openclaw-layout.js'", "'./openclaw-layout.js'"],
+      ['"../openclaw-layout.js"', '"./openclaw-layout.js"'],
     ],
   ],
   [
@@ -53,6 +55,8 @@ const bundleReplacements = new Map([
       ['"../credentials/read-env.js"', '"./credentials/read-env.js"'],
       ["'../binding/agents-anchor.js'", "'./binding/agents-anchor.js'"],
       ['"../binding/agents-anchor.js"', '"./binding/agents-anchor.js"'],
+      ["'../openclaw-layout.js'", "'./openclaw-layout.js'"],
+      ['"../openclaw-layout.js"', '"./openclaw-layout.js"'],
     ],
   ],
   [
@@ -66,6 +70,10 @@ const bundleReplacements = new Map([
       ['"./binding/agents-anchor.js"', '"./binding/agents-anchor.cjs"'],
       ["'../binding/agents-anchor.js'", "'./binding/agents-anchor.cjs'"],
       ['"../binding/agents-anchor.js"', '"./binding/agents-anchor.cjs"'],
+      ["'./openclaw-layout.js'", "'./openclaw-layout.cjs'"],
+      ['"./openclaw-layout.js"', '"./openclaw-layout.cjs"'],
+      ["'../openclaw-layout.js'", "'./openclaw-layout.cjs'"],
+      ['"../openclaw-layout.js"', '"./openclaw-layout.cjs"'],
     ],
   ],
   [
@@ -79,6 +87,10 @@ const bundleReplacements = new Map([
       ['"./binding/agents-anchor.js"', '"./binding/agents-anchor.cjs"'],
       ["'../binding/agents-anchor.js'", "'./binding/agents-anchor.cjs'"],
       ['"../binding/agents-anchor.js"', '"./binding/agents-anchor.cjs"'],
+      ["'./openclaw-layout.js'", "'./openclaw-layout.cjs'"],
+      ['"./openclaw-layout.js"', '"./openclaw-layout.cjs"'],
+      ["'../openclaw-layout.js'", "'./openclaw-layout.cjs'"],
+      ['"../openclaw-layout.js"', '"./openclaw-layout.cjs"'],
     ],
   ],
   [
@@ -86,6 +98,15 @@ const bundleReplacements = new Map([
     [
       ["'../credentials/read-env.js'", "'../credentials/read-env.cjs'"],
       ['"../credentials/read-env.js"', '"../credentials/read-env.cjs"'],
+      ["'../openclaw-layout.js'", "'../openclaw-layout.cjs'"],
+      ['"../openclaw-layout.js"', '"../openclaw-layout.cjs"'],
+    ],
+  ],
+  [
+    'openclaw-layout.cjs',
+    [
+      ["'./credentials/read-env.js'", "'./credentials/read-env.cjs'"],
+      ['"./credentials/read-env.js"', '"./credentials/read-env.cjs"'],
     ],
   ],
 ])

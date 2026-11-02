@@ -509,6 +509,16 @@ export class AgentchatWsClient {
     this.ws = null
     this._ackNegotiated = false
 
+    // Widened read: TS narrows `this.state` from the comparisons above and
+    // would otherwise reject this check (see the same note in `stop()`).
+    if ((this.state as ConnectionState).kind === 'CLOSED') {
+      // `drainCompleted()` already moved us to CLOSED and emitted `closed`;
+      // this is the socket's own close event arriving afterwards. Nothing to
+      // transition, nothing to emit twice.
+      this.logger.debug({ code, reason }, 'socket closed after CLOSED — no-op')
+      return
+    }
+
     if (authClass && wasAuthenticating) {
       this.applyEvent({ type: 'AUTH_REJECTED', reason: `close ${code}: ${reason}` })
       this.emitError(

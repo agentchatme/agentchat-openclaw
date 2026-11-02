@@ -18,7 +18,7 @@ import type { ChannelStatusAdapter, ChannelCapabilitiesDisplayLine } from './ope
 import type { AgentchatResolvedAccount } from '../channel.js'
 import { getClient } from './sdk-client.js'
 import { probeHostedMcp } from '../doorbell/mcp.js'
-import { checkPlacement, type PlacementCheck } from '../doorbell/placement.js'
+import { checkPlacement, resolvePlacementAgentId, type PlacementCheck } from '../doorbell/placement.js'
 import { getDoorbell } from './runtime-registry.js'
 import { readDoorbellModeFromEnv } from '../credentials/read-env.js'
 import { multiAccountRefusal } from '../channel-account.js'
@@ -72,6 +72,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
       handle: config.agentHandle ?? me.handle,
       apiKey: config.apiKey,
       apiBase: config.apiBase,
+      agentId: resolvePlacementAgentId(cfg as object | undefined, account.accountId),
     })
 
     const live = getDoorbell(account.accountId)

@@ -56,8 +56,8 @@ import {
   agentchatDoctorAdapter,
   type AgentchatProbeResult,
 } from './binding/index.js'
-import { placeDoorbell, formatPlacement } from './doorbell/placement.js'
-import { setPluginRuntime } from './doorbell/runtime-holder.js'
+import { placeDoorbell, formatPlacement, applyDoorbellConfig } from './doorbell/placement.js'
+import { getPluginRuntime, setPluginRuntime } from './doorbell/runtime-holder.js'
 import { DEFAULT_API_BASE } from './doorbell/mcp.js'
 
 export {
@@ -299,22 +299,45 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
             `[agentchat:${accountId}] authenticated as @${result.agent.handle} (${result.agent.email})`,
           )
           // Non-interactive twin of the wizard's `finalize` placement. This
-          // path (`openclaw setup --channel agentchat --token <key>`) has no
-          // wizard UX, but the agent still needs the key in the gateway
-          // environment, the identity line in AGENTS.md and the hosted tools
-          // registered. The config patch (mcp.servers.agentchat) cannot be
-          // returned from this hook; the doctor's repair adds it, and the
-          // log line says so.
+          // path (`openclaw channels add agentchat --token <key>`) has no
+          // wizard UX. `applyAccountConfig` is synchronous, so the handle the
+          // key authenticates as can only be learnt here; it is persisted —
+          // with the hosted tools entry and, when needed, the llm override
+          // opt-in — through OpenClaw's own config mutation
+          // (`runtime.config.mutateConfigFile`, afterWrite auto). Without the
+          // plugin runtime the log says what `doctor --fix` will add.
+          const handle = result.agent.handle
+          const base = apiBase ?? DEFAULT_API_BASE
           try {
-            const placed = placeDoorbell({ cfg, handle: result.agent.handle, apiKey, apiBase: apiBase ?? DEFAULT_API_BASE })
+            const placed = placeDoorbell({ cfg, handle, apiKey, apiBase: base, accountId })
             for (const line of formatPlacement(placed.steps)) logger?.info?.(`[agentchat:${accountId}] ${line}`)
-            if (placed.mcp === 'added') {
-              logger?.warn?.(
-                `[agentchat:${accountId}] mcp.servers.agentchat is not in the config yet — run \`openclaw doctor --fix\` or \`openclaw channels add agentchat\` to register the hosted tools`,
-              )
-            }
           } catch (err) {
             logger?.warn?.(`[agentchat:${accountId}] placement failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+          const pluginRuntime = getPluginRuntime()
+          if (pluginRuntime) {
+            try {
+              const written = await pluginRuntime.config.mutateConfigFile({
+                afterWrite: { mode: 'auto' },
+                mutate: (draft) => {
+                  const next = applyDoorbellConfig(draft, { accountId, handle, apiKey, apiBase: base })
+                  Object.assign(draft, next.cfg)
+                  return next.changes
+                },
+              })
+              const changes = (written.result ?? []) as string[]
+              logger?.info?.(
+                `[agentchat:${accountId}] config: ${changes.length > 0 ? changes.join('; ') : 'agentHandle and mcp.servers.agentchat already present'}`,
+              )
+            } catch (err) {
+              logger?.warn?.(
+                `[agentchat:${accountId}] could not persist agentHandle / mcp.servers.agentchat: ${err instanceof Error ? err.message : String(err)} — run \`openclaw doctor --fix\``,
+              )
+            }
+          } else {
+            logger?.warn?.(
+              `[agentchat:${accountId}] plugin runtime unavailable in this registration mode — run \`openclaw doctor --fix\` to persist agentHandle=${handle} and mcp.servers.agentchat`,
+            )
           }
         } else {
           logger?.warn?.(
