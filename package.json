@@ -88,7 +88,8 @@
       "protobufjs@>=7.0.0 <7.6.5": "7.6.5",
       "qs@>=6.11.1 <6.15.2": "6.15.2",
       "tar@>=7.0.0 <7.5.21": "7.5.21",
-      "vite@>=7.0.0 <7.3.5": "7.3.5"
+      "vite@>=7.0.0 <7.3.5": "7.3.5",
+      "zod@>=4.0.0 <4.6.6": "4.6.6"
     }
   },
   "openclaw": {
@@ -162,7 +163,9 @@
       "markdownCapable": true,
       "configuredState": {
         "env": {
-          "allOf": ["AGENTCHAT_API_KEY"]
+          "allOf": [
+            "AGENTCHAT_API_KEY"
+          ]
         },
         "specifier": "./dist/configured-state.js",
         "exportName": "hasAgentChatConfiguredState"
