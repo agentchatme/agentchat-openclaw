@@ -63,6 +63,27 @@ function withLifecycle<T extends object>(snapshot: T, lifecycle: Lifecycle): T {
   return Object.assign({}, snapshot, { lifecycle }) as T
 }
 
+/**
+ * OpenClaw's `statusState` vocabulary for the Health table: anything else
+ * is printed verbatim and read as a warning. The socket's own state name
+ * stays in `lifecycle`.
+ */
+type StatusState = 'linked' | 'configured' | 'unstable' | 'not-linked' | 'disabled' | 'unconfigured'
+
+export function statusStateFor(kind: string): StatusState {
+  switch (kind) {
+    case 'READY':
+      return 'linked'
+    case 'AUTH_FAIL':
+      return 'not-linked'
+    case 'CLOSED':
+      return 'configured'
+    default:
+      // CONNECTING, AUTHENTICATING, DISCONNECTED, DEGRADED, DRAINING
+      return 'unstable'
+  }
+}
+
 function formatLogLine(obj: object, msg?: string): string {
   const head = msg ?? ''
   const keys = Object.keys(obj)
@@ -106,7 +127,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       ctx.log?.info?.(
         `[agentchat:${ctx.accountId}] AGENTCHAT_DOORBELL=off — no socket, no knocks, no turns; the hosted tools and the manual stay placed`,
       )
-      ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, linked: true }, 'stopped'))
+      ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, linked: true, statusState: 'disabled' }, 'stopped'))
       await waitUntilAbort(ctx.abortSignal, () => undefined)
       return
     }
@@ -116,7 +137,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     const refusal = multiAccountRefusal(ctx.cfg)
     if (refusal) {
       ctx.log?.error?.(`[agentchat:${ctx.accountId}] doorbell not started — ${refusal}`)
-      ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, lastDisconnect: { at: Date.now(), error: refusal } }, 'blocked'))
+      ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastDisconnect: { at: Date.now(), error: refusal } }, 'blocked'))
       await waitUntilAbort(ctx.abortSignal, () => undefined)
       return
     }
@@ -160,7 +181,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
             onGroupInvite: (invite) => invoker.groupInvite(invite, 'live'),
             onAuthenticated: (at) => {
               ctx.log?.info?.(`[agentchat:${ctx.accountId}] authenticated at ${new Date(at).toISOString()} (agent ${agentId})`)
-              ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: true, linked: true, lastConnectedAt: at }, 'ready'))
+              ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: true, linked: true, statusState: 'linked', lastConnectedAt: at }, 'ready'))
               // Invite frames are live-only (not part of any drain), so an
               // invite that landed while the socket was down is fetched once
               // per connect and handed to the invoker, which dedups by id.
@@ -182,7 +203,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
                       : runtime.getHealth().counters.knocks > 0
                         ? 'recovering'
                         : 'starting'
-              ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running, connected, statusState: next.kind }, lifecycle))
+              ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running, connected, statusState: statusStateFor(next.kind) }, lifecycle))
               if (next.kind === 'AUTH_FAIL') {
                 ctx.log?.error?.(`[agentchat:${ctx.accountId}] AUTH_FAIL — rotate the key or re-run openclaw channels add agentchat`)
               }

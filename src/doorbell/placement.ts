@@ -24,9 +24,9 @@ import * as path from 'node:path'
 
 import { API_KEY_ENV } from '../credentials/read-env.js'
 import { resolveBoundAgentId, resolveOpenClawDefaultAgentId, resolveOpenClawStateDir } from '../openclaw-layout.js'
-import { describeMcpEntry, hostedMcpUrl, withHostedMcpEntry, type McpEntryOutcome } from './mcp.js'
+import { describeMcpEntry, hostedMcpUrl, withHostedMcpEntry, withoutHostedMcpEntry, type McpEntryOutcome } from './mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, withLlmAgentOverrideOptIn } from './model.js'
-import { writeAgentsAnchor, agentsAnchorPath, hasAgentsAnchorFor } from '../binding/agents-anchor.js'
+import { writeAgentsAnchor, agentsAnchorPath, hasAgentsAnchorFor, removeAgentsAnchor } from '../binding/agents-anchor.js'
 import { AGENTCHAT_CHANNEL_ID, AGENTCHAT_DEFAULT_ACCOUNT_ID, applyAgentchatAccountPatch, readAgentchatConfigField } from '../channel-account.js'
 
 const HANDLE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
@@ -138,7 +138,8 @@ function stripQuotes(value: string): string {
 
 export interface DoorbellConfigParams {
   readonly accountId: string
-  readonly handle: string
+  /** The handle the key authenticates as; omitted when not yet known (an older OpenClaw without `prepareAccountConfigInput`). */
+  readonly handle?: string | undefined
   readonly apiKey: string
   readonly apiBase: string
 }
@@ -155,8 +156,8 @@ export interface DoorbellConfigParams {
 export function applyDoorbellConfig<TCfg extends object>(cfg: TCfg, params: DoorbellConfigParams): { cfg: TCfg; changes: string[] } {
   const changes: string[] = []
   let next: TCfg = cfg
-  const bareHandle = params.handle.trim().replace(/^@/, '')
-  if (readAgentchatConfigField(next as never, params.accountId, 'agentHandle') !== bareHandle && isValidHandleShape(bareHandle)) {
+  const bareHandle = (params.handle ?? '').trim().replace(/^@/, '')
+  if (bareHandle && readAgentchatConfigField(next as never, params.accountId, 'agentHandle') !== bareHandle && isValidHandleShape(bareHandle)) {
     next = applyAgentchatAccountPatch(next as never, params.accountId, { agentHandle: bareHandle }) as unknown as TCfg
     changes.push(`channels.agentchat${params.accountId === AGENTCHAT_DEFAULT_ACCOUNT_ID ? '' : `.accounts.${params.accountId}`}.agentHandle = ${bareHandle}`)
   }
@@ -176,6 +177,43 @@ export function applyDoorbellConfig<TCfg extends object>(cfg: TCfg, params: Door
 /** The agent this account's identity line belongs to: the bound agent, else OpenClaw's default. */
 export function resolvePlacementAgentId(cfg: object | undefined, accountId: string): string | undefined {
   return resolveBoundAgentId(cfg, AGENTCHAT_CHANNEL_ID, accountId) ?? resolveOpenClawDefaultAgentId(cfg)
+}
+
+/**
+ * Undo the config side of placement for an account that is being disabled
+ * or deleted: the plugin's own `mcp.servers.agentchat` entry goes (a
+ * hand-written one stays). Pure; shared by `config.setAccountEnabled`,
+ * `config.deleteAccount` and the wizard's `disable`.
+ */
+export function stripDoorbellConfig<TCfg extends object>(cfg: TCfg, accountId: string): { cfg: TCfg; changes: string[] } {
+  const apiBase = readAgentchatConfigField(cfg as never, accountId, 'apiBase') ?? 'https://api.agentchat.me'
+  const apiKey = readAgentchatConfigField(cfg as never, accountId, 'apiKey')
+  const { cfg: next, removed } = withoutHostedMcpEntry(cfg, apiBase, apiKey)
+  return { cfg: next, changes: removed ? ['removed mcp.servers.agentchat'] : [] }
+}
+
+/**
+ * Undo the file side of placement: the identity line in the bound agent's
+ * `AGENTS.md`, and — on delete — the key line in the state-dir `.env`.
+ * Best-effort: a filesystem error never blocks a remove.
+ */
+export function removeDoorbellFiles(cfg: object | undefined, accountId: string, options: { clearKey: boolean; stateDir?: string }): string[] {
+  const changes: string[] = []
+  try {
+    const removed = removeAgentsAnchor({ cfg: cfg as never, agentId: resolvePlacementAgentId(cfg, accountId) })
+    if (removed.removed) changes.push(`removed the identity line from ${removed.path}`)
+  } catch {
+    // best effort
+  }
+  if (options.clearKey) {
+    try {
+      const cleared = clearApiKeyInDotEnv(options.stateDir)
+      if (cleared.changed) changes.push(`removed ${API_KEY_ENV} from ${cleared.path}`)
+    } catch {
+      // best effort
+    }
+  }
+  return changes
 }
 
 // ─── placement, as one report ──────────────────────────────────────────

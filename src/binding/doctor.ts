@@ -11,7 +11,8 @@
 
 import type { ChannelDoctorAdapter, OpenClawConfig } from './openclaw-types.js'
 
-import { AGENTCHAT_CHANNEL_ID, listConfiguredAccountIds, multiAccountRefusal, readAgentchatConfigField } from '../channel-account.js'
+import { AGENTCHAT_CHANNEL_ID, applyAgentchatAccountPatch, listConfiguredAccountIds, multiAccountRefusal, readAgentchatConfigField } from '../channel-account.js'
+import { validateApiKey } from '../setup-client.js'
 import { checkPlacement, resolvePlacementAgentId } from '../doorbell/placement.js'
 import { DEFAULT_API_BASE, withHostedMcpEntry } from '../doorbell/mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, readLlmAgentOverrideOptIn, withLlmAgentOverrideOptIn } from '../doorbell/model.js'
@@ -43,12 +44,31 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
     return warnings
   },
 
-  repairConfig({ cfg }) {
+  async repairConfig({ cfg }) {
     const changes: string[] = []
+    const warnings: string[] = []
     let next: OpenClawConfig = cfg
     const bases = new Map<string, string | undefined>()
     for (const accountId of listConfiguredAccountIds(cfg)) {
-      bases.set(readAgentchatConfigField(cfg, accountId, 'apiBase') ?? DEFAULT_API_BASE, readAgentchatConfigField(cfg, accountId, 'apiKey'))
+      const apiKey = readAgentchatConfigField(cfg, accountId, 'apiKey')
+      const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
+      bases.set(apiBase, apiKey)
+      // The handle the key authenticates as is the one config field only the
+      // server knows. Missing (an older OpenClaw's non-interactive add could
+      // not learn it before the write) → one live check per account.
+      if (apiKey && !readAgentchatConfigField(cfg, accountId, 'agentHandle')) {
+        try {
+          const result = await validateApiKey(apiKey, { apiBase })
+          if (result.ok) {
+            next = applyAgentchatAccountPatch(next, accountId, { agentHandle: result.agent.handle })
+            changes.push(`set channels.agentchat${accountId === 'default' ? '' : `.accounts.${accountId}`}.agentHandle = ${result.agent.handle}`)
+          } else {
+            warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] agentHandle not set and the key did not pass the live check (${result.reason}): ${result.message}`)
+          }
+        } catch (err) {
+          warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] agentHandle not set and AgentChat was not reachable to learn it: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      }
       const bound = resolveBoundAgentId(cfg, AGENTCHAT_CHANNEL_ID, accountId)
       const ambient = resolveOpenClawDefaultAgentId(cfg)
       if (bound && bound !== (ambient ?? bound)) {
@@ -64,6 +84,6 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
       next = result.cfg
       if (result.outcome === 'added') changes.push(`added mcp.servers.agentchat → ${apiBase}/mcp (bearer template on AGENTCHAT_API_KEY)`)
     }
-    return { config: next, changes }
+    return { config: next, changes, ...(warnings.length > 0 ? { warnings } : {}) }
   },
 }

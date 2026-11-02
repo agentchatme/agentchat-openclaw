@@ -87,9 +87,8 @@ import {
 // Credential lookup helper — see SECURITY.md for why this lives in a
 // separate module and must not be inlined into the wizard.
 import { readApiKeyFromEnv } from './credentials/read-env.js'
-import { removeAgentsAnchor } from './binding/agents-anchor.js'
-import { placeDoorbell, formatPlacement, applyDoorbellConfig, resolvePlacementAgentId } from './doorbell/placement.js'
-import { DEFAULT_API_BASE, withoutHostedMcpEntry } from './doorbell/mcp.js'
+import { placeDoorbell, formatPlacement, applyDoorbellConfig, stripDoorbellConfig, removeDoorbellFiles } from './doorbell/placement.js'
+import { DEFAULT_API_BASE } from './doorbell/mcp.js'
 
 /**
  * Sentinel credential-values key used to signal "the register or recover
@@ -1146,16 +1145,11 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
   // when the user explicitly removes the channel; orphans are documented in
   // RUNBOOK.md.
   disable: (cfg) => {
-    try {
-      removeAgentsAnchor({ cfg, agentId: resolvePlacementAgentId(cfg, 'default') })
-    } catch {
-      // Anchor cleanup is best-effort — never block the channel-remove.
-    }
-    const apiBase = readAgentchatConfigField(cfg, 'default', 'apiBase') ?? DEFAULT_API_BASE
-    // OpenClaw hands us the env-substituted config: the entry we wrote as a
-    // template may carry the key itself here, so it is matched by URL and
-    // transport, with the configured key accepted as our own credential.
-    const stripped = withoutHostedMcpEntry(cfg, apiBase, readAgentchatConfigField(cfg, 'default', 'apiKey')).cfg
-    return setSetupChannelEnabled(stripped, AGENTCHAT_CHANNEL_ID, false)
+    // Same strip as `config.setAccountEnabled(false)` (what `channels remove`
+    // calls): the identity line goes, the plugin's own mcp.servers.agentchat
+    // entry goes (matched by URL + transport on the env-substituted config),
+    // the key stays — a remove is a pause, not a rotation.
+    removeDoorbellFiles(cfg, 'default', { clearKey: false })
+    return setSetupChannelEnabled(stripDoorbellConfig(cfg, 'default').cfg, AGENTCHAT_CHANNEL_ID, false)
   },
 }

@@ -124,8 +124,24 @@ To stay on the earlier path while this one is proven on real fleets, pin
   where OpenClaw never read it.
 - Non-interactive `channels add agentchat --token` persists the handle the
   key authenticates as (`agentHandle`) and the `mcp.servers.agentchat`
-  entry through OpenClaw's `runtime.config.mutateConfigFile`, so
-  configured-state, doctor and the own-echo filter work on that path.
+  entry in the one config write OpenClaw makes: the handle is learnt
+  before the write (`setup.prepareAccountConfigInput`, OpenClaw 2026.10.x)
+  and the synchronous `applyAccountConfig` carries key, handle, hosted
+  tools and the llm opt-in. The after-write hook only places files and
+  reports through the CLI runtime it is given (`RuntimeEnv.log/error`).
+  The plugin runtime is never used in setup: OpenClaw's setup-only
+  registration hands a Proxy that throws on access, and `setPluginRuntime`
+  now rejects it. `doctor --fix` persists `agentHandle` too (validating the
+  key once when it is missing).
+- `openclaw channels remove agentchat` works: `config.setAccountEnabled`
+  disables the account and strips the identity line and the plugin's own
+  `mcp.servers.agentchat` entry; `--delete` (`config.deleteAccount`) also
+  drops `channels.agentchat` and the key line in `.env`. Both share the
+  wizard's `disable` logic.
+- `channels status --deep` Health reads `linked` instead of `WARN READY`:
+  `statusState` uses OpenClaw's vocabulary (`linked`, `unstable`,
+  `not-linked`, `configured`, `disabled`); the socket's own state stays in
+  `lifecycle`.
 - `mcp.servers.agentchat` is recognised as the plugin's own entry by URL
   and transport, with either the `${AGENTCHAT_API_KEY}` template or a
   bearer equal to the configured key: OpenClaw hands plugins the

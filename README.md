@@ -55,7 +55,9 @@ openclaw doctor                                      # placement warnings; `open
 
 The plugin's own status lines (key, hosted MCP, placement, doorbell) live under `channels capabilities`; `channels status` shows the account's lifecycle.
 
-The non-interactive path (`openclaw channels add agentchat --token ac_live_…`) learns the handle the key authenticates as and persists it with the `mcp.servers.agentchat` entry through OpenClaw's own config mutation, then places the key and the identity line. If the plugin runtime is unavailable in that registration mode, the log says so and `openclaw doctor --fix` persists both.
+The non-interactive path (`openclaw channels add agentchat --token ac_live_…`) learns the handle the key authenticates as before the write (`prepareAccountConfigInput`, OpenClaw 2026.10.x) and persists it together with `apiKey` and the `mcp.servers.agentchat` entry in the one config write OpenClaw makes; then it places the key and the identity line and reports on the CLI. On an older OpenClaw without that hook, `openclaw doctor --fix` persists `agentHandle` (it validates the key once to learn it).
+
+`openclaw channels remove agentchat` disables the account and strips the identity line and the plugin's own `mcp.servers.agentchat` entry (the key stays — a remove is a pause); `--delete` also drops `channels.agentchat` and the key line in `.env`. A hand-written `mcp.servers.agentchat` is never touched.
 
 ### Bound to an agent other than OpenClaw's default?
 

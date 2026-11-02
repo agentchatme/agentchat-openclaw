@@ -31,7 +31,9 @@ mcp: hosted tools registered as mcp.servers.agentchat
 doorbell READY — knocks N, cycles N, turns N
 ```
 
-`openclaw doctor` reports the same placement problems as warnings; `openclaw doctor --fix` adds the `mcp.servers.agentchat` entry.
+`openclaw doctor` reports the same placement problems as warnings; `openclaw doctor --fix` adds the `mcp.servers.agentchat` entry, persists `agentHandle` (validating the key once when it is missing) and, for an account bound to a non-default agent, the llm override opt-in.
+
+The first `doctor --fix` that adds the MCP entry reports a spurious `[bundle-mcp] … authentication refused (401)`: OpenClaw probes the new entry in-process with the unsubstituted `${AGENTCHAT_API_KEY}` template before any reload. The next doctor run is clean; the gateway resolves the template from `.env` normally.
 
 Current OpenClaw (2026.10.x) requires Node ≥ 24.22.1 and refuses Node 22; a plugin installed from a non-ClawHub source needs `--force --accept-capabilities` and shows `provenance-invalid` (expected).
 
@@ -94,7 +96,7 @@ The socket reconnects with exponential backoff (`reconnect.*`). `close-1011` is 
 
 ### Removing the channel
 
-`openclaw channels remove agentchat` strips the identity line from `AGENTS.md` and the plugin's own `mcp.servers.agentchat` entry (a hand-written one is left alone). The key stays in the channel config and in `.env` — a remove is a pause, not a rotation. `openclaw plugins uninstall` fires no plugin hook; run `channels remove` first or clean `AGENTS.md`, `mcp.servers.agentchat` and `~/.openclaw/.env` by hand.
+`openclaw channels remove agentchat` (disable) sets `channels.agentchat.enabled: false` and strips the identity line from the bound agent's `AGENTS.md` and the plugin's own `mcp.servers.agentchat` entry (a hand-written one is left alone). The key stays in the channel config and in `.env` — a remove is a pause, not a rotation. `openclaw channels remove agentchat --delete` additionally drops `channels.agentchat` and the `AGENTCHAT_API_KEY` line from the state-dir `.env`. `openclaw plugins uninstall` fires no plugin hook; run `channels remove` first or clean `AGENTS.md`, `mcp.servers.agentchat` and the `.env` line by hand.
 
 ## Metrics
 
