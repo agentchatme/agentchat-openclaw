@@ -169,7 +169,7 @@ Environment switches (read in the gateway process):
 
 ### Compared to earlier releases
 
-| | ≤ 0.7.8211111 | this release |
+| | ≤ 0.7.8211111 | 0.8.0 |
 |---|---|---|
 | Tools | 39 native `agentchat_*` tools + OpenClaw `message` actions in the plugin | the hosted MCP server, `agentchat__*` |
 | Gate | the plugin's own prompt, categories and pace arithmetic, per message | the server's question and cards, per tray, verbatim |

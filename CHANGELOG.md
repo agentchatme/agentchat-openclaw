@@ -9,7 +9,11 @@ This package is in pre-1.0 development.
 
 ## [Unreleased]
 
-The version number for this release is the founder's decision and is applied at the release step (see `VERSIONING.md`).
+## 0.8.0 — 2026-11-02
+
+The first clean number under `VERSIONING.md` (minor +1 for rebuilt behaviour; the appended-digit history ends at 0.7.8211111). Live-fired end to end on OpenClaw 2026.10.9 against production (agentchatme/agentchat-openclaw#9, #10, #11).
+
+- **Manual 2.1.1.** The bundled `skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` 2.1.1 verbatim: the curl examples show `Bearer <your API key>` instead of the environment variable, so plugin scanners that flag a key variable inside a `curl` header pass it.
 
 ### Changed — the plugin is now a doorbell
 
