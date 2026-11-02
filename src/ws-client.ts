@@ -9,8 +9,8 @@
  *     DEGRADED on `ping.timeoutMs` miss, then force-reconnect.
  *   - Schedule reconnect with exponential backoff + ±`jitterRatio` jitter
  *     per `reconnect.*` config. Thundering-herd-safe across a fleet.
- *   - Emit typed events upwards (`inboundFrame`, `stateChanged`, `error`)
- *     so the normalizer (P3) and outbound adapter (P4) can consume them.
+ *   - Emit typed events upwards (`inboundFrame`, `stateChanged`, `error`,
+ *     `authenticated`) so the runtime can turn frames into knocks.
  *
  * Intentional design choices:
  *   - Uses the `ws` package directly (not `globalThis.WebSocket`) because
@@ -19,6 +19,13 @@
  *     (Fly, Render, Vercel functions, Lambda) is Node.
  *   - Authenticates via HELLO frame (`{type: "hello", api_key}`), never via
  *     URL query string. Keeps the key out of access logs and Referers.
+ *   - Advertises the `ack` capability in HELLO and NEVER acknowledges. With
+ *     the capability negotiated the server keeps every envelope `stored`
+ *     until an ack arrives (WS Delivery-Ack Protocol v1); none ever does
+ *     from here — a verdict recorded by the gate, or a send by the agent,
+ *     is what settles delivery. There is no code path in this module that
+ *     can emit a frame other than HELLO: delivery is judged, never
+ *     confirmed by the transport.
  *   - `RECONNECT_HARD_CAP_ATTEMPTS` guards against runaway reconnect loops
  *     after catastrophic network events; crosses into `AUTH_FAIL` so the
  *     operator sees a clear signal instead of silent retry forever.
@@ -41,7 +48,6 @@ import {
 import type { Logger } from './log.js'
 import type { MetricsRecorder } from './metrics.js'
 import {
-  canSend,
   isTerminal,
   transition,
   type ConnectionEvent,
@@ -67,6 +73,10 @@ const RECONNECT_HARD_CAP_ATTEMPTS = 60
 // upload flow, not inline in WS frames).
 const MAX_FRAME_BYTES = 2 * 1024 * 1024
 
+// Capabilities advertised in HELLO. `ack` asks the server to keep envelopes
+// `stored` until this client acknowledges them — which it never does.
+const HELLO_CAPABILITIES: readonly string[] = ['ack']
+
 // WebSocket close codes we treat as auth failures (terminal until operator
 // reconfigures). 1008 = policy violation; AgentChat uses it + 4401/4403 for
 // auth-related rejects. Other 4xxx codes are treated as retry-transient.
@@ -80,18 +90,11 @@ export interface InboundFrame {
   readonly raw: unknown
 }
 
-/** One client-action frame the caller wants to push. */
-export interface OutboundFrame {
-  readonly type: string
-  readonly payload: Record<string, unknown>
-  readonly id?: string
-}
-
 export interface WsClientEvents {
   stateChanged: (next: ConnectionState, prev: ConnectionState) => void
   inboundFrame: (frame: InboundFrame) => void
   error: (error: AgentChatChannelError) => void
-  /** Fired once per `hello.ok` — useful for triggering a /v1/messages/sync drain upstream. */
+  /** Fired once per `hello.ok` — the runtime turns it into the connect knock. */
   authenticated: (at: UnixMillis) => void
   /** Fired after a clean close + CLOSED state (after stop() or terminal auth failure). */
   closed: () => void
@@ -146,6 +149,7 @@ export class AgentchatWsClient {
   private state: ConnectionState = { kind: 'DISCONNECTED' }
   private ws: WsInstance | null = null
   private attempt = 0
+  private _ackNegotiated = false
 
   private helloAckTimer: NodeJS.Timeout | null = null
   private pingTimer: NodeJS.Timeout | null = null
@@ -186,6 +190,15 @@ export class AgentchatWsClient {
   }
 
   /**
+   * True when the last `hello.ok` echoed the `ack` capability: the server
+   * keeps envelopes `stored` until acknowledged — and this client never
+   * acknowledges. False against a legacy server (envelopes marked on push).
+   */
+  get ackNegotiated(): boolean {
+    return this._ackNegotiated
+  }
+
+  /**
    * Kick off connection. No-op if already connecting, authenticating, or
    * ready. Throws on `AUTH_FAIL` — the caller must call `reconfigured()`
    * after rotating the API key before retrying.
@@ -205,30 +218,6 @@ export class AgentchatWsClient {
       return
     }
     this.openSocket(1)
-  }
-
-  /**
-   * Push a client-action frame. Requires `canSend(state)` — returns false
-   * if the socket is not ready. Callers should queue and retry from the
-   * outbound adapter (P4) rather than drop here.
-   */
-  send(frame: OutboundFrame): boolean {
-    if (!canSend(this.state) || !this.ws || this.ws.readyState !== NodeWebSocket.OPEN) {
-      return false
-    }
-    try {
-      this.ws.send(JSON.stringify(frame))
-      return true
-    } catch (err) {
-      this.emitError(
-        new AgentChatChannelError(
-          classifyNetworkError(err),
-          'ws send failed',
-          { cause: err },
-        ),
-      )
-      return false
-    }
   }
 
   /**
@@ -351,6 +340,7 @@ export class AgentchatWsClient {
           api_key: this.config.apiKey,
           client: AGENTCHAT_CLIENT_NAME,
           client_version: PACKAGE_VERSION,
+          capabilities: HELLO_CAPABILITIES,
         }),
       )
     } catch (err) {
@@ -433,7 +423,7 @@ export class AgentchatWsClient {
     // normalizer (P3) only sees app-level server events.
     if (this.state.kind === 'AUTHENTICATING') {
       if (type === 'hello.ok') {
-        this.handleHelloOk(received)
+        this.handleHelloOk(received, obj)
         return
       }
       if (type === 'hello.error' || type === 'auth.rejected' || type === 'error') {
@@ -447,9 +437,6 @@ export class AgentchatWsClient {
       return
     }
 
-    // Once authenticated, rate_limit.warning is a soft advisory that the
-    // upstream outbound adapter should respect. Emit it as an inbound
-    // frame; metrics bookkeep here.
     const payload = this.extractPayload(obj)
 
     this.emit('inboundFrame', {
@@ -479,11 +466,16 @@ export class AgentchatWsClient {
       : {}
   }
 
-  private handleHelloOk(now: UnixMillis): void {
+  private handleHelloOk(now: UnixMillis, frame: Record<string, unknown>): void {
     if (this.helloAckTimer) {
       this._clearTimeout(this.helloAckTimer)
       this.helloAckTimer = null
     }
+    // The server echoes the capabilities it accepted; a `hello.ok` without
+    // the field is a legacy server (ack-mode off, envelopes marked on push).
+    const caps = frame.capabilities ?? this.extractPayload(frame).capabilities
+    this._ackNegotiated = Array.isArray(caps) && caps.includes('ack')
+    this.logger.info({ ackNegotiated: this._ackNegotiated }, 'hello.ok')
     this.applyEvent({ type: 'HELLO_OK', now })
     this.attempt = 0
     this.startHeartbeat()
@@ -515,6 +507,7 @@ export class AgentchatWsClient {
       this.helloAckTimer = null
     }
     this.ws = null
+    this._ackNegotiated = false
 
     if (authClass && wasAuthenticating) {
       this.applyEvent({ type: 'AUTH_REJECTED', reason: `close ${code}: ${reason}` })
@@ -730,7 +723,7 @@ export class AgentchatWsClient {
   }
 
   private emitError(error: AgentChatChannelError): void {
-    this.metrics.incOutboundFailed({ errorClass: error.class_ })
+    this.metrics.incError({ errorClass: error.class_ })
     this.logger.warn(
       { class: error.class_, message: error.message, statusCode: error.statusCode },
       'channel error',

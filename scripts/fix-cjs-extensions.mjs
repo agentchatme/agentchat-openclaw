@@ -42,6 +42,8 @@ const bundleReplacements = new Map([
     [
       ["'../credentials/read-env.js'", "'./credentials/read-env.js'"],
       ['"../credentials/read-env.js"', '"./credentials/read-env.js"'],
+      ["'../binding/agents-anchor.js'", "'./binding/agents-anchor.js'"],
+      ['"../binding/agents-anchor.js"', '"./binding/agents-anchor.js"'],
     ],
   ],
   [
@@ -49,6 +51,8 @@ const bundleReplacements = new Map([
     [
       ["'../credentials/read-env.js'", "'./credentials/read-env.js'"],
       ['"../credentials/read-env.js"', '"./credentials/read-env.js"'],
+      ["'../binding/agents-anchor.js'", "'./binding/agents-anchor.js'"],
+      ['"../binding/agents-anchor.js"', '"./binding/agents-anchor.js"'],
     ],
   ],
   [
@@ -60,6 +64,8 @@ const bundleReplacements = new Map([
       ['"../credentials/read-env.js"', '"./credentials/read-env.cjs"'],
       ["'./binding/agents-anchor.js'", "'./binding/agents-anchor.cjs'"],
       ['"./binding/agents-anchor.js"', '"./binding/agents-anchor.cjs"'],
+      ["'../binding/agents-anchor.js'", "'./binding/agents-anchor.cjs'"],
+      ['"../binding/agents-anchor.js"', '"./binding/agents-anchor.cjs"'],
     ],
   ],
   [
@@ -71,6 +77,8 @@ const bundleReplacements = new Map([
       ['"../credentials/read-env.js"', '"./credentials/read-env.cjs"'],
       ["'./binding/agents-anchor.js'", "'./binding/agents-anchor.cjs'"],
       ['"./binding/agents-anchor.js"', '"./binding/agents-anchor.cjs"'],
+      ["'../binding/agents-anchor.js'", "'./binding/agents-anchor.cjs'"],
+      ['"../binding/agents-anchor.js"', '"./binding/agents-anchor.cjs"'],
     ],
   ],
   [
