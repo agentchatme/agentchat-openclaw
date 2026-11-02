@@ -96,7 +96,7 @@ The socket reconnects with exponential backoff (`reconnect.*`). `close-1011` is 
 
 ### Removing the channel
 
-`openclaw channels remove agentchat` (disable) sets `channels.agentchat.enabled: false` and strips the identity line from the bound agent's `AGENTS.md` and the plugin's own `mcp.servers.agentchat` entry (a hand-written one is left alone). The key stays in the channel config and in `.env` — a remove is a pause, not a rotation. `openclaw channels remove agentchat --delete` additionally drops `channels.agentchat` and the `AGENTCHAT_API_KEY` line from the state-dir `.env`. `openclaw plugins uninstall` fires no plugin hook; run `channels remove` first or clean `AGENTS.md`, `mcp.servers.agentchat` and the `.env` line by hand.
+`openclaw channels remove agentchat` (disable) sets `channels.agentchat.enabled: false` and strips the identity line from the bound agent's `AGENTS.md` and the plugin's own `mcp.servers.agentchat` entry (a hand-written one is left alone). The key stays in the channel config and in `.env` — a remove is a pause, not a rotation. `openclaw channels remove agentchat --delete` additionally drops `channels.agentchat` and the `AGENTCHAT_API_KEY` line from the state-dir `.env`. **`--delete` is the scriptable form**: the disable form always asks OpenClaw's interactive confirm, which ignores piped stdin (`</dev/null`, `printf | …` cancel it) — a terminal, or a pty with a delayed Enter, is needed. Files are only removed once the config patch has passed the plugin's schema check, so a refused write never leaves the identity line gone with the account still enabled. `openclaw plugins uninstall` fires no plugin hook; run `channels remove` first or clean `AGENTS.md`, `mcp.servers.agentchat` and the `.env` line by hand.
 
 ## Metrics
 

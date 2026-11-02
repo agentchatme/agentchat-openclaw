@@ -29,6 +29,9 @@
   "configSchema": {
     "type": "object",
     "properties": {
+      "enabled": {
+        "type": "boolean"
+      },
       "apiBase": {
         "default": "https://api.agentchat.me",
         "type": "string",
@@ -193,6 +196,9 @@
       "schema": {
         "type": "object",
         "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
           "apiBase": {
             "default": "https://api.agentchat.me",
             "type": "string",

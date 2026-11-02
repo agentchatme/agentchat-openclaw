@@ -59,7 +59,7 @@ import {
   agentchatDoctorAdapter,
   type AgentchatProbeResult,
 } from './binding/index.js'
-import { placeDoorbell, formatPlacement, applyDoorbellConfig, stripDoorbellConfig, removeDoorbellFiles } from './doorbell/placement.js'
+import { placeDoorbell, formatPlacement, applyDoorbellConfig, stripDoorbellConfig, removeDoorbellFiles, placeApiKeyInDotEnv, dotEnvPath } from './doorbell/placement.js'
 import { setPluginRuntime } from './doorbell/runtime-holder.js'
 import { DEFAULT_API_BASE } from './doorbell/mcp.js'
 
@@ -225,6 +225,15 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
       const result = await validateApiKey(apiKey, { apiBase })
       if (result.ok) {
         say(runtime, 'log', `[agentchat:${accountId}] authenticated as @${result.agent.handle} (${result.agent.email})`)
+        // The key goes to the state-dir .env NOW, before OpenClaw writes the
+        // config and re-reads it: the hosted tools entry written in the same
+        // step references ${AGENTCHAT_API_KEY}, and the post-write snapshot
+        // would otherwise report the variable missing once.
+        try {
+          placeApiKeyInDotEnv(apiKey)
+        } catch (err) {
+          say(runtime, 'error', `[agentchat:${accountId}] could not write AGENTCHAT_API_KEY to ${dotEnvPath()}: ${err instanceof Error ? err.message : String(err)}`)
+        }
         return { ...input, agentHandle: result.agent.handle }
       }
       say(runtime, 'error', `[agentchat:${accountId}] api key did not pass live check (${result.reason}): ${result.message}`)
@@ -290,18 +299,63 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
   },
 }
 
-/** `channels remove agentchat` (disable): keep the key, strip what tells the agent it is on AgentChat. */
-function disableAccount(cfg: import('./binding/openclaw-types.js').OpenClawConfig, accountId: string): import('./binding/openclaw-types.js').OpenClawConfig {
-  removeDoorbellFiles(cfg, accountId, { clearKey: false })
+type Cfg = import('./binding/openclaw-types.js').OpenClawConfig
+
+/**
+ * `channels remove agentchat` (disable): the config side only — keep the
+ * key, drop the plugin's own hosted-tools entry, set `enabled: false`.
+ * Pure: OpenClaw validates and persists what this returns; the files go in
+ * `lifecycle.onAccountConfigChanged`, after the patch has been checked.
+ */
+export function disableAccountConfig(cfg: Cfg, accountId: string): Cfg {
   const stripped = stripDoorbellConfig(cfg, accountId).cfg
   return setAccountEnabledInConfigSection({ cfg: stripped, sectionKey: AGENTCHAT_CHANNEL_ID, accountId, enabled: false, allowTopLevel: true })
 }
 
-/** `channels remove agentchat --delete`: strip everything, including the key line in `.env`. */
-function deleteAccount(cfg: import('./binding/openclaw-types.js').OpenClawConfig, accountId: string): import('./binding/openclaw-types.js').OpenClawConfig {
-  removeDoorbellFiles(cfg, accountId, { clearKey: true })
+/** `channels remove agentchat --delete`: the config side only — the account and the plugin's own hosted-tools entry go. */
+export function deleteAccountConfig(cfg: Cfg, accountId: string): Cfg {
   const stripped = stripDoorbellConfig(cfg, accountId).cfg
   return deleteAccountFromConfigSection({ cfg: stripped, sectionKey: AGENTCHAT_CHANNEL_ID, accountId, clearBaseFields: ['apiKey', 'apiBase', 'agentHandle'] })
+}
+
+function isAccountEnabled(cfg: Cfg | undefined, accountId: string): boolean {
+  return resolveAgentchatAccount(cfg, accountId).enabled
+}
+
+/**
+ * The persisted account section must pass the plugin's own schema (the
+ * same zod object OpenClaw's JSON-schema validation is emitted from).
+ * OpenClaw runs the lifecycle hooks BEFORE it validates and persists a
+ * removal (`applyChannelAccountRemoval` in 2026.10.9), so a hook that
+ * touches files checks the patch itself first: a write OpenClaw would
+ * refuse must not strand the identity line or the key.
+ */
+export function accountSectionPersistable(cfg: Cfg | undefined, accountId: string): boolean {
+  const raw = readAccountRaw(readChannelSection(cfg), accountId)
+  if (!raw) return true // no section: nothing for OpenClaw to refuse
+  return agentchatChannelConfigSchema.safeParse(raw).success
+}
+
+/**
+ * ChannelLifecycleAdapter — the file side of disable/delete, run by OpenClaw
+ * after the config adapters and before the write. Best-effort; reports
+ * through the CLI runtime it is given.
+ */
+export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResolvedAccount>['lifecycle']> = {
+  async onAccountConfigChanged({ prevCfg, nextCfg, accountId, runtime }) {
+    const wasEnabled = isAccountEnabled(prevCfg, accountId)
+    const isEnabled = isAccountEnabled(nextCfg, accountId)
+    if (!wasEnabled || isEnabled) return
+    if (!accountSectionPersistable(nextCfg, accountId)) {
+      say(runtime, 'error', `[agentchat:${accountId}] the disabled config does not pass the channel schema — leaving the identity line and the key in place`)
+      return
+    }
+    for (const line of removeDoorbellFiles(nextCfg, accountId, { clearKey: false })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
+  },
+
+  async onAccountRemoved({ prevCfg, accountId, runtime }) {
+    for (const line of removeDoorbellFiles(prevCfg, accountId, { clearKey: true })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
+  },
 }
 
 export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatProbeResult> = {
@@ -372,11 +426,11 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
     // only the interactive setup flow reaches). Shared strip logic with it.
     setAccountEnabled({ cfg, accountId, enabled }) {
       if (enabled) return setAccountEnabledInConfigSection({ cfg, sectionKey: AGENTCHAT_CHANNEL_ID, accountId, enabled: true, allowTopLevel: true })
-      return disableAccount(cfg, accountId)
+      return disableAccountConfig(cfg, accountId)
     },
 
     deleteAccount({ cfg, accountId }) {
-      return deleteAccount(cfg, accountId)
+      return deleteAccountConfig(cfg, accountId)
     },
 
     isEnabled(account) {
@@ -440,6 +494,7 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
   gateway: agentchatGatewayAdapter,
   status: agentchatStatusAdapter,
   doctor: agentchatDoctorAdapter,
+  lifecycle: agentchatLifecycleAdapter,
 }
 
 /**
