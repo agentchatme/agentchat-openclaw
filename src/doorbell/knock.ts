@@ -2,12 +2,14 @@
  * Knock coalescing — one gate cycle per burst, not per frame.
  *
  * A `message.new` frame is a knock: a hint that the tray changed, never the
- * carrier of what changed. A group burst arrives as many frames within a
- * second; the server already bundles its *wakes* for such bursts, and the
- * doorbell does the same for the socket: the first knock arms a short timer,
- * every knock inside the window is absorbed, and the timer fires exactly
- * once. Whoever fires then reads the whole tray, so nothing a later frame
- * announced is missed — the tray is the truth, the knock is not.
+ * carrier of what changed. A group burst arrives as many frames seconds
+ * apart; the server already bundles its *wakes* for such bursts, and the
+ * doorbell does the same for the socket. The window is trailing-edge: every
+ * knock restarts it, so the cycle fires `debounceMs` after the LAST knock of
+ * the burst — with a hard cap: no later than `maxWindowMs` after the FIRST
+ * knock, so a steady trickle cannot starve the gate. Whoever fires then
+ * reads the whole tray, so nothing a later frame announced is missed — the
+ * tray is the truth, the knock is not.
  *
  * `knockAfter` serves the local retry ladder: when a gate cycle could not
  * complete (model unreachable, server error) the doorbell schedules another
@@ -18,10 +20,13 @@
  */
 
 export const DEFAULT_DEBOUNCE_MS = 2_000
+/** A burst fires at most this long after its first knock, however many knocks keep landing. */
+export const DEFAULT_MAX_WINDOW_MS = 6_000
 
 export interface KnockCoalescerOptions {
   readonly onFire: () => void
   readonly debounceMs?: number
+  readonly maxWindowMs?: number
   readonly now?: () => number
   readonly setTimeout?: (fn: () => void, ms: number) => NodeJS.Timeout
   readonly clearTimeout?: (handle: NodeJS.Timeout) => void
@@ -30,11 +35,13 @@ export interface KnockCoalescerOptions {
 export class KnockCoalescer {
   private readonly onFire: () => void
   private readonly debounceMs: number
+  private readonly maxWindowMs: number
   private readonly now: () => number
   private readonly _setTimeout: (fn: () => void, ms: number) => NodeJS.Timeout
   private readonly _clearTimeout: (handle: NodeJS.Timeout) => void
 
   private timer: NodeJS.Timeout | null = null
+  private burstStartedAt: number | null = null
   private delayed: NodeJS.Timeout | null = null
   private delayedDeadline: number | null = null
   private stopped = false
@@ -46,8 +53,11 @@ export class KnockCoalescer {
   constructor(options: KnockCoalescerOptions) {
     const debounce = options.debounceMs ?? DEFAULT_DEBOUNCE_MS
     if (!(debounce >= 0)) throw new RangeError('debounceMs must be >= 0')
+    const maxWindow = options.maxWindowMs ?? DEFAULT_MAX_WINDOW_MS
+    if (!(maxWindow >= debounce)) throw new RangeError('maxWindowMs must be >= debounceMs')
     this.onFire = options.onFire
     this.debounceMs = debounce
+    this.maxWindowMs = maxWindow
     this.now = options.now ?? Date.now
     this._setTimeout = options.setTimeout ?? ((fn, ms) => setTimeout(fn, ms))
     this._clearTimeout = options.clearTimeout ?? ((h) => clearTimeout(h))
@@ -63,15 +73,24 @@ export class KnockCoalescer {
     return this.delayed !== null
   }
 
-  /** A knock: arm the timer if none is armed; otherwise absorb. */
+  /**
+   * A knock. The first one of a burst arms the window; every later one is
+   * absorbed and restarts it (trailing edge), never past the burst's cap.
+   */
   knock(): void {
     if (this.stopped) return
     this.knocks += 1
-    if (this.timer !== null) {
-      this.absorbed += 1
+    const now = this.now()
+    if (this.timer === null) {
+      this.burstStartedAt = now
+      this.timer = this._setTimeout(() => this.fire(), this.debounceMs)
       return
     }
-    this.timer = this._setTimeout(() => this.fire(), this.debounceMs)
+    this.absorbed += 1
+    const capAt = (this.burstStartedAt ?? now) + this.maxWindowMs
+    const delay = Math.max(0, Math.min(this.debounceMs, capAt - now))
+    this._clearTimeout(this.timer)
+    this.timer = this._setTimeout(() => this.fire(), delay)
   }
 
   /** A delayed knock (retry ladder). The sooner pending deadline is kept. */
@@ -99,6 +118,7 @@ export class KnockCoalescer {
     if (this.timer !== null) {
       this._clearTimeout(this.timer)
       this.timer = null
+      this.burstStartedAt = null
     }
     if (this.delayed !== null) {
       this._clearTimeout(this.delayed)
@@ -109,6 +129,7 @@ export class KnockCoalescer {
 
   private fire(): void {
     this.timer = null
+    this.burstStartedAt = null
     if (this.stopped) return
     this.fires += 1
     try {

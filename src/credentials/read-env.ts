@@ -56,6 +56,16 @@ export function readOpenClawStateDirFromEnv(): string | undefined {
   return raw ? raw : undefined
 }
 
+/**
+ * Reads `OPENCLAW_WORKSPACE_DIR` — OpenClaw's explicit override for the
+ * default agent workspace (`resolveDefaultAgentWorkspaceDir` in OpenClaw
+ * checks it first).
+ */
+export function readOpenClawWorkspaceDirFromEnv(): string | undefined {
+  const raw = process.env.OPENCLAW_WORKSPACE_DIR?.trim()
+  return raw ? raw : undefined
+}
+
 export type DoorbellMode = 'v3' | 'off'
 
 /**

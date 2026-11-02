@@ -20,12 +20,19 @@
  */
 
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { API_KEY_ENV, readOpenClawStateDirFromEnv } from '../credentials/read-env.js'
-import { describeMcpEntry, hostedMcpUrl, withHostedMcpEntry, type McpEntryOutcome } from './mcp.js'
-import { writeAgentsAnchor, agentsAnchorPath, hasAgentsAnchorFor } from '../binding/agents-anchor.js'
+import { API_KEY_ENV } from '../credentials/read-env.js'
+import { resolveBoundAgentId, resolveOpenClawDefaultAgentId, resolveOpenClawStateDir } from '../openclaw-layout.js'
+import { describeMcpEntry, hostedMcpUrl, withHostedMcpEntry, withoutHostedMcpEntry, type McpEntryOutcome } from './mcp.js'
+import { LLM_AGENT_OVERRIDE_PATH, withLlmAgentOverrideOptIn } from './model.js'
+import { writeAgentsAnchor, agentsAnchorPath, hasAgentsAnchorFor, removeAgentsAnchor } from '../binding/agents-anchor.js'
+import { AGENTCHAT_CHANNEL_ID, AGENTCHAT_DEFAULT_ACCOUNT_ID, applyAgentchatAccountPatch, readAgentchatConfigField } from '../channel-account.js'
+
+const HANDLE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
+function isValidHandleShape(value: string): boolean {
+  return value.length >= 3 && value.length <= 30 && HANDLE_PATTERN.test(value)
+}
 
 export type PlacementStatus = 'ok' | 'changed' | 'skipped' | 'failed'
 
@@ -37,12 +44,7 @@ export interface PlacementStep {
 
 const DOTENV_NAME = '.env'
 
-/** OpenClaw's state dir: `$OPENCLAW_STATE_DIR` or `~/.openclaw`. */
-export function resolveOpenClawStateDir(): string {
-  const override = readOpenClawStateDirFromEnv()
-  if (override) return path.resolve(override.replace(/^~(?=$|[\\/])/, os.homedir()))
-  return path.join(os.homedir(), '.openclaw')
-}
+export { resolveOpenClawStateDir }
 
 export function dotEnvPath(stateDir: string = resolveOpenClawStateDir()): string {
   return path.join(stateDir, DOTENV_NAME)
@@ -132,6 +134,88 @@ function stripQuotes(value: string): string {
   return value
 }
 
+// ─── the config side of placement (pure) ───────────────────────────────
+
+export interface DoorbellConfigParams {
+  readonly accountId: string
+  /** The handle the key authenticates as; omitted when not yet known (an older OpenClaw without `prepareAccountConfigInput`). */
+  readonly handle?: string | undefined
+  readonly apiKey: string
+  readonly apiBase: string
+}
+
+/**
+ * Everything placement writes INTO `openclaw.json`, as one pure patch:
+ * `channels.agentchat.agentHandle` (the handle the key authenticates as),
+ * `mcp.servers.agentchat` (the hosted tools), and — only when the account
+ * is bound to an agent other than OpenClaw's default —
+ * `plugins.entries.agentchat.llm.allowAgentIdOverride`. Returns the config
+ * and one line per change, for the wizard, the non-interactive hook (through
+ * `runtime.config.mutateConfigFile`) and `doctor --fix` alike.
+ */
+export function applyDoorbellConfig<TCfg extends object>(cfg: TCfg, params: DoorbellConfigParams): { cfg: TCfg; changes: string[] } {
+  const changes: string[] = []
+  let next: TCfg = cfg
+  const bareHandle = (params.handle ?? '').trim().replace(/^@/, '')
+  if (bareHandle && readAgentchatConfigField(next as never, params.accountId, 'agentHandle') !== bareHandle && isValidHandleShape(bareHandle)) {
+    next = applyAgentchatAccountPatch(next as never, params.accountId, { agentHandle: bareHandle }) as unknown as TCfg
+    changes.push(`channels.agentchat${params.accountId === AGENTCHAT_DEFAULT_ACCOUNT_ID ? '' : `.accounts.${params.accountId}`}.agentHandle = ${bareHandle}`)
+  }
+  const mcp = withHostedMcpEntry(next, params.apiBase, params.apiKey)
+  next = mcp.cfg
+  if (mcp.outcome === 'added') changes.push(`mcp.servers.agentchat → ${hostedMcpUrl(params.apiBase)} (bearer template on ${API_KEY_ENV})`)
+  const bound = resolveBoundAgentId(next, AGENTCHAT_CHANNEL_ID, params.accountId)
+  const ambient = resolveOpenClawDefaultAgentId(next)
+  if (bound && bound !== (ambient ?? bound)) {
+    const optIn = withLlmAgentOverrideOptIn(next)
+    next = optIn.cfg
+    if (optIn.changed) changes.push(`${LLM_AGENT_OVERRIDE_PATH} = true (account bound to agent "${bound}", not the default)`)
+  }
+  return { cfg: next, changes }
+}
+
+/** The agent this account's identity line belongs to: the bound agent, else OpenClaw's default. */
+export function resolvePlacementAgentId(cfg: object | undefined, accountId: string): string | undefined {
+  return resolveBoundAgentId(cfg, AGENTCHAT_CHANNEL_ID, accountId) ?? resolveOpenClawDefaultAgentId(cfg)
+}
+
+/**
+ * Undo the config side of placement for an account that is being disabled
+ * or deleted: the plugin's own `mcp.servers.agentchat` entry goes (a
+ * hand-written one stays). Pure; shared by `config.setAccountEnabled`,
+ * `config.deleteAccount` and the wizard's `disable`.
+ */
+export function stripDoorbellConfig<TCfg extends object>(cfg: TCfg, accountId: string): { cfg: TCfg; changes: string[] } {
+  const apiBase = readAgentchatConfigField(cfg as never, accountId, 'apiBase') ?? 'https://api.agentchat.me'
+  const apiKey = readAgentchatConfigField(cfg as never, accountId, 'apiKey')
+  const { cfg: next, removed } = withoutHostedMcpEntry(cfg, apiBase, apiKey)
+  return { cfg: next, changes: removed ? ['removed mcp.servers.agentchat'] : [] }
+}
+
+/**
+ * Undo the file side of placement: the identity line in the bound agent's
+ * `AGENTS.md`, and — on delete — the key line in the state-dir `.env`.
+ * Best-effort: a filesystem error never blocks a remove.
+ */
+export function removeDoorbellFiles(cfg: object | undefined, accountId: string, options: { clearKey: boolean; stateDir?: string }): string[] {
+  const changes: string[] = []
+  try {
+    const removed = removeAgentsAnchor({ cfg: cfg as never, agentId: resolvePlacementAgentId(cfg, accountId) })
+    if (removed.removed) changes.push(`removed the identity line from ${removed.path}`)
+  } catch {
+    // best effort
+  }
+  if (options.clearKey) {
+    try {
+      const cleared = clearApiKeyInDotEnv(options.stateDir)
+      if (cleared.changed) changes.push(`removed ${API_KEY_ENV} from ${cleared.path}`)
+    } catch {
+      // best effort
+    }
+  }
+  return changes
+}
+
 // ─── placement, as one report ──────────────────────────────────────────
 
 export interface PlaceParams<TCfg extends object> {
@@ -139,6 +223,10 @@ export interface PlaceParams<TCfg extends object> {
   readonly handle: string
   readonly apiKey: string
   readonly apiBase: string
+  /** The channel account; selects the bound agent whose workspace holds the identity line. */
+  readonly accountId?: string
+  /** Explicit agent whose workspace holds the identity line; defaults to the bound agent, else OpenClaw's default. */
+  readonly agentId?: string | undefined
   /** Test seam: where the state-dir `.env` lives. */
   readonly stateDir?: string
   /** Test seam: skip the `.env` write (e.g. a read-only CI). */
@@ -172,8 +260,9 @@ export function placeDoorbell<TCfg extends object>(params: PlaceParams<TCfg>): P
     }
   }
 
+  const agentId = params.agentId ?? resolvePlacementAgentId(params.cfg, params.accountId ?? AGENTCHAT_DEFAULT_ACCOUNT_ID)
   try {
-    const anchor = writeAgentsAnchor({ cfg: params.cfg as never, handle: params.handle })
+    const anchor = writeAgentsAnchor({ cfg: params.cfg as never, handle: params.handle, agentId })
     steps.push({ name: 'anchor', status: 'ok', detail: `identity line for @${params.handle.replace(/^@/, '')} in ${anchor.path}` })
   } catch (err) {
     steps.push({ name: 'anchor', status: 'failed', detail: `could not write the identity line to AGENTS.md: ${describe(err)}` })
@@ -181,7 +270,7 @@ export function placeDoorbell<TCfg extends object>(params: PlaceParams<TCfg>): P
 
   steps.push({ name: 'manual', status: 'ok', detail: 'manual bundled as the agentchat skill (skills/agentchat/SKILL.md, https://agentchat.me/skill.md verbatim)' })
 
-  const mcp = withHostedMcpEntry(params.cfg, params.apiBase)
+  const mcp = withHostedMcpEntry(params.cfg, params.apiBase, params.apiKey)
   steps.push(describeMcpOutcome(mcp.outcome, params.apiBase))
 
   return { cfg: mcp.cfg, steps, mcp: mcp.outcome }
@@ -218,6 +307,7 @@ export function checkPlacement<TCfg extends object>(params: {
   handle: string | undefined
   apiKey: string | undefined
   apiBase: string
+  agentId?: string | undefined
   stateDir?: string
   /** The gateway's own environment (defaults to `process.env`). */
   env?: NodeJS.ProcessEnv
@@ -246,7 +336,7 @@ export function checkPlacement<TCfg extends object>(params: {
   }
 
   if (params.handle) {
-    const anchor = hasAgentsAnchorFor({ cfg: params.cfg as never, handle: params.handle })
+    const anchor = hasAgentsAnchorFor({ cfg: params.cfg as never, handle: params.handle, agentId: params.agentId })
     checks.push({
       name: 'anchor',
       ok: anchor.present,
@@ -258,7 +348,7 @@ export function checkPlacement<TCfg extends object>(params: {
 
   checks.push({ name: 'manual', ok: true, detail: 'manual bundled as the agentchat skill' })
 
-  const mcpState = describeMcpEntry(params.cfg, params.apiBase)
+  const mcpState = describeMcpEntry(params.cfg, params.apiBase, params.apiKey)
   checks.push({
     name: 'mcp',
     ok: mcpState === 'ours' || mcpState === 'user_managed',

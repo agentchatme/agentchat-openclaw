@@ -131,3 +131,54 @@ describe('placeDoorbell + checkPlacement', () => {
     expect(stale.find((c) => c.name === 'key')!.detail).toMatch(/differs from the configured channel key/)
   })
 })
+
+describe('applyDoorbellConfig — the config side of placement', () => {
+  const KEY2 = 'ac_live_' + 'c'.repeat(24)
+
+  it('persists agentHandle, adds mcp.servers.agentchat, and reports each change once', async () => {
+    const { applyDoorbellConfig } = await import('../../src/doorbell/placement.js')
+    const first = applyDoorbellConfig({ channels: { agentchat: { apiKey: KEY2 } } }, { accountId: 'default', handle: '@alice', apiKey: KEY2, apiBase: 'https://api.agentchat.me' })
+    expect(first.changes).toEqual([
+      'channels.agentchat.agentHandle = alice',
+      'mcp.servers.agentchat → https://api.agentchat.me/mcp (bearer template on AGENTCHAT_API_KEY)',
+    ])
+    const cfg = first.cfg as unknown as { channels: { agentchat: { agentHandle: string } }; mcp: { servers: Record<string, unknown> }; plugins?: unknown }
+    expect(cfg.channels.agentchat.agentHandle).toBe('alice')
+    expect(cfg.mcp.servers.agentchat).toBeDefined()
+    expect(cfg.plugins).toBeUndefined() // default agent: no llm override opt-in
+    const second = applyDoorbellConfig(first.cfg, { accountId: 'default', handle: 'alice', apiKey: KEY2, apiBase: 'https://api.agentchat.me' })
+    expect(second.changes).toEqual([])
+  })
+
+  it('writes the llm override opt-in only when the account is bound to a non-default agent', async () => {
+    const { applyDoorbellConfig } = await import('../../src/doorbell/placement.js')
+    const bound = {
+      channels: { agentchat: { apiKey: KEY2 } },
+      agents: { entries: { main: { default: true }, ops: {} } },
+      bindings: [{ agentId: 'ops', match: { channel: 'agentchat' } }],
+    }
+    const result = applyDoorbellConfig(bound, { accountId: 'default', handle: 'alice', apiKey: KEY2, apiBase: 'https://api.agentchat.me' })
+    expect(result.changes.at(-1)).toMatch(/^plugins\.entries\.agentchat\.llm\.allowAgentIdOverride = true \(account bound to agent "ops"/)
+    expect((result.cfg as unknown as { plugins: { entries: { agentchat: { llm: { allowAgentIdOverride: boolean } } } } }).plugins.entries.agentchat.llm.allowAgentIdOverride).toBe(true)
+    const sameAgent = { ...bound, bindings: [{ agentId: 'main', match: { channel: 'agentchat' } }] }
+    expect(applyDoorbellConfig(sameAgent, { accountId: 'default', handle: 'alice', apiKey: KEY2, apiBase: 'https://api.agentchat.me' }).changes.some((c) => c.includes('allowAgentIdOverride'))).toBe(false)
+  })
+
+  it('places the identity line in the bound agent\'s workspace', async () => {
+    const { placeDoorbell } = await import('../../src/doorbell/placement.js')
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-placement-bound-'))
+    const opsWs = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-ops-ws-'))
+    const mainWs = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-main-ws-'))
+    try {
+      const cfg = {
+        agents: { defaults: { workspace: mainWs }, entries: { main: { default: true }, ops: { workspace: opsWs } } },
+        bindings: [{ agentId: 'ops', match: { channel: 'agentchat' } }],
+      }
+      placeDoorbell({ cfg, handle: 'alice', apiKey: KEY2, apiBase: 'https://api.agentchat.me', accountId: 'default', stateDir })
+      expect(fs.existsSync(path.join(opsWs, 'AGENTS.md'))).toBe(true)
+      expect(fs.existsSync(path.join(mainWs, 'AGENTS.md'))).toBe(false)
+    } finally {
+      for (const d of [stateDir, opsWs, mainWs]) fs.rmSync(d, { recursive: true, force: true })
+    }
+  })
+})

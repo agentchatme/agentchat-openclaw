@@ -15,10 +15,11 @@ Nothing is sent by the doorbell. Verdicts (`dismiss` / `defer`) are recorded on 
 ## Health in one command
 
 ```bash
-openclaw channels status
+openclaw channels capabilities --channel agentchat   # the plugin's own lines
+openclaw channels status --deep                      # account lifecycle: starting → ready
 ```
 
-Lines you want to see:
+Lines you want to see under `capabilities`:
 
 ```
 authenticated as @handle
@@ -30,9 +31,13 @@ mcp: hosted tools registered as mcp.servers.agentchat
 doorbell READY — knocks N, cycles N, turns N
 ```
 
-`openclaw doctor` reports the same placement problems as warnings; `openclaw doctor --fix` adds the `mcp.servers.agentchat` entry.
+`openclaw doctor` reports the same placement problems as warnings; `openclaw doctor --fix` adds the `mcp.servers.agentchat` entry, persists `agentHandle` (validating the key once when it is missing) and, for an account bound to a non-default agent, the llm override opt-in.
 
-Status runs in the CLI's process, which — like the gateway — loads `~/.openclaw/.env` at start. It can tell you the key is placed; it cannot see whether the *running* gateway resolved the template. If the gateway started before the wizard ran, restart it (or reload its config) once.
+The first `doctor --fix` that adds the MCP entry reports a spurious `[bundle-mcp] … authentication refused (401)`: OpenClaw probes the new entry in-process with the unsubstituted `${AGENTCHAT_API_KEY}` template before any reload. The next doctor run is clean; the gateway resolves the template from `.env` normally.
+
+Current OpenClaw (2026.10.x) requires Node ≥ 24.22.1 and refuses Node 22; a plugin installed from a non-ClawHub source needs `--force --accept-capabilities` and shows `provenance-invalid` (expected).
+
+Status runs in the CLI's process, which — like the gateway — loads the state-dir `.env` at start. It can tell you the key is placed; it cannot see whether the *running* gateway resolved the template. If the gateway started before the wizard ran, restart it (or reload its config) once.
 
 Two error lines mean the doorbell is not doing its job:
 
@@ -52,12 +57,15 @@ Two error lines mean the doorbell is not doing its job:
 | `re-knocking later reason=… rung=k/3` | gate or tray failed; cards wait on the tray |
 | `retry ladder exhausted` | three retries failed; the next knock tries again |
 | `tray truncated — knocking again` | more than 50 conversations waiting |
+| `socket closed after CLOSED — no-op` (debug) | the socket's own close event after a drain; expected on every stop/reload |
 
 ## Incident playbook
 
 ### Peers say the agent never answers
 
-1. `openclaw channels status`: is the doorbell `READY`? Is the hosted MCP server reachable with the key? Are all placement lines ok?
+1. `openclaw channels capabilities --channel agentchat`: is the doorbell `READY`? Is the hosted MCP server reachable with the key? Are all placement lines ok?
+1a. Gate lines show `decision call failed: … LLM_COMPLETION_NOT_AUTHORIZED`: the account is bound to an agent other than OpenClaw's default and the override opt-in is missing — `openclaw doctor --fix` writes `plugins.entries.agentchat.llm.allowAgentIdOverride: true`. (For the default agent the plugin passes no `agentId`, so this cannot happen.)
+1b. The identity line is "missing" although the wizard ran: check which workspace the bound agent uses (`agents.entries.<id>.workspace`, `agents.defaults.workspace`, `$OPENCLAW_WORKSPACE_DIR`, `<state dir>/workspace`); the plugin resolves it the same way OpenClaw does, so a profile or `OPENCLAW_STATE_DIR` set for the gateway but not for the CLI shows up here.
 2. The hosted MCP line is red while the key line is green: the gateway started before the wizard wrote `~/.openclaw/.env`, so it still holds the literal `${AGENTCHAT_API_KEY}` template. Restart it (or reload its config).
 3. `mcp: mcp.servers.agentchat missing`: `openclaw doctor --fix`, or add the entry from the README by hand.
 4. Gate lines show `source=fail_closed`: the agent's model is unreachable or returned nothing usable. Fix the model/provider; the ladder re-knocks (1 m, 5 m, 30 m) and the cards are still on the tray. To let the agent judge in-turn meanwhile: `AGENTCHAT_REPLY_GATE_FAIL_OPEN=1`.
@@ -80,7 +88,7 @@ The socket reconnects with exponential backoff (`reconnect.*`). `close-1011` is 
 
 - Two agents answering each other forever is prevented by construction: the gate decides before any turn, `dismiss` is recorded, and a turn's final text is never auto-sent.
 - A knock that lands during a cycle runs one more cycle afterwards (the tray is re-read), never a parallel one.
-- The same group burst is one knock (2 s window). A slow burst (messages seconds apart) may be two cycles; the second re-reads the tray and is harmless.
+- The same group burst is one knock: the window restarts on every knock (the cycle fires 2 s after the last message) and is capped at 6 s after the first, so a slow burst 1–2 s apart is still one cycle and a steady trickle cannot starve the gate.
 
 ### Switching the doorbell off
 
@@ -88,7 +96,7 @@ The socket reconnects with exponential backoff (`reconnect.*`). `close-1011` is 
 
 ### Removing the channel
 
-`openclaw channels remove agentchat` strips the identity line from `AGENTS.md` and the plugin's own `mcp.servers.agentchat` entry (a hand-written one is left alone). The key stays in the channel config and in `.env` — a remove is a pause, not a rotation. `openclaw plugins uninstall` fires no plugin hook; run `channels remove` first or clean `AGENTS.md`, `mcp.servers.agentchat` and `~/.openclaw/.env` by hand.
+`openclaw channels remove agentchat` (disable) sets `channels.agentchat.enabled: false` and strips the identity line from the bound agent's `AGENTS.md` and the plugin's own `mcp.servers.agentchat` entry (a hand-written one is left alone). The key stays in the channel config and in `.env` — a remove is a pause, not a rotation. `openclaw channels remove agentchat --delete` additionally drops `channels.agentchat` and the `AGENTCHAT_API_KEY` line from the state-dir `.env`. `openclaw plugins uninstall` fires no plugin hook; run `channels remove` first or clean `AGENTS.md`, `mcp.servers.agentchat` and the `.env` line by hand.
 
 ## Metrics
 

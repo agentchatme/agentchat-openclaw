@@ -122,3 +122,67 @@ describe('gateway.startAccount', () => {
     expect(order).toEqual(['cleanup', 'resolved'])
   })
 })
+
+describe('gateway.startAccount — lifecycle and the gate agent', () => {
+  beforeEach(() => {
+    vi.mocked(registerDoorbell).mockClear()
+    delete process.env.AGENTCHAT_DOORBELL
+  })
+
+  it('reports lifecycle starting → (build) → ready/recovering/stopped through the status snapshot', async () => {
+    const { ctx, status } = ctxFor({ channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } })
+    const seen: unknown[] = []
+    const original = ctx.setStatus
+    ctx.setStatus = (next: Record<string, unknown>) => {
+      seen.push(next.lifecycle)
+      original(next)
+    }
+    await agentchatGatewayAdapter.startAccount!(ctx as never)
+    expect(seen[0]).toBe('starting')
+    const build = vi.mocked(registerDoorbell).mock.calls[0]![0].build
+    const fakeRuntime = { getHealth: () => ({ state: { kind: 'READY' }, authenticated: true, ackNegotiated: true, counters: { frames: 0, selfFiltered: 0, knocks: 1, invites: 0 } }) }
+    const built = build(fakeRuntime as never)
+    built.handlers.onAuthenticated!(123)
+    expect(status().lifecycle).toBe('ready')
+    built.handlers.onStateChanged!({ kind: 'CONNECTING', attempt: 2, startedAt: 1 } as never, { kind: 'DISCONNECTED' } as never)
+    expect(status().lifecycle).toBe('recovering')
+    built.handlers.onStateChanged!({ kind: 'AUTH_FAIL', reason: 'x' } as never, { kind: 'CONNECTING' } as never)
+    expect(status().lifecycle).toBe('blocked')
+    built.handlers.onStateChanged!({ kind: 'CLOSED' } as never, { kind: 'DRAINING' } as never)
+    expect(status().lifecycle).toBe('stopped')
+    built.invoker?.stop()
+  })
+
+  it('refusal and off report lifecycle blocked / stopped', async () => {
+    const two = ctxFor({ channels: { agentchat: { accounts: { a: { apiKey: KEY }, b: { apiKey: KEY } } } } }, 'a')
+    await agentchatGatewayAdapter.startAccount!(two.ctx as never)
+    expect(two.status().lifecycle).toBe('blocked')
+    process.env.AGENTCHAT_DOORBELL = 'off'
+    const off = ctxFor({ channels: { agentchat: { apiKey: KEY } } })
+    await agentchatGatewayAdapter.startAccount!(off.ctx as never)
+    expect(off.status().lifecycle).toBe('stopped')
+  })
+
+  it('warns when the account is bound to a non-default agent and the llm override opt-in is missing; silent otherwise', async () => {
+    const bound = {
+      channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } },
+      agents: { entries: { main: { default: true }, ops: {} } },
+      bindings: [{ agentId: 'ops', match: { channel: 'agentchat' } }],
+    }
+    const routed = { ctx: ctxFor(bound).ctx, log: null as unknown as ReturnType<typeof ctxFor>['log'] }
+    const h = ctxFor(bound)
+    h.ctx.channelRuntime = { routing: { resolveAgentRoute: () => ({ agentId: 'ops', sessionKey: 'agent:ops:agentchat:direct:doorbell' }) } } as never
+    await agentchatGatewayAdapter.startAccount!(h.ctx as never)
+    expect(h.log.warn.mock.calls.some((c) => String(c[0]).includes('plugins.entries.agentchat.llm.allowAgentIdOverride'))).toBe(true)
+    void routed
+
+    const optedIn = ctxFor({ ...bound, plugins: { entries: { agentchat: { llm: { allowAgentIdOverride: true } } } } })
+    optedIn.ctx.channelRuntime = h.ctx.channelRuntime
+    await agentchatGatewayAdapter.startAccount!(optedIn.ctx as never)
+    expect(optedIn.log.warn.mock.calls.some((c) => String(c[0]).includes('allowAgentIdOverride'))).toBe(false)
+
+    const plain = ctxFor({ channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } })
+    await agentchatGatewayAdapter.startAccount!(plain.ctx as never)
+    expect(plain.log.warn.mock.calls.length).toBe(0)
+  })
+})

@@ -87,9 +87,8 @@ import {
 // Credential lookup helper — see SECURITY.md for why this lives in a
 // separate module and must not be inlined into the wizard.
 import { readApiKeyFromEnv } from './credentials/read-env.js'
-import { removeAgentsAnchor } from './binding/agents-anchor.js'
-import { placeDoorbell, formatPlacement } from './doorbell/placement.js'
-import { DEFAULT_API_BASE, withoutHostedMcpEntry } from './doorbell/mcp.js'
+import { placeDoorbell, formatPlacement, applyDoorbellConfig, stripDoorbellConfig, removeDoorbellFiles } from './doorbell/placement.js'
+import { DEFAULT_API_BASE } from './doorbell/mcp.js'
 
 /**
  * Sentinel credential-values key used to signal "the register or recover
@@ -1074,7 +1073,7 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
         // intent: a read-only workspace must NOT bounce the wizard — the
         // key and config are saved; the report says what to repair.
         const handle = result.agent.handle
-        const placed = placeDoorbell({ cfg, handle, apiKey, apiBase: apiBase ?? DEFAULT_API_BASE })
+        const placed = placeDoorbell({ cfg, handle, apiKey, apiBase: apiBase ?? DEFAULT_API_BASE, accountId })
         const failed = placed.steps.filter((s) => s.status === 'failed')
         await prompter.note(
           [
@@ -1090,15 +1089,12 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
           'AgentChat doorbell placed',
         )
 
-        // If the wizard registered fresh, agentHandle is already in cfg.
-        // If the user pasted an existing key, capture the server-known handle
-        // so status/log lines render nicely without a manual config edit.
-        let nextCfg = placed.cfg
-        const existingHandle = readAgentchatConfigField(nextCfg, accountId, 'agentHandle')
-        if (!existingHandle && isValidHandleShape(handle)) {
-          nextCfg = applyAgentchatAccountPatch(nextCfg, accountId, { agentHandle: handle })
-        }
-        return { cfg: nextCfg }
+        // The config side of placement: the handle the key authenticates as
+        // (configured-state, doctor and the own-echo filter need it), the
+        // hosted tools entry, and the llm override opt-in when this account
+        // is bound to an agent other than OpenClaw's default.
+        const applied = applyDoorbellConfig(placed.cfg, { accountId, handle, apiKey, apiBase: apiBase ?? DEFAULT_API_BASE })
+        return { cfg: applied.cfg }
       }
 
       spinner.stop(`API key did not pass the live check (${result.reason})`)
@@ -1149,13 +1145,11 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
   // when the user explicitly removes the channel; orphans are documented in
   // RUNBOOK.md.
   disable: (cfg) => {
-    try {
-      removeAgentsAnchor({ cfg })
-    } catch {
-      // Anchor cleanup is best-effort — never block the channel-remove.
-    }
-    const apiBase = readAgentchatConfigField(cfg, 'default', 'apiBase') ?? DEFAULT_API_BASE
-    const stripped = withoutHostedMcpEntry(cfg, apiBase).cfg
-    return setSetupChannelEnabled(stripped, AGENTCHAT_CHANNEL_ID, false)
+    // Same strip as `config.setAccountEnabled(false)` (what `channels remove`
+    // calls): the identity line goes, the plugin's own mcp.servers.agentchat
+    // entry goes (matched by URL + transport on the env-substituted config),
+    // the key stays — a remove is a pause, not a rotation.
+    removeDoorbellFiles(cfg, 'default', { clearKey: false })
+    return setSetupChannelEnabled(stripDoorbellConfig(cfg, 'default').cfg, AGENTCHAT_CHANNEL_ID, false)
   },
 }

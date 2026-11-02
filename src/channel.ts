@@ -31,6 +31,8 @@ import {
   type ChannelConfigUiHint,
   type ChannelPlugin,
 } from 'openclaw/plugin-sdk/channel-core'
+import { deleteAccountFromConfigSection, setAccountEnabledInConfigSection } from 'openclaw/plugin-sdk/channel-plugin-common'
+import type { ChannelSetupInput } from 'openclaw/plugin-sdk/setup'
 
 import {
   AGENTCHAT_CHANNEL_ID,
@@ -39,6 +41,7 @@ import {
   applyAgentchatAccountPatch,
   isApiKeyPresent,
   readAccountRaw,
+  readAgentchatConfigField,
   readChannelSection,
   splitEnabledFromRaw,
 } from './channel-account.js'
@@ -56,7 +59,7 @@ import {
   agentchatDoctorAdapter,
   type AgentchatProbeResult,
 } from './binding/index.js'
-import { placeDoorbell, formatPlacement } from './doorbell/placement.js'
+import { placeDoorbell, formatPlacement, applyDoorbellConfig, stripDoorbellConfig, removeDoorbellFiles } from './doorbell/placement.js'
 import { setPluginRuntime } from './doorbell/runtime-holder.js'
 import { DEFAULT_API_BASE } from './doorbell/mcp.js'
 
@@ -133,6 +136,174 @@ const uiHints: Record<string, ChannelConfigUiHint> = {
   observability: { label: 'Logs & metrics', advanced: true },
 }
 
+/** The CLI runtime OpenClaw hands setup hooks (`RuntimeEnv`): `log`, `error`, `exit`. Nothing else — never `.logger`. */
+type SetupRuntimeEnv = { log?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void }
+
+/**
+ * The setup input with the one channel-owned field this plugin adds:
+ * `agentHandle`, learnt from the key by `prepareAccountConfigInput` and
+ * written by `applyAccountConfig` in the same persisted write.
+ */
+type AgentchatSetupInput = ChannelSetupInput & { agentHandle?: string }
+
+const HANDLE_SHAPE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
+function validHandle(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const bare = value.trim().replace(/^@/, '')
+  return bare.length >= 3 && bare.length <= 30 && HANDLE_SHAPE.test(bare) ? bare : undefined
+}
+
+function say(runtime: unknown, level: 'log' | 'error', line: string): void {
+  const env = runtime as SetupRuntimeEnv | undefined
+  const fn = env?.[level]
+  if (typeof fn === 'function') fn(line)
+}
+
+type BaseSetupAdapter = NonNullable<ChannelPlugin<AgentchatResolvedAccount>['setup']>
+
+/**
+ * `channels add agentchat --token <key>` (non-interactive) and the wizard's
+ * credential step both go through this adapter. What OpenClaw persists is
+ * exactly what `applyAccountConfig` returns — it is synchronous — so
+ * everything that belongs in `openclaw.json` is written there: the key, the
+ * API base, the handle the key authenticates as (learnt just before, in
+ * `prepareAccountConfigInput`, which 2026.10.x runs first and awaits), the
+ * hosted tools entry and, when the account is bound to a non-default agent,
+ * the llm override opt-in. `afterAccountConfigWritten` only places files
+ * (the key in the state-dir `.env`, the identity line in `AGENTS.md`) and
+ * reports through the CLI runtime it is given (`RuntimeEnv.log/error`).
+ * It never relies on the plugin runtime: in OpenClaw's setup-only
+ * registration mode that runtime is a proxy that throws on access.
+ *
+ * `prepareAccountConfigInput` is absent from the 2026.6.10 types; the
+ * adapter type is widened so the same object compiles against both.
+ */
+export const agentchatSetupAdapter: BaseSetupAdapter & {
+  prepareAccountConfigInput?: (params: {
+    cfg: import('./binding/openclaw-types.js').OpenClawConfig
+    accountId: string
+    input: AgentchatSetupInput
+    runtime: unknown
+  }) => Promise<AgentchatSetupInput>
+} = {
+  /**
+   * Pre-write gate: cheap, sync check that the caller supplied an API key
+   * that's at least plausibly shaped. Real authentication happens in
+   * `prepareAccountConfigInput` / `afterAccountConfigWritten`.
+   */
+  validateInput({ input }) {
+    if (typeof input.token !== 'string' || input.token.trim().length === 0) {
+      return 'apiKey is required — pass via --token, or run `openclaw channels add agentchat` to register a new agent or recover a lost key (handle + email OTP)'
+    }
+    if (input.token.length < MIN_API_KEY_LENGTH) {
+      return `apiKey looks too short (got ${input.token.length} chars, expect ≥${MIN_API_KEY_LENGTH})`
+    }
+    if (typeof input.url === 'string' && input.url.length > 0) {
+      try {
+        const parsed = new URL(input.url)
+        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+          return 'apiBase must be http(s) — e.g. https://api.agentchat.me'
+        }
+      } catch {
+        return 'apiBase is not a valid URL'
+      }
+    }
+    return null
+  },
+
+  /**
+   * Learn the handle the key authenticates as BEFORE the write, so
+   * `applyAccountConfig` persists it in the same config write OpenClaw
+   * already makes. A key that does not validate leaves the input untouched
+   * (the write still happens; the error line says what to fix).
+   */
+  async prepareAccountConfigInput({ accountId, input, runtime }) {
+    const apiKey = typeof input.token === 'string' ? input.token : undefined
+    if (!apiKey || apiKey.length < MIN_API_KEY_LENGTH) return input
+    const apiBase = typeof input.url === 'string' && input.url.length > 0 ? input.url : undefined
+    try {
+      const result = await validateApiKey(apiKey, { apiBase })
+      if (result.ok) {
+        say(runtime, 'log', `[agentchat:${accountId}] authenticated as @${result.agent.handle} (${result.agent.email})`)
+        return { ...input, agentHandle: result.agent.handle }
+      }
+      say(runtime, 'error', `[agentchat:${accountId}] api key did not pass live check (${result.reason}): ${result.message}`)
+    } catch (err) {
+      say(runtime, 'error', `[agentchat:${accountId}] live key validation failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    return input
+  },
+
+  /**
+   * The one persisted write. Synchronous by contract, so it carries
+   * everything that can be known without I/O: key, API base, the handle
+   * (when `prepareAccountConfigInput` learnt it), the hosted tools entry,
+   * the llm opt-in for a non-default bound agent.
+   */
+  applyAccountConfig({ cfg, accountId, input }) {
+    const patch: Record<string, unknown> = {}
+    if (typeof input.token === 'string' && input.token.length > 0) patch.apiKey = input.token
+    if (typeof input.url === 'string' && input.url.length > 0) patch.apiBase = input.url
+    const handle = validHandle((input as AgentchatSetupInput).agentHandle)
+    if (handle) patch.agentHandle = handle
+    const withAccount = applyAgentchatAccountPatch(cfg, accountId, patch)
+    const apiKey = readAgentchatConfigField(withAccount, accountId, 'apiKey')
+    if (!apiKey) return withAccount
+    const apiBase = readAgentchatConfigField(withAccount, accountId, 'apiBase') ?? DEFAULT_API_BASE
+    return applyDoorbellConfig(withAccount, { accountId, handle, apiKey, apiBase }).cfg
+  },
+
+  /**
+   * Files only: the key into OpenClaw's state-dir `.env`, the identity line
+   * into the bound agent's `AGENTS.md`. Reports through `RuntimeEnv.log`.
+   * Never throws: setup-time UX is "warn and proceed".
+   */
+  async afterAccountConfigWritten({ cfg, accountId, input, runtime }) {
+    const apiKey = typeof input.token === 'string' ? input.token : readAgentchatConfigField(cfg, accountId, 'apiKey')
+    if (!apiKey) return
+    const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
+    let handle = validHandle((input as AgentchatSetupInput).agentHandle) ?? readAgentchatConfigField(cfg, accountId, 'agentHandle')
+    if (!handle) {
+      // An OpenClaw without `prepareAccountConfigInput`: learn the handle now
+      // for the identity line; the config gets it from `openclaw doctor --fix`.
+      try {
+        const result = await validateApiKey(apiKey, { apiBase })
+        if (result.ok) {
+          handle = result.agent.handle
+          say(runtime, 'log', `[agentchat:${accountId}] authenticated as @${handle}; run \`openclaw doctor --fix\` to persist channels.agentchat.agentHandle`)
+        } else {
+          say(runtime, 'error', `[agentchat:${accountId}] api key did not pass live check (${result.reason}): ${result.message}`)
+          return
+        }
+      } catch (err) {
+        say(runtime, 'error', `[agentchat:${accountId}] live key validation failed: ${err instanceof Error ? err.message : String(err)}`)
+        return
+      }
+    }
+    try {
+      const placed = placeDoorbell({ cfg, handle, apiKey, apiBase, accountId })
+      for (const line of formatPlacement(placed.steps.filter((s) => s.name !== 'mcp'))) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
+      say(runtime, 'log', `[agentchat:${accountId}] ✓ config: agentHandle and mcp.servers.agentchat written with the account (restart the gateway, or reload its config, so \${AGENTCHAT_API_KEY} resolves)`)
+    } catch (err) {
+      say(runtime, 'error', `[agentchat:${accountId}] placement failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  },
+}
+
+/** `channels remove agentchat` (disable): keep the key, strip what tells the agent it is on AgentChat. */
+function disableAccount(cfg: import('./binding/openclaw-types.js').OpenClawConfig, accountId: string): import('./binding/openclaw-types.js').OpenClawConfig {
+  removeDoorbellFiles(cfg, accountId, { clearKey: false })
+  const stripped = stripDoorbellConfig(cfg, accountId).cfg
+  return setAccountEnabledInConfigSection({ cfg: stripped, sectionKey: AGENTCHAT_CHANNEL_ID, accountId, enabled: false, allowTopLevel: true })
+}
+
+/** `channels remove agentchat --delete`: strip everything, including the key line in `.env`. */
+function deleteAccount(cfg: import('./binding/openclaw-types.js').OpenClawConfig, accountId: string): import('./binding/openclaw-types.js').OpenClawConfig {
+  removeDoorbellFiles(cfg, accountId, { clearKey: true })
+  const stripped = stripDoorbellConfig(cfg, accountId).cfg
+  return deleteAccountFromConfigSection({ cfg: stripped, sectionKey: AGENTCHAT_CHANNEL_ID, accountId, clearBaseFields: ['apiKey', 'apiBase', 'agentHandle'] })
+}
+
 export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatProbeResult> = {
   id: AGENTCHAT_CHANNEL_ID,
 
@@ -196,6 +367,18 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
       return AGENTCHAT_DEFAULT_ACCOUNT_ID
     },
 
+    // `openclaw channels remove agentchat` → disable; `--delete` → delete.
+    // OpenClaw routes both here (not through the wizard's `disable`, which
+    // only the interactive setup flow reaches). Shared strip logic with it.
+    setAccountEnabled({ cfg, accountId, enabled }) {
+      if (enabled) return setAccountEnabledInConfigSection({ cfg, sectionKey: AGENTCHAT_CHANNEL_ID, accountId, enabled: true, allowTopLevel: true })
+      return disableAccount(cfg, accountId)
+    },
+
+    deleteAccount({ cfg, accountId }) {
+      return deleteAccount(cfg, accountId)
+    },
+
     isEnabled(account) {
       return account.enabled
     },
@@ -240,94 +423,7 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
     },
   },
 
-  setup: {
-    /**
-     * Pre-write gate: cheap, sync check that the caller supplied an API key
-     * that's at least plausibly shaped. Real authentication happens in
-     * `afterAccountConfigWritten` via a live /agents/me probe.
-     */
-    validateInput({ input }) {
-      // The non-interactive path takes a key and nothing else. Registration
-      // and recovery both need an email OTP round-trip (and recovery needs
-      // the handle + email pair), so they live in the interactive wizard —
-      // name it here so a scripted invocation knows where to go.
-      if (typeof input.token !== 'string' || input.token.trim().length === 0) {
-        return 'apiKey is required — pass via --token, or run `openclaw channels add agentchat` to register a new agent or recover a lost key (handle + email OTP)'
-      }
-      if (input.token.length < MIN_API_KEY_LENGTH) {
-        return `apiKey looks too short (got ${input.token.length} chars, expect ≥${MIN_API_KEY_LENGTH})`
-      }
-      if (typeof input.url === 'string' && input.url.length > 0) {
-        try {
-          const parsed = new URL(input.url)
-          if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-            return 'apiBase must be http(s) — e.g. https://api.agentchat.me'
-          }
-        } catch {
-          return 'apiBase is not a valid URL'
-        }
-      }
-      return null
-    },
-
-    applyAccountConfig({ cfg, accountId, input }) {
-      const patch: Record<string, unknown> = {}
-      if (typeof input.token === 'string' && input.token.length > 0) patch.apiKey = input.token
-      if (typeof input.url === 'string' && input.url.length > 0) patch.apiBase = input.url
-      return applyAgentchatAccountPatch(cfg, accountId, patch)
-    },
-
-    /**
-     * Post-write probe: call `GET /v1/agents/me` with the key we just wrote
-     * so the operator sees a clear "✓ authenticated as @handle" on success
-     * — or a specific failure reason (invalid, revoked, unreachable) they
-     * can act on *before* the runtime starts flapping reconnects in prod.
-     *
-     * Never throws: setup-time UX is "warn and proceed". If the probe can't
-     * reach the API (airgapped CI, corp proxy during first boot), we still
-     * want the config written so the user can retry without reconfiguring.
-     */
-    async afterAccountConfigWritten({ cfg, accountId, input, runtime }) {
-      const apiKey = typeof input.token === 'string' ? input.token : undefined
-      if (!apiKey) return
-      const apiBase = typeof input.url === 'string' && input.url.length > 0 ? input.url : undefined
-      const logger = (runtime as { logger?: { info?: (...args: unknown[]) => void; warn?: (...args: unknown[]) => void } } | undefined)?.logger
-      try {
-        const result = await validateApiKey(apiKey, { apiBase })
-        if (result.ok) {
-          logger?.info?.(
-            `[agentchat:${accountId}] authenticated as @${result.agent.handle} (${result.agent.email})`,
-          )
-          // Non-interactive twin of the wizard's `finalize` placement. This
-          // path (`openclaw setup --channel agentchat --token <key>`) has no
-          // wizard UX, but the agent still needs the key in the gateway
-          // environment, the identity line in AGENTS.md and the hosted tools
-          // registered. The config patch (mcp.servers.agentchat) cannot be
-          // returned from this hook; the doctor's repair adds it, and the
-          // log line says so.
-          try {
-            const placed = placeDoorbell({ cfg, handle: result.agent.handle, apiKey, apiBase: apiBase ?? DEFAULT_API_BASE })
-            for (const line of formatPlacement(placed.steps)) logger?.info?.(`[agentchat:${accountId}] ${line}`)
-            if (placed.mcp === 'added') {
-              logger?.warn?.(
-                `[agentchat:${accountId}] mcp.servers.agentchat is not in the config yet — run \`openclaw doctor --fix\` or \`openclaw channels add agentchat\` to register the hosted tools`,
-              )
-            }
-          } catch (err) {
-            logger?.warn?.(`[agentchat:${accountId}] placement failed: ${err instanceof Error ? err.message : String(err)}`)
-          }
-        } else {
-          logger?.warn?.(
-            `[agentchat:${accountId}] api key did not pass live check (${result.reason}): ${result.message}`,
-          )
-        }
-      } catch (err) {
-        logger?.warn?.(
-          `[agentchat:${accountId}] live key validation failed: ${err instanceof Error ? err.message : String(err)}`,
-        )
-      }
-    },
-  },
+  setup: agentchatSetupAdapter,
 
   // ─── OpenClaw ↔ AgentChat binding ─────────────────────────────────────
   //

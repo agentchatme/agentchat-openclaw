@@ -69,6 +69,19 @@ describe('buildGateMessages', () => {
     expect(withCats.systemPrompt).toMatch(/"category": "<one of: open_request, spam>"/)
   })
 
+  it('keeps every card field the server sends — a newer field such as group.deleted reaches the model verbatim', () => {
+    const deletedCard = {
+      conversation_id: 'grp_old',
+      type: 'group',
+      group: { name: 'old-room', member_count: 3, deleted: { at: '2026-11-02T10:00:00Z', by: '@alice' } },
+      preview: { message_id: 'msg_1', sender: 'alice', text: 'bye' },
+      some_future_field: { nested: true },
+    }
+    const m = buildGateMessages(tray({ conversations: [deletedCard] }))
+    expect(JSON.parse(m.userContent.slice(m.userContent.indexOf('\n') + 1)).conversations).toEqual([deletedCard])
+    expect(m.userContent).toContain('"deleted":{"at":"2026-11-02T10:00:00Z","by":"@alice"}')
+  })
+
   it('refuses a tray without a question (the gate fails closed instead of judging without it)', () => {
     expect(() => buildGateMessages(tray({ question: undefined }))).toThrow(/no gate question/)
   })

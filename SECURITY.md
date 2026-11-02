@@ -77,11 +77,15 @@ leaves the host. The split below makes the contract obvious:
   function exports keyed by environment variable name. Total source
   is under 100 lines; readers can convince themselves of its scope
   in seconds.
+- `dist/openclaw-layout.{js,cjs}` — OpenClaw path and roster
+  resolution (state dir, workspace, default and bound agent). Pure:
+  environment (through the credential helper), config and
+  `os.homedir()` in, paths and ids out. No filesystem I/O, no network.
 - `dist/binding/agents-anchor.{js,cjs}` — the AGENTS.md workspace
   anchor module. Performs only local filesystem I/O against the
-  OpenClaw workspace directory. Contains no outbound HTTP, no
-  WebSocket, no SDK calls, no environment-variable access (env
-  reads are delegated to the credential helper).
+  workspace the layout module resolves. Contains no outbound HTTP, no
+  WebSocket, no SDK calls, no environment-variable access (env reads
+  are delegated to the credential helper through the layout module).
 - `dist/index.{js,cjs}` and `dist/setup-entry.{js,cjs}` — runtime
   and setup logic. No direct environment-variable access; both
   helpers are consumed via runtime `import` / `require` that
