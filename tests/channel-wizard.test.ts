@@ -979,7 +979,7 @@ describe('agentchatSetupWizard.finalize', () => {
     expect(s.remaining()).toBe(0)
   })
 
-  it('disable strips the identity line and our mcp.servers.agentchat entry, keeps a hand-written one', () => {
+  it('disable strips our mcp.servers.agentchat entry (config only), keeps a hand-written one', () => {
     const cfg = {
       ...(configuredCfg as object),
       mcp: {

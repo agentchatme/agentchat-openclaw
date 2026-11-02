@@ -19,7 +19,9 @@ vi.mock('../src/setup-client.js', async (importOriginal) => {
 })
 
 import { validateApiKey } from '../src/setup-client.js'
-import { agentchatPlugin, agentchatSetupAdapter } from '../src/channel.js'
+import { agentchatPlugin, agentchatSetupAdapter, agentchatLifecycleAdapter, accountSectionPersistable } from '../src/channel.js'
+import { agentchatSetupWizard } from '../src/channel.wizard.js'
+import { agentchatChannelConfigSchema } from '../src/config-schema.js'
 import { getPluginRuntime, setPluginRuntime, isUsablePluginRuntime, resetPluginRuntimeForTest } from '../src/doorbell/runtime-holder.js'
 
 const KEY = 'ac_live_' + 'n'.repeat(24)
@@ -64,12 +66,16 @@ describe('non-interactive setup — prepare → apply → after', () => {
     resetPluginRuntimeForTest()
   })
 
-  it('prepareAccountConfigInput learns the handle from the key and reports through RuntimeEnv.log', async () => {
+  it('prepareAccountConfigInput learns the handle from the key, writes the .env key before the config write, and reports through RuntimeEnv.log', async () => {
     vi.mocked(validateApiKey).mockResolvedValueOnce({ ok: true, agent: liveAgent } as never)
+    const dotenv = path.join(process.env.OPENCLAW_STATE_DIR!, '.env')
+    fs.rmSync(dotenv, { force: true })
     const { runtime, lines } = cliRuntime()
     const prepared = await agentchatSetupAdapter.prepareAccountConfigInput!({ cfg: {} as never, accountId: 'default', input: { token: KEY }, runtime })
     expect(prepared).toEqual({ token: KEY, agentHandle: 'alice' })
     expect(lines).toEqual([{ level: 'log', line: '[agentchat:default] authenticated as @alice (a@x)' }])
+    // the hosted-tools entry written next references ${AGENTCHAT_API_KEY}; the variable must resolve on OpenClaw's first post-write read
+    expect(fs.readFileSync(dotenv, 'utf8')).toContain(`AGENTCHAT_API_KEY=${KEY}`)
   })
 
   it('a key that fails the live check leaves the input untouched and says so on RuntimeEnv.error', async () => {
@@ -150,7 +156,7 @@ describe('runtime holder — the setup-only proxy is not a runtime', () => {
   })
 })
 
-describe('config.setAccountEnabled / config.deleteAccount (what `channels remove` calls)', () => {
+describe('config.setAccountEnabled / config.deleteAccount (what `channels remove` calls) — pure, and persistable', () => {
   let workspace: string
   beforeEach(() => {
     workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-remove-'))
@@ -170,30 +176,36 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
       },
     },
   })
+  const anchorFile = () => path.join(workspace, 'AGENTS.md')
+  const ANCHOR = '# me\n\n<!-- agentchat:start -->\nI am @alice on AgentChat (api.agentchat.me).\n<!-- agentchat:end -->\n'
 
-  it('setAccountEnabled(false) disables the account, strips our MCP entry and the identity line, keeps the key', () => {
-    fs.writeFileSync(path.join(workspace, 'AGENTS.md'), '# me\n\n<!-- agentchat:start -->\nI am @alice on AgentChat (api.agentchat.me).\n<!-- agentchat:end -->\n')
+  it('setAccountEnabled(false) disables, strips our MCP entry, keeps the key — and the result passes the channel schema OpenClaw validates against', () => {
+    fs.writeFileSync(anchorFile(), ANCHOR)
     const next = agentchatPlugin.config.setAccountEnabled!({ cfg: substituted() as never, accountId: 'default', enabled: false }) as unknown as {
-      channels: { agentchat: { enabled: boolean; apiKey: string } }
+      channels: { agentchat: Record<string, unknown> & { enabled: boolean; apiKey: string } }
       mcp: { servers: Record<string, unknown> }
     }
     expect(next.channels.agentchat.enabled).toBe(false)
     expect(next.channels.agentchat.apiKey).toBe(KEY)
     expect(next.mcp.servers.agentchat).toBeUndefined()
     expect(next.mcp.servers.other).toBeDefined()
-    expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).not.toContain('agentchat:start')
+    // what OpenClaw persists must validate (it refused `enabled` before this schema knew it)
+    expect(agentchatChannelConfigSchema.safeParse(next.channels.agentchat).success).toBe(true)
+    expect(agentchatChannelConfigSchema.safeParse({ ...next.channels.agentchat, bogus: 1 }).success).toBe(false)
+    expect(accountSectionPersistable(next as never, 'default')).toBe(true)
+    // the pure adapter touched no file
+    expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(ANCHOR)
   })
 
-  it('setAccountEnabled(true) only re-enables', () => {
+  it('setAccountEnabled(true) re-enables and still validates', () => {
     const disabled = { channels: { agentchat: { apiKey: KEY, enabled: false } } }
-    const next = agentchatPlugin.config.setAccountEnabled!({ cfg: disabled as never, accountId: 'default', enabled: true }) as unknown as { channels: { agentchat: { enabled?: boolean } } }
+    const next = agentchatPlugin.config.setAccountEnabled!({ cfg: disabled as never, accountId: 'default', enabled: true }) as unknown as { channels: { agentchat: Record<string, unknown> & { enabled?: boolean } } }
     expect(next.channels.agentchat.enabled ?? true).toBe(true)
+    expect(agentchatChannelConfigSchema.safeParse(next.channels.agentchat).success).toBe(true)
   })
 
-  it('deleteAccount drops channels.agentchat, our MCP entry, the identity line and the .env key line', () => {
-    fs.writeFileSync(path.join(workspace, 'AGENTS.md'), '<!-- agentchat:start -->\nI am @alice on AgentChat (api.agentchat.me).\n<!-- agentchat:end -->\n')
-    const dotenv = path.join(process.env.OPENCLAW_STATE_DIR!, '.env')
-    fs.writeFileSync(dotenv, `OTHER=1\nAGENTCHAT_API_KEY=${KEY}\n`)
+  it('deleteAccount drops channels.agentchat and our MCP entry, touches no file, and leaves nothing to validate', () => {
+    fs.writeFileSync(anchorFile(), ANCHOR)
     const next = agentchatPlugin.config.deleteAccount!({ cfg: substituted() as never, accountId: 'default' }) as unknown as {
       channels?: { agentchat?: unknown }
       mcp: { servers: Record<string, unknown> }
@@ -201,7 +213,63 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
     expect(next.channels?.agentchat).toBeUndefined()
     expect(next.mcp.servers.agentchat).toBeUndefined()
     expect(next.mcp.servers.other).toBeDefined()
-    expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).not.toContain('agentchat:start')
-    expect(fs.readFileSync(dotenv, 'utf8')).toBe('OTHER=1\n')
+    expect(accountSectionPersistable(next as never, 'default')).toBe(true)
+    expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(ANCHOR)
+  })
+
+  it('the wizard disable hook is pure too', () => {
+    fs.writeFileSync(anchorFile(), ANCHOR)
+    const next = agentchatSetupWizard.disable!(substituted() as never) as unknown as { channels: { agentchat: { enabled: boolean } }; mcp: { servers: Record<string, unknown> } }
+    expect(next.channels.agentchat.enabled).toBe(false)
+    expect(next.mcp.servers.agentchat).toBeUndefined()
+    expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(ANCHOR)
+  })
+
+  describe('lifecycle hooks — the file side, after the patch is checked', () => {
+    const { runtime, lines } = cliRuntime()
+    beforeEach(() => {
+      lines.length = 0
+    })
+
+    it('onAccountConfigChanged removes the identity line when the account went enabled → disabled with a persistable patch, keeps the key', async () => {
+      fs.writeFileSync(anchorFile(), ANCHOR)
+      const dotenv = path.join(process.env.OPENCLAW_STATE_DIR!, '.env')
+      fs.writeFileSync(dotenv, `AGENTCHAT_API_KEY=${KEY}\n`)
+      const prevCfg = substituted()
+      const nextCfg = agentchatPlugin.config.setAccountEnabled!({ cfg: prevCfg as never, accountId: 'default', enabled: false })
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg, accountId: 'default', runtime })
+      expect(fs.readFileSync(anchorFile(), 'utf8')).not.toContain('agentchat:start')
+      expect(fs.readFileSync(dotenv, 'utf8')).toContain(`AGENTCHAT_API_KEY=${KEY}`)
+      expect(lines.some((l) => l.level === 'log' && l.line.includes('removed the identity line'))).toBe(true)
+    })
+
+    it('onAccountConfigChanged leaves the files alone when the patch would not pass the schema (OpenClaw will refuse the write)', async () => {
+      fs.writeFileSync(anchorFile(), ANCHOR)
+      const prevCfg = substituted()
+      const nextCfg = { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, enabled: false, bogus: 'not in the schema' } } }
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: nextCfg as never, accountId: 'default', runtime })
+      expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(ANCHOR)
+      expect(lines.some((l) => l.level === 'error' && l.line.includes('does not pass the channel schema'))).toBe(true)
+    })
+
+    it('onAccountConfigChanged does nothing for other changes (key rotation, re-enable)', async () => {
+      fs.writeFileSync(anchorFile(), ANCHOR)
+      const prevCfg = substituted()
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, apiKey: 'ac_live_' + 'r'.repeat(24) } } } as never, accountId: 'default', runtime })
+      const disabled = { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, enabled: false } } }
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: disabled as never, nextCfg: prevCfg as never, accountId: 'default', runtime })
+      expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(ANCHOR)
+      expect(lines).toEqual([])
+    })
+
+    it('onAccountRemoved removes the identity line and the .env key line', async () => {
+      fs.writeFileSync(anchorFile(), ANCHOR)
+      const dotenv = path.join(process.env.OPENCLAW_STATE_DIR!, '.env')
+      fs.writeFileSync(dotenv, `OTHER=1\nAGENTCHAT_API_KEY=${KEY}\n`)
+      await agentchatLifecycleAdapter.onAccountRemoved!({ prevCfg: substituted() as never, accountId: 'default', runtime })
+      expect(fs.readFileSync(anchorFile(), 'utf8')).not.toContain('agentchat:start')
+      expect(fs.readFileSync(dotenv, 'utf8')).toBe('OTHER=1\n')
+      expect(lines.filter((l) => l.level === 'log')).toHaveLength(2)
+    })
   })
 })
