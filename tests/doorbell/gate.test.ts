@@ -7,6 +7,8 @@ import {
   normalizeDecision,
   startTurn,
   countVerdicts,
+  renderDeletedGroupNote,
+  readGroupDeletion,
   type GateCaller,
 } from '../../src/doorbell/gate.js'
 import { MainLineClient, MainLineError, type Tray } from '../../src/doorbell/main-line.js'
@@ -67,6 +69,37 @@ describe('buildGateMessages', () => {
     expect(buildGateMessages(tray()).systemPrompt).not.toMatch(/category/)
     const withCats = buildGateMessages(tray({ categories: ['open_request', 'spam'] }))
     expect(withCats.systemPrompt).toMatch(/"category": "<one of: open_request, spam>"/)
+  })
+
+  it('prints a deleted group as a fact under the verbatim tray, so the model dismisses knowingly', () => {
+    const deletedCard = {
+      conversation_id: 'grp_old',
+      type: 'group',
+      group: { name: 'old-room', member_count: 3, deleted: { at: '2026-11-02T10:00:00Z', by: '@alice' } },
+      preview: { message_id: 'msg_1', sender: 'alice', text: 'bye' },
+    }
+    const liveCard = { conversation_id: 'grp_live', type: 'group', group: { name: 'ops', member_count: 4, deleted: null }, preview: { message_id: 'msg_2' } }
+    const olderServerCard = { conversation_id: 'grp_legacy', type: 'group', group: { name: 'legacy', member_count: 2 }, preview: { message_id: 'msg_3' } }
+    const t = tray({ conversations: [deletedCard, liveCard, olderServerCard] })
+    const m = buildGateMessages(t)
+    // the tray itself is still verbatim JSON, with the server's field inside
+    const jsonLine = m.userContent.split('\n')[1]!
+    expect(JSON.parse(jsonLine).conversations).toEqual(t.conversations)
+    // and exactly one note, for the deleted group only
+    const notes = m.userContent.split('\n\n')[1]!.split('\n')
+    expect(notes).toEqual(['Card grp_old: group "old-room" — DELETED by @alice at 2026-11-02T10:00:00Z; nothing can be sent here.'])
+    expect(renderDeletedGroupNote(liveCard)).toBeNull()
+    expect(renderDeletedGroupNote(olderServerCard)).toBeNull()
+    expect(renderDeletedGroupNote({ conversation_id: 'conv_dm', type: 'direct', counterparty: { handle: 'bob' } })).toBeNull()
+    expect(readGroupDeletion(deletedCard)).toEqual({ at: '2026-11-02T10:00:00Z', by: '@alice' })
+    // a malformed deletion (missing fields) is ignored, never a crash
+    expect(readGroupDeletion({ group: { deleted: { at: 1 } } })).toBeNull()
+    expect(renderDeletedGroupNote({ group: { name: 'x', deleted: { at: 'now', by: '@b' } } })).toBe('Card <unknown conversation>: group "x" — DELETED by @b at now; nothing can be sent here.')
+  })
+
+  it('no notes when nothing is deleted — the user content is the tray alone', () => {
+    const m = buildGateMessages(tray())
+    expect(m.userContent.split('\n')).toHaveLength(2)
   })
 
   it('refuses a tray without a question (the gate fails closed instead of judging without it)', () => {

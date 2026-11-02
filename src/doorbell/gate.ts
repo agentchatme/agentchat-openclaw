@@ -171,10 +171,47 @@ export function buildGateMessages(tray: Tray): GateMessages {
   if (typeof tray.you === 'string' && tray.you.length > 0) payload.you = tray.you
   payload.conversations = cards
 
+  // Facts the server states on a card that a model skimming JSON may miss:
+  // a group that no longer exists. One line per such card, after the
+  // verbatim tray, so the model dismisses knowingly. Not judgement — the
+  // server's own field, printed.
+  const notes = cards.map(renderDeletedGroupNote).filter((note): note is string => note !== null)
+
   return {
     systemPrompt: `${question.trim()}\n\n${wrapper}`,
-    userContent: `Your tray, as the server built it:\n${JSON.stringify(payload)}`,
+    userContent: `Your tray, as the server built it:\n${JSON.stringify(payload)}${notes.length > 0 ? `\n\n${notes.join('\n')}` : ''}`,
   }
+}
+
+export interface GroupDeletion {
+  readonly at: string
+  readonly by: string
+}
+
+/**
+ * The card's `group.deleted` — `{ at, by }` when the group was deleted
+ * (`by` is the deleting handle, with its `@`), `null` or absent otherwise.
+ * Optional on purpose: older servers omit it.
+ */
+export function readGroupDeletion(card: Card): GroupDeletion | null {
+  const group = card.group
+  if (!group || typeof group !== 'object' || Array.isArray(group)) return null
+  const deleted = (group as Record<string, unknown>).deleted
+  if (!deleted || typeof deleted !== 'object' || Array.isArray(deleted)) return null
+  const at = (deleted as Record<string, unknown>).at
+  const by = (deleted as Record<string, unknown>).by
+  if (typeof at !== 'string' || typeof by !== 'string') return null
+  return { at, by }
+}
+
+/** `Card conv_1: group "old-room" — DELETED by @alice at 2026-11-02T10:00:00Z; nothing can be sent here.` or `null`. */
+export function renderDeletedGroupNote(card: Card): string | null {
+  const deletion = readGroupDeletion(card)
+  if (!deletion) return null
+  const id = typeof card.conversation_id === 'string' ? card.conversation_id : '<unknown conversation>'
+  const name = (card.group as Record<string, unknown>).name
+  const label = typeof name === 'string' && name.length > 0 ? `group "${name}"` : 'group'
+  return `Card ${id}: ${label} — DELETED by ${deletion.by} at ${deletion.at}; nothing can be sent here.`
 }
 
 // ─── parsing the answer ─────────────────────────────────────────────────

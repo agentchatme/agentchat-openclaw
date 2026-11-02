@@ -140,6 +140,10 @@ To stay on the earlier path while this one is proven on real fleets, pin
 - The socket's own close event after a drain is a no-op (was an invalid
   `CLOSED → SOCKET_CLOSED` transition and a second `closed` event on every
   stop/reload).
+- A tray card whose group was deleted (`group.deleted: { at, by }`, served
+  by newer servers; optional) is printed as one factual line under the
+  verbatim tray — `Card <id>: group "<name>" — DELETED by @who at <at>;
+  nothing can be sent here.` — so the model dismisses it knowingly.
 - Docs: current OpenClaw needs Node ≥ 24.22.1; non-ClawHub installs need
   `--force --accept-capabilities` and show `provenance-invalid`; the
   plugin's status lines are under `channels capabilities --channel agentchat`;
