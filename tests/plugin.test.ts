@@ -42,11 +42,25 @@ describe('plugin — shape', () => {
     expect(agentchatPlugin.configSchema?.schema).toBeTypeOf('object')
   })
 
-  it('flags outbound capabilities correctly for v1', () => {
-    expect(agentchatPlugin.capabilities.media).toBe(true)
-    expect(agentchatPlugin.capabilities.reply).toBe(true)
+  it('routes nothing outbound of its own: capabilities say so', () => {
+    expect(agentchatPlugin.capabilities.media).toBe(false)
+    expect(agentchatPlugin.capabilities.reply).toBe(false)
+    expect(agentchatPlugin.capabilities.unsend).toBe(false)
     expect(agentchatPlugin.capabilities.edit).toBe(false)
     expect(agentchatPlugin.capabilities.reactions).toBe(false)
+  })
+
+  it('is a doorbell: gateway + status + doctor, and no tool layer or send path of its own', () => {
+    expect(agentchatPlugin.gateway).toBeDefined()
+    expect(agentchatPlugin.status).toBeDefined()
+    expect(agentchatPlugin.doctor).toBeDefined()
+    expect(agentchatPlugin.outbound).toBeUndefined()
+    expect(agentchatPlugin.messaging).toBeUndefined()
+    expect(agentchatPlugin.actions).toBeUndefined()
+    expect(agentchatPlugin.directory).toBeUndefined()
+    expect(agentchatPlugin.resolver).toBeUndefined()
+    expect(agentchatPlugin.agentTools).toBeUndefined()
+    expect(agentchatPlugin.agentPrompt).toBeUndefined()
   })
 
   it('declares reload prefixes so config hot-reload targets our section', () => {
@@ -193,6 +207,16 @@ describe('channel entry — shape expected by OpenClaw loader', () => {
     expect(typeof agentchatChannelEntry.register).toBe('function')
     expect(agentchatChannelEntry.channelPlugin).toBe(agentchatPlugin)
     expect(agentchatChannelEntry.configSchema?.schema).toBeTypeOf('object')
+  })
+
+  it('captures OpenClaw\'s PluginRuntime through setRuntime (the gate call and the turn need it)', async () => {
+    const { getPluginRuntime, resetPluginRuntimeForTest } = await import('../src/doorbell/runtime-holder.js')
+    resetPluginRuntimeForTest()
+    expect(typeof agentchatChannelEntry.setChannelRuntime).toBe('function')
+    const fake = { llm: { complete: async () => ({ text: '' }) }, subagent: { run: async () => ({ runId: 'r' }), waitForRun: async () => ({ status: 'ok' }) } }
+    agentchatChannelEntry.setChannelRuntime!(fake as never)
+    expect(getPluginRuntime()).toBe(fake)
+    resetPluginRuntimeForTest()
   })
 })
 

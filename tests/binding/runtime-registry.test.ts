@@ -1,30 +1,24 @@
 /**
- * Runtime-registry concurrency + lifecycle tests.
+ * Doorbell-registry concurrency + lifecycle tests.
  *
- * The registry is the single source of truth for live `AgentchatChannelRuntime`
- * instances per-account. It MUST:
- *   - Serialize concurrent `registerRuntime` for the same account (no
- *     double-start).
- *   - Roll back on synchronous start failure.
- *   - Allow parallel calls for DIFFERENT accounts to proceed concurrently.
- *   - `unregisterRuntime` cleanly tear down; no-op if absent.
- *
- * We use a substituted `AgentchatChannelRuntime` double because the real
- * runtime opens a WebSocket. The test hooks `registerRuntime` directly
- * and verifies concurrency via an instrumented constructor count.
+ * The registry is the single source of truth for live doorbells (socket
+ * runtime + invoker) per account. It MUST serialize concurrent registers for
+ * the same account, roll back on a synchronous start failure, allow parallel
+ * registers for different accounts, and tear down cleanly.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 
 import {
-  registerRuntime,
-  unregisterRuntime,
-  getRuntime,
+  registerDoorbell,
+  unregisterDoorbell,
+  getDoorbell,
   listActiveAccounts,
   resetRegistryForTest,
 } from '../../src/binding/runtime-registry.js'
 import { createLogger } from '../../src/log.js'
 import type { AgentchatChannelConfig } from '../../src/config-schema.js'
+import type { AgentchatChannelRuntime } from '../../src/runtime.js'
 
 const makeConfig = (): AgentchatChannelConfig => ({
   apiKey: 'ac_live_key_aaaaaaaaaaaaaaaaaaaaaaaa',
@@ -35,104 +29,82 @@ const makeConfig = (): AgentchatChannelConfig => ({
   observability: { logLevel: 'error', redactKeys: ['apiKey'] },
 })
 
-const makeLogger = () =>
-  createLogger({ level: 'error', redactKeys: ['apiKey'] })
+const makeLogger = () => createLogger({ level: 'error', redactKeys: ['apiKey'] })
 
-// Stub the AgentchatChannelRuntime so tests don't open real WebSockets.
-// We watch how many times the constructor fires to catch double-starts.
-vi.mock('../../src/runtime.js', async () => {
-  const constructorCalls: Array<{ accountId: string | null }> = []
-  class StubRuntime {
-    private stopped = false
-    static calls = constructorCalls
-    constructor(_opts: unknown) {
-      constructorCalls.push({ accountId: null })
-    }
-    start() {
-      /* no-op */
-    }
-    async stop(_deadline?: number): Promise<void> {
-      this.stopped = true
-    }
-    get isStopped() {
-      return this.stopped
-    }
+class StubRuntime {
+  started = 0
+  stopped = 0
+  static created = 0
+  constructor(public readonly failStart = false) {
+    StubRuntime.created += 1
   }
-  return { AgentchatChannelRuntime: StubRuntime }
-})
+  start() {
+    if (this.failStart) throw new Error('simulated start failure')
+    this.started += 1
+  }
+  async stop(): Promise<void> {
+    this.stopped += 1
+  }
+}
 
-async function hookedRegister(accountId: string) {
-  return registerRuntime({
+const stubInvoker = () => {
+  const inv = { stopped: 0, stop() { this.stopped += 1 } }
+  return inv as unknown as import('../../src/doorbell/invoker.js').AgentInvoker & { stopped: number }
+}
+
+function register(accountId: string, failStart = false) {
+  return registerDoorbell({
     accountId,
     config: makeConfig(),
-    handlers: {},
     logger: makeLogger(),
+    createRuntime: () => new StubRuntime(failStart) as unknown as AgentchatChannelRuntime,
+    build: () => ({ invoker: stubInvoker(), handlers: {} }),
   })
 }
 
 describe('runtime-registry', () => {
   beforeEach(async () => {
     await resetRegistryForTest()
+    StubRuntime.created = 0
   })
 
-  it('registers a runtime and makes it retrievable via getRuntime', async () => {
-    const rt = await hookedRegister('acct-1')
-    expect(rt).toBeDefined()
-    expect(getRuntime('acct-1')).toBe(rt)
+  it('registers a doorbell, starts its runtime and makes it retrievable', async () => {
+    const entry = await register('acct-1')
+    expect((entry.runtime as unknown as StubRuntime).started).toBe(1)
+    expect(getDoorbell('acct-1')).toBe(entry)
     expect(listActiveAccounts()).toEqual(['acct-1'])
   })
 
-  it('stops and removes on unregisterRuntime', async () => {
-    await hookedRegister('acct-1')
-    await unregisterRuntime('acct-1', Date.now() + 500)
-    expect(getRuntime('acct-1')).toBeUndefined()
-    expect(listActiveAccounts()).toEqual([])
+  it('stops the invoker and the runtime on unregister', async () => {
+    const entry = await register('acct-1')
+    await unregisterDoorbell('acct-1', Date.now() + 500)
+    expect(getDoorbell('acct-1')).toBeUndefined()
+    expect((entry.runtime as unknown as StubRuntime).stopped).toBe(1)
+    expect((entry.invoker as unknown as { stopped: number }).stopped).toBe(1)
   })
 
   it('unregister of a missing account is a no-op', async () => {
-    await expect(unregisterRuntime('nope', Date.now() + 500)).resolves.toBeUndefined()
+    await expect(unregisterDoorbell('nope', Date.now() + 500)).resolves.toBeUndefined()
   })
 
-  it('serializes concurrent registerRuntime calls for the same account', async () => {
-    // Fire 5 concurrent calls for the same accountId. Only ONE runtime
-    // should be live at the end — the last registration wins, and every
-    // prior runtime was stopped.
-    const results = await Promise.all(
-      Array.from({ length: 5 }, () => hookedRegister('acct-hot')),
-    )
-    const live = getRuntime('acct-hot')
+  it('serializes concurrent registers for the same account — one live entry, earlier ones stopped', async () => {
+    const results = await Promise.all(Array.from({ length: 5 }, () => register('acct-hot')))
+    const live = getDoorbell('acct-hot')
     expect(live).toBeDefined()
-    // Every call returns A runtime (not necessarily the same one), and
-    // whichever settled last is the live one.
-    expect(results).toHaveLength(5)
     expect(results[results.length - 1]).toBe(live)
-    // Exactly one live registry entry.
     expect(listActiveAccounts()).toEqual(['acct-hot'])
+    const stoppedCount = results.filter((r) => (r.runtime as unknown as StubRuntime).stopped === 1).length
+    expect(stoppedCount).toBe(4)
   })
 
-  it('allows parallel registerRuntime for DIFFERENT accounts', async () => {
-    await Promise.all([
-      hookedRegister('acct-a'),
-      hookedRegister('acct-b'),
-      hookedRegister('acct-c'),
-    ])
+  it('allows parallel registers for different accounts', async () => {
+    await Promise.all([register('acct-a'), register('acct-b'), register('acct-c')])
     expect(listActiveAccounts().sort()).toEqual(['acct-a', 'acct-b', 'acct-c'])
   })
 
-  it('does not leak registry entries when register throws synchronously on start', async () => {
-    // The stub runtime never throws; we simulate the throw by overriding
-    // `start` for one specific instance via a module-level override.
-    const mod = await import('../../src/runtime.js')
-    const OriginalRuntime = mod.AgentchatChannelRuntime
-    const throwingStart = vi
-      .spyOn(OriginalRuntime.prototype as { start: () => void }, 'start')
-      .mockImplementationOnce(() => {
-        throw new Error('simulated start failure')
-      })
-    await expect(hookedRegister('acct-broken')).rejects.toThrow(/start failure/)
-    // Registry must not retain the failed entry.
-    expect(getRuntime('acct-broken')).toBeUndefined()
+  it('does not leak an entry when start throws synchronously, and stops the invoker', async () => {
+    await expect(register('acct-broken', true)).rejects.toThrow(/start failure/)
+    expect(getDoorbell('acct-broken')).toBeUndefined()
     expect(listActiveAccounts()).not.toContain('acct-broken')
-    throwingStart.mockRestore()
   })
 })
