@@ -138,6 +138,30 @@ To stay on the earlier path while this one is proven on real fleets, pin
   `mcp.servers.agentchat` entry; `--delete` (`config.deleteAccount`) also
   drops `channels.agentchat` and the key line in `.env`. Both share the
   wizard's `disable` logic.
+- The channel schema accepts `enabled` (what OpenClaw writes on
+  `channels remove` / re-enable and validates against the plugin's JSON
+  schema before persisting; the disable form was refused with "must not
+  have additional properties"). The config adapters are pure again: the
+  identity line and the `.env` key are removed in
+  `lifecycle.onAccountConfigChanged` / `onAccountRemoved`, and only after
+  the patched account section passes the plugin's own schema — a refused
+  write can no longer strand the files. The `.env` key is written as soon
+  as the key validates (`prepareAccountConfigInput`), so OpenClaw's
+  post-write snapshot resolves `${AGENTCHAT_API_KEY}` on first read.
+- Re-enabling a disabled account works without the npm trap. While the
+  account is disabled, every remedy the plugin prints (`channels
+  capabilities`, `doctor`, the wizard's status line) names
+  `openclaw config set channels.agentchat.enabled true`, then
+  `openclaw doctor --fix` — never `channels add`, which OpenClaw 2026.10.9
+  answers, for a disabled channel whose plugin it does not load, by
+  downloading `@agentchatme/openclaw` from npm and asking to install it
+  over the installed plugin. `doctor --fix` now places a missing identity
+  line for the configured `agentHandle` (an existing one is left
+  byte-identical; disabled accounts are not repaired), and
+  `lifecycle.onAccountConfigChanged` places it on disabled → enabled,
+  after the same schema check the disable side uses. OpenClaw 2026.10.9
+  runs no plugin code at all for a disabled channel, so the RUNBOOK and
+  README carry the re-enable route and the warning against `channels add`.
 - `channels status --deep` Health reads `linked` instead of `WARN READY`:
   `statusState` uses OpenClaw's vocabulary (`linked`, `unstable`,
   `not-linked`, `configured`, `disabled`); the socket's own state stays in

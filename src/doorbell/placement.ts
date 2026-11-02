@@ -27,7 +27,14 @@ import { resolveBoundAgentId, resolveOpenClawDefaultAgentId, resolveOpenClawStat
 import { describeMcpEntry, hostedMcpUrl, withHostedMcpEntry, withoutHostedMcpEntry, type McpEntryOutcome } from './mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, withLlmAgentOverrideOptIn } from './model.js'
 import { writeAgentsAnchor, agentsAnchorPath, hasAgentsAnchorFor, removeAgentsAnchor } from '../binding/agents-anchor.js'
-import { AGENTCHAT_CHANNEL_ID, AGENTCHAT_DEFAULT_ACCOUNT_ID, applyAgentchatAccountPatch, readAgentchatConfigField } from '../channel-account.js'
+import {
+  AGENTCHAT_CHANNEL_ID,
+  AGENTCHAT_DEFAULT_ACCOUNT_ID,
+  agentchatReenableHint,
+  applyAgentchatAccountPatch,
+  isAgentchatAccountEnabled,
+  readAgentchatConfigField,
+} from '../channel-account.js'
 
 const HANDLE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
 function isValidHandleShape(value: string): boolean {
@@ -216,6 +223,37 @@ export function removeDoorbellFiles(cfg: object | undefined, accountId: string, 
   return changes
 }
 
+export interface IdentityLineRestore {
+  readonly outcome: 'placed' | 'present' | 'failed'
+  readonly path: string
+  readonly detail?: string
+}
+
+/**
+ * Redo the file side of placement for an enabled account: the identity line
+ * for `handle` in the bound agent's `AGENTS.md` (the workspace resolved the
+ * way OpenClaw resolves it). The mirror of `removeDoorbellFiles` on
+ * re-enable, and `doctor --fix`'s repair. An identity line already present
+ * for this handle is not rewritten — the file stays byte-identical. Never
+ * throws.
+ */
+export function restoreIdentityLine(cfg: object | undefined, accountId: string, handle: string): IdentityLineRestore {
+  const agentId = resolvePlacementAgentId(cfg, accountId)
+  const bare = handle.trim().replace(/^@/, '')
+  let filePath = ''
+  try {
+    filePath = agentsAnchorPath(cfg as never, agentId)
+    if (!isValidHandleShape(bare)) return { outcome: 'failed', path: filePath, detail: `agentHandle "${bare}" is not a valid AgentChat handle` }
+    const present = hasAgentsAnchorFor({ cfg: cfg as never, handle: bare, agentId })
+    filePath = present.path
+    if (present.present) return { outcome: 'present', path: present.path }
+    const written = writeAgentsAnchor({ cfg: cfg as never, handle: bare, agentId })
+    return { outcome: 'placed', path: written.path }
+  } catch (err) {
+    return { outcome: 'failed', path: filePath, detail: describe(err) }
+  }
+}
+
 // ─── placement, as one report ──────────────────────────────────────────
 
 export interface PlaceParams<TCfg extends object> {
@@ -308,12 +346,20 @@ export function checkPlacement<TCfg extends object>(params: {
   apiKey: string | undefined
   apiBase: string
   agentId?: string | undefined
+  /** The channel account; a disabled one gets the re-enable remedy, never `channels add`. Defaults to `default`. */
+  accountId?: string
   stateDir?: string
   /** The gateway's own environment (defaults to `process.env`). */
   env?: NodeJS.ProcessEnv
 }): PlacementCheck[] {
   const checks: PlacementCheck[] = []
   const env = params.env ?? process.env
+  const accountId = params.accountId ?? AGENTCHAT_DEFAULT_ACCOUNT_ID
+  // While the account is disabled OpenClaw does not load this plugin, and
+  // `channels add` would fetch the npm build over it: every remedy for a
+  // disabled account is the re-enable route instead.
+  const reenable = isAgentchatAccountEnabled(params.cfg as never, accountId) ? undefined : agentchatReenableHint(params.cfg as never, accountId)
+  const remedy = (forEnabled: string): string => reenable ?? forEnabled
 
   // What this process can see: its own environment and the state-dir .env.
   // It cannot see the running gateway's environment (OpenClaw loads the
@@ -330,9 +376,9 @@ export function checkPlacement<TCfg extends object>(params: {
         `a gateway started before the wizard placed it needs a restart (or a config reload) to resolve \${${API_KEY_ENV}}`,
     })
   } else if (inProcess || inDotEnv) {
-    checks.push({ name: 'key', ok: false, detail: `${API_KEY_ENV} differs from the configured channel key — re-run the wizard to place the current key` })
+    checks.push({ name: 'key', ok: false, detail: `${API_KEY_ENV} differs from the configured channel key — ${remedy('re-run the wizard (openclaw channels add agentchat) to place the current key')}` })
   } else {
-    checks.push({ name: 'key', ok: false, detail: `${API_KEY_ENV} is not placed — the hosted tools cannot authenticate; run openclaw channels add agentchat` })
+    checks.push({ name: 'key', ok: false, detail: `${API_KEY_ENV} is not placed — the hosted tools cannot authenticate; ${remedy('run openclaw channels add agentchat')}` })
   }
 
   if (params.handle) {
@@ -340,10 +386,12 @@ export function checkPlacement<TCfg extends object>(params: {
     checks.push({
       name: 'anchor',
       ok: anchor.present,
-      detail: anchor.present ? `identity line for @${params.handle} in ${anchor.path}` : `identity line for @${params.handle} missing from ${anchor.path} — run openclaw channels add agentchat`,
+      detail: anchor.present
+        ? `identity line for @${params.handle} in ${anchor.path}`
+        : `identity line for @${params.handle} missing from ${anchor.path} — ${remedy('run openclaw doctor --fix (or openclaw channels add agentchat)')}`,
     })
   } else {
-    checks.push({ name: 'anchor', ok: false, detail: 'agentHandle not in config — the identity line cannot be checked' })
+    checks.push({ name: 'anchor', ok: false, detail: `agentHandle not in config — the identity line cannot be checked; ${remedy('run openclaw doctor --fix (it learns the handle from the key)')}` })
   }
 
   checks.push({ name: 'manual', ok: true, detail: 'manual bundled as the agentchat skill' })
@@ -359,7 +407,7 @@ export function checkPlacement<TCfg extends object>(params: {
           ? 'mcp.servers.agentchat is managed by hand'
           : mcpState === 'disabled'
             ? 'mcp.servers.agentchat is disabled — the agent has no AgentChat tools'
-            : 'mcp.servers.agentchat missing — run openclaw channels add agentchat or openclaw doctor --fix',
+            : `mcp.servers.agentchat missing — ${remedy('run openclaw doctor --fix (or openclaw channels add agentchat)')}`,
   })
   return checks
 }

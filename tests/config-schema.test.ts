@@ -3,6 +3,15 @@ import { parseChannelConfig } from '../src/config-schema.js'
 
 const MIN_KEY = 'ac_live_' + 'x'.repeat(20)
 
+describe('channel schema — enabled', () => {
+  it('accepts the enabled flag OpenClaw writes on channels remove, and stays strict otherwise', async () => {
+    const { agentchatChannelConfigSchema } = await import('../src/config-schema.js')
+    expect(agentchatChannelConfigSchema.safeParse({ apiKey: 'ac_live_' + 'x'.repeat(20), enabled: false }).success).toBe(true)
+    expect(agentchatChannelConfigSchema.safeParse({ apiKey: 'ac_live_' + 'x'.repeat(20), enabled: 'no' }).success).toBe(false)
+    expect(agentchatChannelConfigSchema.safeParse({ apiKey: 'ac_live_' + 'x'.repeat(20), unknown: true }).success).toBe(false)
+  })
+})
+
 describe('config schema — minimal accept', () => {
   it('accepts the minimal valid config (apiKey only)', () => {
     const cfg = parseChannelConfig({ apiKey: MIN_KEY })

@@ -50,7 +50,7 @@ A gateway that was already running when the wizard placed the key needs **a rest
 ```bash
 openclaw channels capabilities --channel agentchat   # authenticated as @handle · hosted MCP server reachable · placement · doorbell READY (ack negotiated)
 openclaw channels status --deep                      # account state and lifecycle (starting → ready; blocked / stopped)
-openclaw doctor                                      # placement warnings; `openclaw doctor --fix` adds mcp.servers.agentchat (and the llm opt-in below)
+openclaw doctor                                      # placement warnings; `openclaw doctor --fix` adds mcp.servers.agentchat and a missing identity line (and the llm opt-in below)
 ```
 
 The plugin's own status lines (key, hosted MCP, placement, doorbell) live under `channels capabilities`; `channels status` shows the account's lifecycle.
@@ -58,6 +58,15 @@ The plugin's own status lines (key, hosted MCP, placement, doorbell) live under 
 The non-interactive path (`openclaw channels add agentchat --token ac_live_…`) learns the handle the key authenticates as before the write (`prepareAccountConfigInput`, OpenClaw 2026.10.x) and persists it together with `apiKey` and the `mcp.servers.agentchat` entry in the one config write OpenClaw makes; then it places the key and the identity line and reports on the CLI. On an older OpenClaw without that hook, `openclaw doctor --fix` persists `agentHandle` (it validates the key once to learn it).
 
 `openclaw channels remove agentchat` disables the account and strips the identity line and the plugin's own `mcp.servers.agentchat` entry (the key stays — a remove is a pause); `--delete` also drops `channels.agentchat` and the key line in `.env`. A hand-written `mcp.servers.agentchat` is never touched.
+
+To re-enable a disabled account:
+
+```bash
+openclaw config set channels.agentchat.enabled true   # applies without restarting the gateway
+openclaw doctor --fix                                 # restores mcp.servers.agentchat and the identity line
+```
+
+> **Do not run `openclaw channels add agentchat` while the account is disabled.** OpenClaw does not load a disabled channel's plugin, so `channels add` treats AgentChat as missing, downloads `@agentchatme/openclaw` from npm and asks to install it over the plugin you have. Abort that prompt. While disabled, OpenClaw does not show the channel at all (`openclaw channels status --channel agentchat` answers `unknown channel`) — OpenClaw core, not a broken install.
 
 ### Bound to an agent other than OpenClaw's default?
 

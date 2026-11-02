@@ -979,7 +979,7 @@ describe('agentchatSetupWizard.finalize', () => {
     expect(s.remaining()).toBe(0)
   })
 
-  it('disable strips the identity line and our mcp.servers.agentchat entry, keeps a hand-written one', () => {
+  it('disable strips our mcp.servers.agentchat entry (config only), keeps a hand-written one', () => {
     const cfg = {
       ...(configuredCfg as object),
       mcp: {
@@ -1074,6 +1074,15 @@ describe('agentchatSetupWizard.status', () => {
       configured: true,
     } as never)
     expect(lines.join(' ')).toMatch(/configured \(@alice\)/)
+    expect(lines.join(' ')).not.toMatch(/disabled/)
+  })
+
+  it('a disabled account names `openclaw config set channels.agentchat.enabled true`, never channels add', async () => {
+    const status = agentchatSetupWizard.status!
+    const disabledCfg = applyAgentchatAccountPatch(configuredCfg, 'default', { enabled: false })
+    const lines = await status.resolveStatusLines!({ cfg: disabledCfg, accountId: 'default', configured: true } as never)
+    expect(lines.join(' ')).toMatch(/configured \(@alice\); the account is disabled — re-enable it with `openclaw config set channels\.agentchat\.enabled true`/)
+    expect(lines.join(' ')).not.toMatch(/run openclaw channels add/)
   })
 })
 

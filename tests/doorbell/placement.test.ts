@@ -4,6 +4,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import {
+  restoreIdentityLine,
   placeApiKeyInDotEnv,
   clearApiKeyInDotEnv,
   readApiKeyFromDotEnv,
@@ -130,6 +131,25 @@ describe('placeDoorbell + checkPlacement', () => {
     const stale = checkPlacement({ cfg: placed.cfg, handle: 'alice', apiKey: 'ac_live_' + 'z'.repeat(24), apiBase: 'https://api.agentchat.me', stateDir, env: { AGENTCHAT_API_KEY: KEY } })
     expect(stale.find((c) => c.name === 'key')!.detail).toMatch(/differs from the configured channel key/)
   })
+
+  it('checkPlacement: an enabled account\'s missing identity line points at doctor --fix', () => {
+    const checks = checkPlacement({ cfg: { ...cfgFor(), channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', stateDir, env: {} })
+    expect(checks.find((c) => c.name === 'anchor')!.detail).toMatch(/missing from .*AGENTS\.md — run openclaw doctor --fix \(or openclaw channels add agentchat\)$/)
+  })
+
+  it('checkPlacement: a disabled account\'s remedies name `openclaw config set channels.agentchat.enabled true`, never channels add', () => {
+    const disabled = { ...cfgFor(), channels: { agentchat: { apiKey: KEY, agentHandle: 'alice', enabled: false } } }
+    const checks = checkPlacement({ cfg: disabled, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', stateDir, env: {} })
+    for (const name of ['key', 'anchor', 'mcp'] as const) {
+      const check = checks.find((c) => c.name === name)!
+      expect(check.ok).toBe(false)
+      expect(check.detail).toContain('the account is disabled — re-enable it with `openclaw config set channels.agentchat.enabled true`, then run `openclaw doctor --fix`')
+      expect(check.detail).not.toMatch(/run openclaw channels add/)
+    }
+    const named = { ...cfgFor(), channels: { agentchat: { accounts: { work: { apiKey: KEY, agentHandle: 'alice', enabled: false } } } } }
+    const namedChecks = checkPlacement({ cfg: named, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', accountId: 'work', stateDir, env: {} })
+    expect(namedChecks.find((c) => c.name === 'anchor')!.detail).toContain('`openclaw config set channels.agentchat.accounts.work.enabled true`')
+  })
 })
 
 describe('applyDoorbellConfig — the config side of placement', () => {
@@ -180,5 +200,32 @@ describe('applyDoorbellConfig — the config side of placement', () => {
     } finally {
       for (const d of [stateDir, opsWs, mainWs]) fs.rmSync(d, { recursive: true, force: true })
     }
+  })
+})
+
+describe('restoreIdentityLine — the identity line for an enabled account', () => {
+  let workspace: string
+  beforeEach(() => {
+    workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-restore-ws-'))
+  })
+  afterEach(() => {
+    fs.rmSync(workspace, { recursive: true, force: true })
+  })
+  const cfg = () => ({ agents: { defaults: { workspace } } })
+
+  it('places a missing line, then reports it present without rewriting the file', () => {
+    expect(restoreIdentityLine(cfg(), 'default', '@alice')).toEqual({ outcome: 'placed', path: path.join(workspace, 'AGENTS.md') })
+    const placed = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')
+    expect(placed).toContain('I am @alice on AgentChat')
+    fs.writeFileSync(path.join(workspace, 'AGENTS.md'), `\n\n\n${placed}\n\n`)
+    expect(restoreIdentityLine(cfg(), 'default', 'alice')).toEqual({ outcome: 'present', path: path.join(workspace, 'AGENTS.md') })
+    expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toBe(`\n\n\n${placed}\n\n`)
+  })
+
+  it('refuses a handle that is not a valid AgentChat handle and writes nothing', () => {
+    const result = restoreIdentityLine(cfg(), 'default', 'Not A Handle')
+    expect(result.outcome).toBe('failed')
+    expect(result.detail).toMatch(/not a valid AgentChat handle/)
+    expect(fs.existsSync(path.join(workspace, 'AGENTS.md'))).toBe(false)
   })
 })

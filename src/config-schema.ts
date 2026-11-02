@@ -59,6 +59,15 @@ export const agentHandleSchema = z
 
 export const agentchatChannelConfigSchema = z
   .object({
+    /**
+     * Written by OpenClaw on `channels remove` (disable) / re-enable through
+     * `config.setAccountEnabled`, and validated by OpenClaw against the JSON
+     * schema emitted from this object before the write is persisted — so the
+     * strict schema must know it. At runtime `splitEnabledFromRaw` lifts it
+     * out before the account is parsed; it is never read from the parsed
+     * config.
+     */
+    enabled: z.boolean().optional(),
     apiBase: z.string().url().default('https://api.agentchat.me'),
     apiKey: z.string().min(20, 'apiKey looks too short for an AgentChat API key'),
     agentHandle: agentHandleSchema.optional(),

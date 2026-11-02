@@ -21,7 +21,7 @@ import { probeHostedMcp } from '../doorbell/mcp.js'
 import { checkPlacement, resolvePlacementAgentId, type PlacementCheck } from '../doorbell/placement.js'
 import { getDoorbell } from './runtime-registry.js'
 import { readDoorbellModeFromEnv } from '../credentials/read-env.js'
-import { multiAccountRefusal } from '../channel-account.js'
+import { agentchatReenableHint, isAgentchatAccountEnabled, multiAccountRefusal } from '../channel-account.js'
 
 export type AgentchatProbeResult = {
   readonly ok: boolean
@@ -34,6 +34,8 @@ export type AgentchatProbeResult = {
   readonly doorbell?: { readonly mode: 'v3' | 'off'; readonly state?: string; readonly ackNegotiated?: boolean; readonly knocks?: number; readonly cycles?: number; readonly turns?: number }
   /** Set when the doorbell refuses to start (more than one account configured). */
   readonly refusal?: string
+  /** Set when the account is disabled: the re-enable route (never `channels add`, which would fetch the npm build while the plugin is not loaded). */
+  readonly disabled?: string
 }
 
 const PROBE_MIN_MS = 1_000
@@ -73,7 +75,9 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
       apiKey: config.apiKey,
       apiBase: config.apiBase,
       agentId: resolvePlacementAgentId(cfg as object | undefined, account.accountId),
+      accountId: account.accountId,
     })
+    const enabled = account.enabled && isAgentchatAccountEnabled(cfg as never, account.accountId)
 
     const live = getDoorbell(account.accountId)
     const health = live?.runtime.getHealth()
@@ -89,7 +93,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
     const legacyServer = health !== undefined && health.authenticated && !health.ackNegotiated
 
     return {
-      ok: me.status === 'active' && mcp.ok && placement.every((c) => c.ok) && !refusal && !legacyServer,
+      ok: enabled && me.status === 'active' && mcp.ok && placement.every((c) => c.ok) && !refusal && !legacyServer,
       handle: me.handle,
       status: me.status,
       pausedByOwner: me.paused_by_owner ?? 'none',
@@ -97,6 +101,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
       placement,
       doorbell,
       ...(refusal ? { refusal } : {}),
+      ...(enabled ? {} : { disabled: agentchatReenableHint(cfg as never, account.accountId) }),
     }
   },
 
@@ -107,6 +112,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
       return lines
     }
     lines.push({ text: `authenticated as @${probe.handle}`, tone: 'success' })
+    if (probe.disabled) lines.push({ text: probe.disabled, tone: 'warn' })
     if (probe.status && probe.status !== 'active') {
       lines.push({ text: `account status: ${probe.status}`, tone: probe.status === 'restricted' ? 'warn' : 'error' })
     }

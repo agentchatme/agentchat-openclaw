@@ -20,9 +20,15 @@
  *
  * Lifecycle
  * ─────────
- * write   — `setupWizard.finalize` (after validateApiKey ok), and
- *           `setup.afterAccountConfigWritten` (non-interactive path).
- * remove  — `setupWizard.disable` (channels remove agentchat).
+ * write   — `setupWizard.finalize` (after validateApiKey ok),
+ *           `setup.afterAccountConfigWritten` (non-interactive path),
+ *           `lifecycle.onAccountConfigChanged` (disabled → enabled), and
+ *           `openclaw doctor --fix` when the line for the configured handle
+ *           is missing (the re-enable path through `openclaw config set`,
+ *           which reaches no plugin hook). A present line is not rewritten.
+ * remove  — `lifecycle.onAccountConfigChanged` (enabled → disabled,
+ *           `channels remove agentchat`) and `lifecycle.onAccountRemoved`
+ *           (`--delete`).
  * orphan  — `openclaw plugins uninstall` fires no plugin hook today; an
  *           uninstall without `channels remove` leaves the block behind
  *           (documented in RUNBOOK.md).

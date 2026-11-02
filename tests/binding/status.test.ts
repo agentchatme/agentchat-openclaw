@@ -121,6 +121,26 @@ describe('status adapter — the doctor-style probe', () => {
     }
   })
 
+  it('a disabled account: not ok, and the capabilities lines name `config set … enabled true`, never channels add', async () => {
+    const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice', enabled: false } } }
+    const a = { ...account(cfg), enabled: false }
+    const probe = await agentchatStatusAdapter.probeAccount!({ account: a as never, timeoutMs: 2000, cfg: cfg as never } as never)
+    expect(probe.ok).toBe(false)
+    expect(probe.disabled).toMatch(/^the account is disabled — re-enable it with `openclaw config set channels\.agentchat\.enabled true`, then run `openclaw doctor --fix`/)
+    const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+    expect(lines[1]).toEqual({ text: probe.disabled, tone: 'warn' })
+    const anchor = lines.find((l) => l.text.startsWith('anchor:'))!
+    expect(anchor.text).toContain('`openclaw config set channels.agentchat.enabled true`')
+    expect(lines.some((l) => /run openclaw channels add/.test(l.text))).toBe(false)
+  })
+
+  it('an enabled account carries no disabled line', async () => {
+    const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
+    const probe = await agentchatStatusAdapter.probeAccount!({ account: account(cfg) as never, timeoutMs: 2000, cfg: cfg as never } as never)
+    expect(probe.disabled).toBeUndefined()
+    expect(probe.placement?.find((c) => c.name === 'anchor')?.detail).toMatch(/run openclaw doctor --fix/)
+  })
+
   it('resolveAccountState', () => {
     expect(agentchatStatusAdapter.resolveAccountState!({ account: { configured: true }, configured: true, enabled: true } as never)).toBe('linked')
     expect(agentchatStatusAdapter.resolveAccountState!({ account: {}, configured: false, enabled: true } as never)).toBe('not configured')

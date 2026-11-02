@@ -68,7 +68,9 @@ type ChannelSetupWizardCredentialValues = Partial<Record<string, string>>
 import {
   AGENTCHAT_CHANNEL_ID,
   MIN_API_KEY_LENGTH,
+  agentchatReenableHint,
   applyAgentchatAccountPatch,
+  isAgentchatAccountEnabled,
   isApiKeyPresent,
   readAgentchatConfigField,
 } from './channel-account.js'
@@ -87,7 +89,7 @@ import {
 // Credential lookup helper — see SECURITY.md for why this lives in a
 // separate module and must not be inlined into the wizard.
 import { readApiKeyFromEnv } from './credentials/read-env.js'
-import { placeDoorbell, formatPlacement, applyDoorbellConfig, stripDoorbellConfig, removeDoorbellFiles } from './doorbell/placement.js'
+import { placeDoorbell, formatPlacement, applyDoorbellConfig, stripDoorbellConfig } from './doorbell/placement.js'
 import { DEFAULT_API_BASE } from './doorbell/mcp.js'
 
 /**
@@ -856,6 +858,7 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
         return ['AgentChat: not configured — the wizard will register you, accept an existing key, or recover a lost one.']
       }
       const handle = readAgentchatConfigField(cfg, id, 'agentHandle')
+      if (!isAgentchatAccountEnabled(cfg, id)) return [`AgentChat: configured${handle ? ` (@${handle})` : ''}; ${agentchatReenableHint(cfg, id)}`]
       return [`AgentChat: configured${handle ? ` (@${handle})` : ''}`]
     },
   },
@@ -1145,11 +1148,11 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
   // when the user explicitly removes the channel; orphans are documented in
   // RUNBOOK.md.
   disable: (cfg) => {
-    // Same strip as `config.setAccountEnabled(false)` (what `channels remove`
-    // calls): the identity line goes, the plugin's own mcp.servers.agentchat
-    // entry goes (matched by URL + transport on the env-substituted config),
-    // the key stays — a remove is a pause, not a rotation.
-    removeDoorbellFiles(cfg, 'default', { clearKey: false })
+    // The config side only, same as `config.setAccountEnabled(false)`: the
+    // plugin's own mcp.servers.agentchat entry goes (matched by URL +
+    // transport on the env-substituted config), the key stays — a remove is
+    // a pause, not a rotation. Files (the identity line) are removed by the
+    // lifecycle hook after the patch is checked, never from a pure adapter.
     return setSetupChannelEnabled(stripDoorbellConfig(cfg, 'default').cfg, AGENTCHAT_CHANNEL_ID, false)
   },
 }

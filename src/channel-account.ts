@@ -75,6 +75,50 @@ export function splitEnabledFromRaw(
 }
 
 /**
+ * Whether OpenClaw treats this account as enabled: neither the section-level
+ * `channels.agentchat.enabled` nor the account's own `enabled` is `false`.
+ * (For the flat default account the two are the same field.)
+ */
+export function isAgentchatAccountEnabled(cfg: OpenClawConfig | undefined, accountId: string): boolean {
+  const section = readChannelSection(cfg)
+  if (!section) return true
+  if (section.enabled === false) return false
+  const raw = readAccountRaw(section, accountId)
+  return raw?.enabled !== false
+}
+
+/**
+ * The config path whose `false` keeps this account disabled — the one
+ * `openclaw config set <path> true` must flip. The section-level flag
+ * first: while it is `false` OpenClaw does not load the plugin at all.
+ */
+export function agentchatEnabledConfigPath(cfg: OpenClawConfig | undefined, accountId: string): string {
+  const section = readChannelSection(cfg)
+  const sectionPath = `channels.${AGENTCHAT_CHANNEL_ID}.enabled`
+  if (!section || section.enabled === false) return sectionPath
+  const { accounts } = section
+  const entry = accounts && typeof accounts === 'object' && !Array.isArray(accounts) ? (accounts as Record<string, unknown>)[accountId] : undefined
+  if (entry && typeof entry === 'object') return `channels.${AGENTCHAT_CHANNEL_ID}.accounts.${accountId}.enabled`
+  return sectionPath
+}
+
+/**
+ * The remedy for anything missing on a DISABLED account. Never
+ * `channels add`: OpenClaw (2026.10.9) does not load a disabled channel's
+ * plugin, so `channels add` treats AgentChat as a missing plugin, downloads
+ * `@agentchatme/openclaw` from npm and asks to install it over this one.
+ * `config set … true` re-enables in place ("applies without restarting the
+ * gateway"); `doctor --fix` then restores the hosted tools entry and the
+ * identity line.
+ */
+export function agentchatReenableHint(cfg: OpenClawConfig | undefined, accountId: string): string {
+  return (
+    `the account is disabled — re-enable it with \`openclaw config set ${agentchatEnabledConfigPath(cfg, accountId)} true\`, then run \`openclaw doctor --fix\` ` +
+    '(not `openclaw channels add`: OpenClaw does not load a disabled channel\'s plugin and would install @agentchatme/openclaw from npm over this one)'
+  )
+}
+
+/**
  * Every account id the config declares: the keys of `accounts.*` when
  * present, else `default` when the flat section carries an `apiKey`. Shared
  * by the config adapter, the gateway's single-account check and the doctor.
