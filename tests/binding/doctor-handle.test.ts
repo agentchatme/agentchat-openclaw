@@ -5,6 +5,9 @@
  * failure.
  */
 import { describe, expect, it, vi } from 'vitest'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 
 vi.mock('../../src/setup-client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/setup-client.js')>()
@@ -24,6 +27,18 @@ describe('doctor --fix persists agentHandle', () => {
     expect((result.config as unknown as { channels: { agentchat: { agentHandle: string } } }).channels.agentchat.agentHandle).toBe('alice')
     expect(result.changes).toContain('set channels.agentchat.agentHandle = alice')
     expect(result.changes.some((c) => c.startsWith('added mcp.servers.agentchat'))).toBe(true)
+  })
+
+  it('places the identity line for the handle it just learnt, in the same run', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-doctor-handle-'))
+    try {
+      vi.mocked(validateApiKey).mockReset().mockResolvedValueOnce({ ok: true, agent: { handle: 'alice', email: 'a@x', displayName: null, createdAt: 'now' } } as never)
+      const result = await agentchatDoctorAdapter.repairConfig!({ cfg: { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY } } } as never, doctorFixCommand: 'fix', env: {} })
+      expect(result.changes).toContain(`placed the identity line for @alice in ${path.join(workspace, 'AGENTS.md')}`)
+      expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain('I am @alice on AgentChat')
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true })
+    }
   })
 
   it('does not call the server when the handle is already configured', async () => {

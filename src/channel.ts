@@ -39,6 +39,7 @@ import {
   AGENTCHAT_DEFAULT_ACCOUNT_ID,
   MIN_API_KEY_LENGTH,
   applyAgentchatAccountPatch,
+  isAgentchatAccountEnabled,
   isApiKeyPresent,
   readAccountRaw,
   readAgentchatConfigField,
@@ -59,7 +60,7 @@ import {
   agentchatDoctorAdapter,
   type AgentchatProbeResult,
 } from './binding/index.js'
-import { placeDoorbell, formatPlacement, applyDoorbellConfig, stripDoorbellConfig, removeDoorbellFiles, placeApiKeyInDotEnv, dotEnvPath } from './doorbell/placement.js'
+import { placeDoorbell, formatPlacement, applyDoorbellConfig, stripDoorbellConfig, removeDoorbellFiles, restoreIdentityLine, placeApiKeyInDotEnv, dotEnvPath } from './doorbell/placement.js'
 import { setPluginRuntime } from './doorbell/runtime-holder.js'
 import { DEFAULT_API_BASE } from './doorbell/mcp.js'
 
@@ -319,7 +320,7 @@ export function deleteAccountConfig(cfg: Cfg, accountId: string): Cfg {
 }
 
 function isAccountEnabled(cfg: Cfg | undefined, accountId: string): boolean {
-  return resolveAgentchatAccount(cfg, accountId).enabled
+  return isAgentchatAccountEnabled(cfg, accountId)
 }
 
 /**
@@ -337,20 +338,44 @@ export function accountSectionPersistable(cfg: Cfg | undefined, accountId: strin
 }
 
 /**
- * ChannelLifecycleAdapter — the file side of disable/delete, run by OpenClaw
- * after the config adapters and before the write. Best-effort; reports
- * through the CLI runtime it is given.
+ * ChannelLifecycleAdapter — the file side of disable / re-enable / delete,
+ * run by OpenClaw after the config adapters and before the write.
+ * Best-effort; reports through the CLI runtime it is given.
+ *
+ * enabled → disabled: the identity line goes (the key stays — a pause).
+ * disabled → enabled: the identity line for the configured `agentHandle`
+ * comes back, the mirror of disable. OpenClaw 2026.10.9 does not load a
+ * disabled channel's plugin, so a re-enable through
+ * `openclaw config set channels.agentchat.enabled true` never reaches this
+ * hook; `openclaw doctor --fix` places a missing identity line for that path.
  */
 export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResolvedAccount>['lifecycle']> = {
   async onAccountConfigChanged({ prevCfg, nextCfg, accountId, runtime }) {
     const wasEnabled = isAccountEnabled(prevCfg, accountId)
     const isEnabled = isAccountEnabled(nextCfg, accountId)
-    if (!wasEnabled || isEnabled) return
+    if (wasEnabled === isEnabled) return
     if (!accountSectionPersistable(nextCfg, accountId)) {
-      say(runtime, 'error', `[agentchat:${accountId}] the disabled config does not pass the channel schema — leaving the identity line and the key in place`)
+      say(
+        runtime,
+        'error',
+        isEnabled
+          ? `[agentchat:${accountId}] the re-enabled config does not pass the channel schema — not placing the identity line`
+          : `[agentchat:${accountId}] the disabled config does not pass the channel schema — leaving the identity line and the key in place`,
+      )
       return
     }
-    for (const line of removeDoorbellFiles(nextCfg, accountId, { clearKey: false })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
+    if (!isEnabled) {
+      for (const line of removeDoorbellFiles(nextCfg, accountId, { clearKey: false })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
+      return
+    }
+    const handle = validHandle(readAgentchatConfigField(nextCfg, accountId, 'agentHandle'))
+    if (!handle) {
+      say(runtime, 'log', `[agentchat:${accountId}] agentHandle not in config — run \`openclaw doctor --fix\` to learn it from the key and place the identity line`)
+      return
+    }
+    const restored = restoreIdentityLine(nextCfg, accountId, handle)
+    if (restored.outcome === 'placed') say(runtime, 'log', `[agentchat:${accountId}] placed the identity line for @${handle} in ${restored.path}`)
+    else if (restored.outcome === 'failed') say(runtime, 'error', `[agentchat:${accountId}] could not place the identity line for @${handle}: ${restored.detail ?? 'unknown error'} — run \`openclaw doctor --fix\` after fixing the path`)
   },
 
   async onAccountRemoved({ prevCfg, accountId, runtime }) {

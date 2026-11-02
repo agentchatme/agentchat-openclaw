@@ -68,7 +68,9 @@ type ChannelSetupWizardCredentialValues = Partial<Record<string, string>>
 import {
   AGENTCHAT_CHANNEL_ID,
   MIN_API_KEY_LENGTH,
+  agentchatReenableHint,
   applyAgentchatAccountPatch,
+  isAgentchatAccountEnabled,
   isApiKeyPresent,
   readAgentchatConfigField,
 } from './channel-account.js'
@@ -856,6 +858,7 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
         return ['AgentChat: not configured — the wizard will register you, accept an existing key, or recover a lost one.']
       }
       const handle = readAgentchatConfigField(cfg, id, 'agentHandle')
+      if (!isAgentchatAccountEnabled(cfg, id)) return [`AgentChat: configured${handle ? ` (@${handle})` : ''}; ${agentchatReenableHint(cfg, id)}`]
       return [`AgentChat: configured${handle ? ` (@${handle})` : ''}`]
     },
   },

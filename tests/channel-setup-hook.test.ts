@@ -22,6 +22,7 @@ import { validateApiKey } from '../src/setup-client.js'
 import { agentchatPlugin, agentchatSetupAdapter, agentchatLifecycleAdapter, accountSectionPersistable } from '../src/channel.js'
 import { agentchatSetupWizard } from '../src/channel.wizard.js'
 import { agentchatChannelConfigSchema } from '../src/config-schema.js'
+import { renderAnchorText, writeAgentsAnchor } from '../src/binding/agents-anchor.js'
 import { getPluginRuntime, setPluginRuntime, isUsablePluginRuntime, resetPluginRuntimeForTest } from '../src/doorbell/runtime-holder.js'
 
 const KEY = 'ac_live_' + 'n'.repeat(24)
@@ -252,14 +253,67 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
       expect(lines.some((l) => l.level === 'error' && l.line.includes('does not pass the channel schema'))).toBe(true)
     })
 
-    it('onAccountConfigChanged does nothing for other changes (key rotation, re-enable)', async () => {
+    it('onAccountConfigChanged does nothing when the enabled state does not change (key rotation, enabled → enabled, disabled → disabled)', async () => {
       fs.writeFileSync(anchorFile(), ANCHOR)
       const prevCfg = substituted()
       await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, apiKey: 'ac_live_' + 'r'.repeat(24) } } } as never, accountId: 'default', runtime })
       const disabled = { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, enabled: false } } }
-      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: disabled as never, nextCfg: prevCfg as never, accountId: 'default', runtime })
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: disabled as never, nextCfg: { ...disabled, channels: { agentchat: { ...disabled.channels.agentchat, apiKey: 'ac_live_' + 'r'.repeat(24) } } } as never, accountId: 'default', runtime })
       expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(ANCHOR)
       expect(lines).toEqual([])
+    })
+
+    it('onAccountConfigChanged places the identity line for the configured agentHandle when the account went disabled → enabled (real workspace)', async () => {
+      fs.writeFileSync(anchorFile(), '# me\n') // what disable left behind
+      const prevCfg = { ...substituted(), channels: { agentchat: { apiKey: KEY, agentHandle: 'alice', enabled: false } } }
+      const nextCfg = agentchatPlugin.config.setAccountEnabled!({ cfg: prevCfg as never, accountId: 'default', enabled: true })
+      expect(accountSectionPersistable(nextCfg, 'default')).toBe(true)
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg, accountId: 'default', runtime })
+      const content = fs.readFileSync(anchorFile(), 'utf8')
+      expect(content.startsWith('# me\n\n<!-- agentchat:start -->\n')).toBe(true)
+      expect(content).toContain(renderAnchorText('alice'))
+      expect(lines).toEqual([{ level: 'log', line: `[agentchat:default] placed the identity line for @alice in ${anchorFile()}` }])
+    })
+
+    it('disable then re-enable through the hooks restores AGENTS.md byte for byte', async () => {
+      fs.writeFileSync(anchorFile(), '# me\n\nsome notes\n')
+      const enabledCfg = substituted()
+      writeAgentsAnchor({ cfg: enabledCfg as never, handle: 'alice' })
+      const placed = fs.readFileSync(anchorFile(), 'utf8')
+      const disabledCfg = agentchatPlugin.config.setAccountEnabled!({ cfg: enabledCfg as never, accountId: 'default', enabled: false })
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: enabledCfg as never, nextCfg: disabledCfg, accountId: 'default', runtime })
+      expect(fs.readFileSync(anchorFile(), 'utf8')).toBe('# me\n\nsome notes\n')
+      const reenabledCfg = agentchatPlugin.config.setAccountEnabled!({ cfg: disabledCfg, accountId: 'default', enabled: true })
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: disabledCfg, nextCfg: reenabledCfg, accountId: 'default', runtime })
+      expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(placed)
+    })
+
+    it('onAccountConfigChanged on re-enable leaves a present identity line byte-identical', async () => {
+      const prevCfg = { ...substituted(), channels: { agentchat: { apiKey: KEY, agentHandle: 'alice', enabled: false } } }
+      writeAgentsAnchor({ cfg: prevCfg as never, handle: 'alice' })
+      const odd = `# me\n\n\n\n${fs.readFileSync(anchorFile(), 'utf8').trim()}\n\n\n# tail` // spacing a rewrite would normalise
+      fs.writeFileSync(anchorFile(), odd)
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: substituted() as never, accountId: 'default', runtime })
+      expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(odd)
+      expect(lines).toEqual([])
+    })
+
+    it('onAccountConfigChanged on re-enable touches no file when the patch would not pass the schema', async () => {
+      fs.writeFileSync(anchorFile(), '# me\n')
+      const prevCfg = { ...substituted(), channels: { agentchat: { apiKey: KEY, agentHandle: 'alice', enabled: false } } }
+      const nextCfg = { ...prevCfg, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice', enabled: true, bogus: 'not in the schema' } } }
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: nextCfg as never, accountId: 'default', runtime })
+      expect(fs.readFileSync(anchorFile(), 'utf8')).toBe('# me\n')
+      expect(lines).toEqual([{ level: 'error', line: '[agentchat:default] the re-enabled config does not pass the channel schema — not placing the identity line' }])
+    })
+
+    it('onAccountConfigChanged on re-enable without agentHandle writes nothing and points at doctor --fix', async () => {
+      const prevCfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, enabled: false } } }
+      const nextCfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, enabled: true } } }
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: nextCfg as never, accountId: 'default', runtime })
+      expect(fs.existsSync(anchorFile())).toBe(false)
+      expect(lines).toHaveLength(1)
+      expect(lines[0]!.line).toMatch(/agentHandle not in config — run `openclaw doctor --fix`/)
     })
 
     it('onAccountRemoved removes the identity line and the .env key line', async () => {
