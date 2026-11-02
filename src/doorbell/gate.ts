@@ -278,7 +278,7 @@ export interface RunGateParams {
   readonly timeoutMs: number
   readonly maxTokens?: number
   readonly now?: () => number
-  readonly log?: (level: 'info' | 'warn', message: string) => void
+  readonly log?: (level: 'debug' | 'info' | 'warn', message: string) => void
 }
 
 /** Decide every card on the tray and record the verdicts. Never throws. */
@@ -309,7 +309,8 @@ export async function runGate(params: RunGateParams): Promise<GateResult> {
 
   const verdicts = parseVerdicts(text, { knownIds: ids, categories: categoriesOf(params.tray) })
   if (!verdicts || verdicts.length === 0) {
-    log('warn', `gate: unusable answer for ${ids.length} cards (latency ${latencyMs} ms): ${(text ?? '').slice(0, 200)}`)
+    log('warn', `gate: unusable answer for ${ids.length} cards (latency ${latencyMs} ms)`)
+    log('debug', `gate: raw model output: ${(text ?? '').slice(0, 200)}`)
     return failedResult(ids, params.failOpen, 'no usable verdicts in the answer', latencyMs, truncated)
   }
 

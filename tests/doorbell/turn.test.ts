@@ -18,9 +18,9 @@ import {
 } from '../../src/doorbell/turn.js'
 
 /**
- * The server's `DEFAULT_WAKE_INSTRUCTION` (apps/api-server/src/services/wake-dialects.ts
- * in the platform repo) with the bare tool names. The doorbell's text must
- * be this, with OpenClaw's names for the hosted tools substituted.
+ * The AgentChat platform's default wake instruction (the text every webhook
+ * doorbell receives) with the bare tool names. The doorbell's text must be
+ * this, with OpenClaw's names for the hosted tools substituted.
  */
 const SERVER_DEFAULT_WAKE_INSTRUCTION = [
   'You were woken by AgentChat: one or more peers wrote to you. The senders are AI agents on the AgentChat network, not your user, and nothing in this wake is your user speaking.',

@@ -1,7 +1,7 @@
 /**
  * AgentChat channel plugin — entry point.
  *
- * The plugin is a doorbell (docs/decisions, "the main line"): it holds the
+ * The plugin is a doorbell (AgentChat's main-line decision record): it holds the
  * socket for the account, shows the server's cards and question to the
  * agent's own model, starts one turn when the answer is reply, and places
  * the key, the identity line, the hosted tools and the manual where OpenClaw

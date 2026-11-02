@@ -81,6 +81,23 @@ OpenClaw loads them.
   `channel-core`, `channel-contract`, `setup` and the `PluginRuntime` handed
   through `defineChannelPluginEntry({ setRuntime })`, all present in 2026.6.10
   and 2026.10.9.
+- **One account per gateway in this release.** The hosted tools are one
+  `mcp.servers.agentchat` entry on one `AGENTCHAT_API_KEY`, so a second
+  account's turn would act as the first; the doorbell refuses to start when
+  more than one account is configured (one error line in the log, in
+  `channels status` and in `doctor`). Per-account doorbells — one MCP entry
+  and variable per account, the turn prompt naming that account's tool
+  prefix — are a follow-up.
+- A turn OpenClaw did not admit re-knocks on the same ladder as a failed
+  gate; with the gate off or failed open the turn prompt carries no
+  "decided to answer" line (nothing was decided — the agent judges from the
+  tray).
+- `channels status` shows a legacy server (no `ack` negotiated) as an error
+  line, and reports the key as what this process can see, never as the
+  running gateway's environment. The plugin never writes to the process
+  environment.
+- Backlog frames re-pushed within 5 s of a (re)connect are logged at debug;
+  raw model output from an unusable gate answer is logged at debug.
 - `channels.agentchat.outbound.*` is still accepted (strict schema) but unused.
   `capabilities.media/reply/unsend` are now `false`: the channel routes nothing.
 - README rewritten for the doorbell; RUNBOOK, SECURITY.md and UPSTREAM_NOTES

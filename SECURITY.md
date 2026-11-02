@@ -53,11 +53,12 @@ and `OPENCLAW_STATE_DIR` to mirror OpenClaw's own path resolution,
 lookup is isolated in a single module (`src/credentials/read-env.ts`,
 emitted as `dist/credentials/read-env.{js,cjs}`). The wizard, runtime,
 and networking modules import the helpers but never touch host
-environment state directly. The one write to the environment is
-documented in `src/binding/gateway.ts`: when the gateway's own
-environment lacks `AGENTCHAT_API_KEY`, the doorbell sets it in-process
-from the channel config so OpenClaw's `${AGENTCHAT_API_KEY}` template
-for the hosted tools can resolve on the next config reload.
+environment state directly. The plugin never writes to the process
+environment: the hosted tools' `${AGENTCHAT_API_KEY}` template resolves
+from OpenClaw's own `.env` loading (a restart or config reload after
+first placement), so the key is never pushed into every child process
+and plugin of the gateway, and a later rotation in `.env` is never
+shadowed by a stale in-process value.
 
 The key is also placed on disk, once, by the wizard: `AGENTCHAT_API_KEY=…`
 in OpenClaw's state-dir `.env` (`~/.openclaw/.env`, mode `0600`), which

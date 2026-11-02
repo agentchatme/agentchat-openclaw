@@ -21,6 +21,7 @@ import { probeHostedMcp } from '../doorbell/mcp.js'
 import { checkPlacement, type PlacementCheck } from '../doorbell/placement.js'
 import { getDoorbell } from './runtime-registry.js'
 import { readDoorbellModeFromEnv } from '../credentials/read-env.js'
+import { multiAccountRefusal } from '../channel-account.js'
 
 export type AgentchatProbeResult = {
   readonly ok: boolean
@@ -31,6 +32,8 @@ export type AgentchatProbeResult = {
   readonly mcp?: { readonly ok: boolean; readonly detail: string }
   readonly placement?: readonly PlacementCheck[]
   readonly doorbell?: { readonly mode: 'v3' | 'off'; readonly state?: string; readonly ackNegotiated?: boolean; readonly knocks?: number; readonly cycles?: number; readonly turns?: number }
+  /** Set when the doorbell refuses to start (more than one account configured). */
+  readonly refusal?: string
 }
 
 const PROBE_MIN_MS = 1_000
@@ -79,15 +82,20 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
       ...(health ? { state: health.state.kind, ackNegotiated: health.ackNegotiated } : {}),
       ...(counters ? { knocks: counters.knocks, cycles: counters.cycles, turns: counters.turns } : {}),
     }
+    const refusal = multiAccountRefusal(cfg as never)
+    // A legacy server (no `ack` echoed) marks envelopes delivered on push,
+    // before any verdict — rule 1 is off. That is an error, not a footnote.
+    const legacyServer = health !== undefined && health.authenticated && !health.ackNegotiated
 
     return {
-      ok: me.status === 'active' && mcp.ok && placement.every((c) => c.ok),
+      ok: me.status === 'active' && mcp.ok && placement.every((c) => c.ok) && !refusal && !legacyServer,
       handle: me.handle,
       status: me.status,
       pausedByOwner: me.paused_by_owner ?? 'none',
       mcp,
       placement,
       doorbell,
+      ...(refusal ? { refusal } : {}),
     }
   },
 
@@ -108,15 +116,22 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
     for (const check of probe.placement ?? []) {
       lines.push({ text: `${check.name}: ${check.detail}`, tone: check.ok ? 'muted' : 'warn' })
     }
+    if (probe.refusal) lines.push({ text: `doorbell not started — ${probe.refusal}`, tone: 'error' })
     if (probe.doorbell) {
       const d = probe.doorbell
       if (d.mode === 'off') lines.push({ text: 'doorbell off (AGENTCHAT_DOORBELL=off): no socket, no knocks, no turns', tone: 'warn' })
       else if (d.state) {
         lines.push({
-          text: `doorbell ${d.state}${d.ackNegotiated === false ? ' (server did not negotiate ack)' : ''} — knocks ${d.knocks ?? 0}, cycles ${d.cycles ?? 0}, turns ${d.turns ?? 0}`,
+          text: `doorbell ${d.state} — knocks ${d.knocks ?? 0}, cycles ${d.cycles ?? 0}, turns ${d.turns ?? 0}`,
           tone: d.state === 'READY' ? 'success' : 'warn',
         })
-      } else lines.push({ text: 'doorbell not running in this process', tone: 'muted' })
+        if (d.ackNegotiated === false && (d.state === 'READY' || d.state === 'DEGRADED')) {
+          lines.push({
+            text: 'server did not negotiate the ack capability — envelopes are marked delivered on push, before any verdict; this server predates the main line',
+            tone: 'error',
+          })
+        }
+      } else if (!probe.refusal) lines.push({ text: 'doorbell not running in this process', tone: 'muted' })
     }
     return lines
   },

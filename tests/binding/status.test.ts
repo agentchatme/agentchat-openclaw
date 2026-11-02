@@ -16,6 +16,8 @@ vi.mock('../../src/doorbell/mcp.js', async (importOriginal) => {
 import { agentchatStatusAdapter } from '../../src/binding/status.js'
 import { placeDoorbell } from '../../src/doorbell/placement.js'
 import { probeHostedMcp } from '../../src/doorbell/mcp.js'
+import { registerDoorbell, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
+import type { AgentchatChannelRuntime } from '../../src/runtime.js'
 
 const KEY = 'ac_live_' + 's'.repeat(24)
 
@@ -80,6 +82,43 @@ describe('status adapter — the doctor-style probe', () => {
     expect(probe.ok).toBe(false)
     const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
     expect(lines.find((l) => l.text.startsWith('hosted MCP server not reachable'))?.tone).toBe('error')
+  })
+
+  it('refuses two accounts: not ok, one error line naming the limit', async () => {
+    const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { accounts: { a: { apiKey: KEY }, b: { apiKey: KEY } } } } }
+    const probe = await agentchatStatusAdapter.probeAccount!({ account: account(cfg) as never, timeoutMs: 2000, cfg: cfg as never } as never)
+    expect(probe.ok).toBe(false)
+    expect(probe.refusal).toMatch(/2 AgentChat accounts are configured \(a, b\); this release runs one account per gateway/)
+    const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+    expect(lines.find((l) => l.text.startsWith('doorbell not started —'))?.tone).toBe('error')
+  })
+
+  it('a legacy server (no ack negotiated) is an error line: envelopes are marked delivered on push', async () => {
+    await resetRegistryForTest()
+    const stub = {
+      start() {},
+      async stop() {},
+      getHealth: () => ({ state: { kind: 'READY' }, authenticated: true, ackNegotiated: false, counters: { frames: 0, selfFiltered: 0, knocks: 1, invites: 0 } }),
+    }
+    await registerDoorbell({
+      accountId: 'default',
+      config: account({}).config as never,
+      logger: { trace() {}, debug() {}, info() {}, warn() {}, error() {}, child() { return this } } as never,
+      createRuntime: () => stub as unknown as AgentchatChannelRuntime,
+      build: () => ({ invoker: null, handlers: {} }),
+    })
+    try {
+      const placed = placeDoorbell({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', stateDir: process.env.OPENCLAW_STATE_DIR })
+      process.env.AGENTCHAT_API_KEY = KEY
+      const probe = await agentchatStatusAdapter.probeAccount!({ account: account(placed.cfg) as never, timeoutMs: 2000, cfg: placed.cfg as never } as never)
+      expect(probe.doorbell?.ackNegotiated).toBe(false)
+      expect(probe.ok).toBe(false)
+      const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+      const legacy = lines.find((l) => l.text.startsWith('server did not negotiate the ack capability'))
+      expect(legacy?.tone).toBe('error')
+    } finally {
+      await resetRegistryForTest()
+    }
   })
 
   it('resolveAccountState', () => {

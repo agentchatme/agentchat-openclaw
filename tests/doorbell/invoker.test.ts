@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { AgentInvoker } from '../../src/doorbell/invoker.js'
+import { KNOCK_TURN_PROMPT } from '../../src/doorbell/turn.js'
 import { MainLineClient } from '../../src/doorbell/main-line.js'
 import type { GateCaller } from '../../src/doorbell/gate.js'
 import type { TurnRequest, TurnOutcome } from '../../src/doorbell/model.js'
@@ -160,7 +161,7 @@ describe('AgentInvoker — knock → tray → gate → one turn', () => {
     expect(server.inboxCalls()).toBe(2)
   })
 
-  it('gate disabled → the turn starts with every card id and nothing is posted', async () => {
+  it('gate disabled → one turn with the plain wake prompt (no gate line — nothing was decided) and nothing posted', async () => {
     const { clock, server, invoker, turns, settle } = make({
       trays: [{ question: 'Q', conversations: [card('conv_a', 'msg_a'), card('conv_b', 'msg_b')] }],
       gateEnabled: false,
@@ -169,7 +170,8 @@ describe('AgentInvoker — knock → tray → gate → one turn', () => {
     clock.advance(2000)
     await settle()
     expect(turns).toHaveLength(1)
-    expect(turns[0]!.prompt).toMatch(/conv_a, conv_b/)
+    expect(turns[0]!.prompt).toBe(KNOCK_TURN_PROMPT)
+    expect(turns[0]!.prompt).not.toMatch(/decided to answer/)
     expect(server.posts).toHaveLength(0)
   })
 
@@ -238,7 +240,7 @@ describe('AgentInvoker — failure policy and the ladder', () => {
     expect(invoker.counters().retryRung).toBe(0)
   })
 
-  it('fail-open: model down → the turn still starts with every card', async () => {
+  it('fail-open: model down → the turn still starts, with the plain wake prompt (no gate line)', async () => {
     const { clock, invoker, turns, settle } = make({
       trays: [{ question: 'Q', conversations: [card('conv_a', 'msg_a')] }],
       gate: async () => 'garbage',
@@ -248,7 +250,8 @@ describe('AgentInvoker — failure policy and the ladder', () => {
     clock.advance(2000)
     await settle()
     expect(turns).toHaveLength(1)
-    expect(turns[0]!.prompt).toMatch(/conv_a/)
+    expect(turns[0]!.prompt).toBe(KNOCK_TURN_PROMPT)
+    expect(turns[0]!.prompt).not.toMatch(/conv_a/)
   })
 
   it('tray read failure → re-knock on the ladder, then exhausted after the last rung', async () => {
@@ -270,17 +273,30 @@ describe('AgentInvoker — failure policy and the ladder', () => {
     expect(clock.pending).toHaveLength(0)
   })
 
-  it('a turn that could not start is counted as not run but does not crash the worker', async () => {
-    const { clock, invoker, settle } = make({
+  it('a turn that could not start re-knocks on the ladder — the reply cards are still on the tray', async () => {
+    let admit = false
+    const { clock, server, invoker, turns, settle } = make({
       trays: [{ question: 'Q', conversations: [card('conv_a', 'msg_a')] }],
       gate: async () => '{"decisions":[{"conversation_id":"conv_a","decision":"reply"}]}',
-      turn: async () => ({ ran: false, error: 'runtime unavailable' }),
+      turn: async (req) => {
+        if (!admit) return { ran: false, error: 'runtime unavailable' }
+        turns.push(req)
+        return { ran: true, runId: 'run_2', status: 'ok' }
+      },
     })
     invoker.knock('message')
     clock.advance(2000)
     await settle()
     expect(invoker.turns).toBe(0)
     expect(invoker.cycles).toBe(1)
+    expect(invoker.counters().retryRung).toBe(1) // 60 s re-knock armed
+    admit = true
+    clock.advance(60_000 + 2000)
+    await settle()
+    expect(server.inboxCalls()).toBe(2)
+    expect(turns).toHaveLength(1)
+    expect(invoker.turns).toBe(1)
+    expect(invoker.counters().retryRung).toBe(0)
   })
 })
 

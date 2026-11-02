@@ -281,11 +281,16 @@ export class AgentInvoker {
       return result
     }
 
+    let turnStarted = true
     if (startTurn(result)) {
-      await this.runKnockTurn(result)
+      turnStarted = await this.runKnockTurn(result)
     }
 
-    if (result.postFailures > 0 || result.undecided.length > 0) {
+    if (!turnStarted) {
+      // The agent never saw the tray: OpenClaw refused or could not admit the
+      // run. The reply cards are still on the tray; look again later.
+      this.scheduleRetry('turn not started')
+    } else if (result.postFailures > 0 || result.undecided.length > 0) {
       // Some cards were not settled (verdict rejected, or the model skipped
       // them). They are still on the tray; look again later.
       this.scheduleRetry('cards left on the tray')
@@ -321,12 +326,17 @@ export class AgentInvoker {
 
   // ─── turns ──────────────────────────────────────────────────────────
 
-  private async runKnockTurn(result: GateResult): Promise<void> {
+  /** Start the knock turn. Returns whether OpenClaw admitted the run. */
+  private async runKnockTurn(result: GateResult): Promise<boolean> {
     const sessionKey = knockSessionKey(this.agentId, this.now())
-    this.logger.info({ sessionKey, replyCards: result.replyConversations.length, source: result.source }, 'turn start')
+    // The gate line names ids only when the gate actually ran. With the gate
+    // off or failed open no card was decided, so the prompt carries no ids
+    // and the agent judges every card from the tray with the tray's question.
+    const decided = result.source === 'llm' ? result.replyConversations : []
+    this.logger.info({ sessionKey, replyCards: decided.length, source: result.source }, 'turn start')
     const outcome = await this.turnRunner({
       sessionKey,
-      prompt: knockTurnPrompt(result.replyConversations),
+      prompt: knockTurnPrompt(decided),
       lane: doorbellLane(this.accountId),
     })
     if (outcome.ran) this.turns += 1
@@ -334,6 +344,7 @@ export class AgentInvoker {
       { sessionKey, ran: outcome.ran, runId: outcome.runId, status: outcome.status, ...(outcome.error ? { error: outcome.error } : {}) },
       outcome.ran ? 'turn complete (final text discarded; the send is a hosted-tool call)' : 'turn not started',
     )
+    return outcome.ran
   }
 
   private async runInviteTurn(invite: GroupInviteKnock): Promise<void> {

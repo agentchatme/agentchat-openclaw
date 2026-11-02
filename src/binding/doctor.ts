@@ -11,25 +11,16 @@
 
 import type { ChannelDoctorAdapter, OpenClawConfig } from './openclaw-types.js'
 
-import { AGENTCHAT_CHANNEL_ID, readAgentchatConfigField, readChannelSection } from '../channel-account.js'
+import { AGENTCHAT_CHANNEL_ID, listConfiguredAccountIds, multiAccountRefusal, readAgentchatConfigField } from '../channel-account.js'
 import { checkPlacement } from '../doorbell/placement.js'
 import { withHostedMcpEntry, DEFAULT_API_BASE } from '../doorbell/mcp.js'
-
-function listAccountIds(cfg: OpenClawConfig): string[] {
-  const section = readChannelSection(cfg)
-  if (!section) return []
-  const accounts = section.accounts
-  if (accounts && typeof accounts === 'object' && !Array.isArray(accounts)) {
-    const ids = Object.keys(accounts)
-    if (ids.length > 0) return ids
-  }
-  return typeof section.apiKey === 'string' ? ['default'] : []
-}
 
 export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
   collectPreviewWarnings({ cfg, doctorFixCommand, env }) {
     const warnings: string[] = []
-    for (const accountId of listAccountIds(cfg)) {
+    const refusal = multiAccountRefusal(cfg)
+    if (refusal) warnings.push(`[${AGENTCHAT_CHANNEL_ID}] doorbell will not start — ${refusal}`)
+    for (const accountId of listConfiguredAccountIds(cfg)) {
       const apiKey = readAgentchatConfigField(cfg, accountId, 'apiKey')
       const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
       const handle = readAgentchatConfigField(cfg, accountId, 'agentHandle')
@@ -46,7 +37,7 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
     const changes: string[] = []
     let next: OpenClawConfig = cfg
     const bases = new Set<string>()
-    for (const accountId of listAccountIds(cfg)) {
+    for (const accountId of listConfiguredAccountIds(cfg)) {
       bases.add(readAgentchatConfigField(cfg, accountId, 'apiBase') ?? DEFAULT_API_BASE)
     }
     // One hosted server entry per API base; every configured account on the

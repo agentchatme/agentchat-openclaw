@@ -42,6 +42,12 @@ describe('doctor adapter', () => {
     expect(second.changes).toEqual([])
   })
 
+  it('warns when more than one account is configured — the doorbell will not start', async () => {
+    const two = { agents: { defaults: { workspace } }, channels: { agentchat: { accounts: { a: { apiKey: KEY }, b: { apiKey: KEY } } } } }
+    const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: two as never, doctorFixCommand: 'fix', env: {} })
+    expect(warnings[0]).toMatch(/^\[agentchat\] doorbell will not start — 2 AgentChat accounts are configured \(a, b\)/)
+  })
+
   it('repairConfig does nothing when no account is configured', async () => {
     const result = await agentchatDoctorAdapter.repairConfig!({ cfg: {} as never, doctorFixCommand: 'fix', env: {} })
     expect(result.changes).toEqual([])

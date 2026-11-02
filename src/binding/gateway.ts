@@ -20,7 +20,8 @@ import type { ChannelGatewayAdapter, ChannelGatewayContext } from './openclaw-ty
 
 import type { AgentchatResolvedAccount } from '../channel.js'
 import { createLogger, type Logger } from '../log.js'
-import { readDoorbellModeFromEnv, readReplyGateEnabledFromEnv, readReplyGateFailOpenFromEnv, readReplyGateTimeoutMsFromEnv, API_KEY_ENV } from '../credentials/read-env.js'
+import { readDoorbellModeFromEnv, readReplyGateEnabledFromEnv, readReplyGateFailOpenFromEnv, readReplyGateTimeoutMsFromEnv } from '../credentials/read-env.js'
+import { multiAccountRefusal } from '../channel-account.js'
 import { registerDoorbell, unregisterDoorbell, getDoorbell } from './runtime-registry.js'
 import { AgentInvoker } from '../doorbell/invoker.js'
 import { MainLineClient } from '../doorbell/main-line.js'
@@ -87,13 +88,14 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       return
     }
 
-    // The hosted MCP server's bearer header is a template on this variable.
-    // OpenClaw resolves config templates from the gateway's environment; if
-    // the wizard placed the key after the gateway started, make it visible
-    // for the next config reload (a restart is still the documented step).
-    if (!(process.env[API_KEY_ENV] ?? '').trim()) {
-      process.env[API_KEY_ENV] = config.apiKey
-      ctx.log?.info?.(`[agentchat:${ctx.accountId}] ${API_KEY_ENV} was not in the gateway environment — set in-process for the hosted tools`)
+    // One account per gateway in this release (see `multiAccountRefusal`):
+    // a second account's turn would call the hosted tools as the first.
+    const refusal = multiAccountRefusal(ctx.cfg)
+    if (refusal) {
+      ctx.log?.error?.(`[agentchat:${ctx.accountId}] doorbell not started — ${refusal}`)
+      ctx.setStatus({ ...ctx.getStatus(), running: false, connected: false, lastDisconnect: { at: Date.now(), error: refusal } })
+      await waitUntilAbort(ctx.abortSignal, () => undefined)
+      return
     }
 
     const channelRuntime = ctx.channelRuntime as ChannelRuntimeLike | undefined

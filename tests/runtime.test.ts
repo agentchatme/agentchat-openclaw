@@ -64,14 +64,24 @@ class MockWebSocket extends EventEmitter {
   }
 }
 
-function makeRuntime(handlers: ChannelRuntimeHandlers = {}, config = makeConfig()) {
+function makeRuntime(handlers: ChannelRuntimeHandlers = {}, config = makeConfig(), extra: { logger?: Logger; now?: () => number } = {}) {
   const runtime = new AgentchatChannelRuntime({
     config,
     handlers,
-    logger: silentLogger(),
+    logger: extra.logger ?? silentLogger(),
     webSocketCtor: MockWebSocket as unknown as ConstructorParameters<typeof AgentchatChannelRuntime>[0]['webSocketCtor'],
+    ...(extra.now ? { now: extra.now } : {}),
   })
   return runtime
+}
+
+function capturingLogger(): Logger & { lines: Array<{ level: string; msg: string | undefined; obj: object }> } {
+  const lines: Array<{ level: string; msg: string | undefined; obj: object }> = []
+  const log = (level: string) => (obj: object, msg?: string) => {
+    lines.push({ level, msg, obj })
+  }
+  const logger = { lines, trace: log('trace'), debug: log('debug'), info: log('info'), warn: log('warn'), error: log('error'), child: () => logger }
+  return logger as Logger & { lines: typeof lines }
 }
 
 function bringUpReady(runtime: AgentchatChannelRuntime, caps: string[] | null = ['ack']): MockWebSocket {
@@ -170,6 +180,20 @@ describe('AgentchatChannelRuntime — knocks', () => {
     expect(() => sock.doMessage({ type: 'message.new', payload: { id: 'm', conversation_id: 'c', sender: 'bob' } })).not.toThrow()
     expect(calls).toBe(2)
     expect(runtime.getHealth().state.kind).toBe('READY')
+  })
+
+  it('frames within 5 s of a (re)connect are the backlog re-push: knocks at debug, not info', () => {
+    let now = 1_000_000
+    const logger = capturingLogger()
+    const knocks: string[] = []
+    const runtime = makeRuntime({ onKnock: (s) => knocks.push(s) }, makeConfig(), { logger, now: () => now })
+    const sock = bringUpReady(runtime)
+    for (let i = 0; i < 3; i++) sock.doMessage({ type: 'message.new', payload: { id: `old_${i}`, conversation_id: 'conv_1', sender: 'bob' } })
+    now += 6_000
+    sock.doMessage({ type: 'message.new', payload: { id: 'fresh', conversation_id: 'conv_1', sender: 'bob' } })
+    const knockLines = logger.lines.filter((l) => l.msg === 'knock — message.new')
+    expect(knockLines.map((l) => l.level)).toEqual(['debug', 'debug', 'debug', 'info'])
+    expect(knocks).toEqual(['connect', 'message', 'message', 'message', 'message'])
   })
 
   it('a reconnect knocks again', () => {

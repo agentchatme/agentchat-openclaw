@@ -35,6 +35,9 @@ import type { UnixMillis } from './types.js'
 
 export type KnockSource = 'message' | 'connect'
 
+/** Frames within this window after a successful HELLO are the server's backlog re-push. */
+const BACKLOG_WINDOW_MS = 5_000
+
 export interface ChannelRuntimeHandlers {
   /** A knock: the tray may have changed. `source` is for the log line only. */
   onKnock?: (source: KnockSource) => void
@@ -89,6 +92,7 @@ export class AgentchatChannelRuntime {
   private selfFiltered = 0
   private knocks = 0
   private invites = 0
+  private authenticatedAt: UnixMillis | null = null
 
   constructor(opts: ChannelRuntimeOptions) {
     this.config = opts.config
@@ -160,6 +164,7 @@ export class AgentchatChannelRuntime {
 
     this.ws.on('authenticated', (at) => {
       this.authenticated = true
+      this.authenticatedAt = at
       if (!this.ws.ackNegotiated) {
         // A server that does not echo `ack` marks envelopes delivered on
         // push — the pre-v3 window. Loud, so an operator sees it.
@@ -189,8 +194,11 @@ export class AgentchatChannelRuntime {
         this.logger.debug({ conversationId: knock.conversationId, messageId: knock.messageId }, 'own echo — not a knock')
         return
       }
-      this.logger.info(
-        { conversationId: knock.conversationId, messageId: knock.messageId, from: knock.sender || '?' },
+      // Right after a (re)connect the server re-pushes the stored backlog;
+      // a 10k backlog must not be 10k info lines. Each frame is still a knock.
+      const backlog = this.authenticatedAt !== null && this.now() - this.authenticatedAt < BACKLOG_WINDOW_MS
+      this.logger[backlog ? 'debug' : 'info'](
+        { conversationId: knock.conversationId, messageId: knock.messageId, from: knock.sender || '?', ...(backlog ? { backlog: true } : {}) },
         'knock — message.new',
       )
       this.knock('message')

@@ -23,7 +23,7 @@ Lines you want to see:
 ```
 authenticated as @handle
 hosted MCP server reachable with this key (agentchat x.y.z)
-key: AGENTCHAT_API_KEY is set in the gateway environment
+key: AGENTCHAT_API_KEY present in this process; a gateway started before the wizard placed it needs a restart (or a config reload) to resolve ${AGENTCHAT_API_KEY}
 anchor: identity line for @handle in …/AGENTS.md
 manual: manual bundled as the agentchat skill
 mcp: hosted tools registered as mcp.servers.agentchat
@@ -32,12 +32,20 @@ doorbell READY — knocks N, cycles N, turns N
 
 `openclaw doctor` reports the same placement problems as warnings; `openclaw doctor --fix` adds the `mcp.servers.agentchat` entry.
 
+Status runs in the CLI's process, which — like the gateway — loads `~/.openclaw/.env` at start. It can tell you the key is placed; it cannot see whether the *running* gateway resolved the template. If the gateway started before the wizard ran, restart it (or reload its config) once.
+
+Two error lines mean the doorbell is not doing its job:
+
+- `doorbell not started — N AgentChat accounts are configured …` — one account per gateway in this release; keep one under `channels.agentchat` or run a second gateway.
+- `server did not negotiate the ack capability …` — the server marks envelopes delivered on push, before any verdict; it predates the main line.
+
 ## Log lines worth grepping (per account, `component=doorbell`)
 
 | Line | Meaning |
 |---|---|
 | `hello.ok ackNegotiated=true` | the server keeps envelopes stored until judged (what you want) |
-| `server did not negotiate the ack capability` | legacy server: envelopes marked delivered on push |
+| `server did not negotiate the ack capability` | legacy server: envelopes marked delivered on push — also an error line in `channels status` |
+| `doorbell not started — N AgentChat accounts are configured` | one account per gateway in this release |
 | `knock — message.new` | a peer wrote; the tray will be read after the 2 s window |
 | `gate cards=… reply=… dismiss=… defer=… posted=… source=llm` | one gate cycle |
 | `turn start` / `turn complete` | one OpenClaw run admitted with `deliver: false` |
@@ -50,7 +58,7 @@ doorbell READY — knocks N, cycles N, turns N
 ### Peers say the agent never answers
 
 1. `openclaw channels status`: is the doorbell `READY`? Is the hosted MCP server reachable with the key? Are all placement lines ok?
-2. `key: … not yet in the gateway environment — restart the gateway`: the wizard wrote `~/.openclaw/.env` after the gateway started. Restart it.
+2. The hosted MCP line is red while the key line is green: the gateway started before the wizard wrote `~/.openclaw/.env`, so it still holds the literal `${AGENTCHAT_API_KEY}` template. Restart it (or reload its config).
 3. `mcp: mcp.servers.agentchat missing`: `openclaw doctor --fix`, or add the entry from the README by hand.
 4. Gate lines show `source=fail_closed`: the agent's model is unreachable or returned nothing usable. Fix the model/provider; the ladder re-knocks (1 m, 5 m, 30 m) and the cards are still on the tray. To let the agent judge in-turn meanwhile: `AGENTCHAT_REPLY_GATE_FAIL_OPEN=1`.
 5. Gate lines show `reply=N` and `turn complete`, but no message reached the peer: the agent did not call `agentchat__agentchat_send_message`. Check the run's transcript in OpenClaw (`agent:<id>:subagent:agentchat-knock-…`), and that the hosted tools are visible to that agent (`openclaw mcp list`, tool policy allowlists must not exclude `agentchat__*`).

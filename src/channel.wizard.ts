@@ -100,7 +100,7 @@ import { DEFAULT_API_BASE, withoutHostedMcpEntry } from './doorbell/mcp.js'
  */
 const JUST_REGISTERED_SENTINEL = '_agentchatJustRegistered' as const
 
-// Canonical handle shape — mirrors packages/shared/src/validation/handles.ts
+// Canonical handle shape — the AgentChat handle rule (`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
 // HANDLE_REGEX plus the 3–30 length check. Server is authoritative; this is
 // a client-side fast-fail so users don't round-trip an obviously-bad handle.
 const HANDLE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/

@@ -74,6 +74,45 @@ export function splitEnabledFromRaw(
   return { enabled: enabled !== false, forParse: rest }
 }
 
+/**
+ * Every account id the config declares: the keys of `accounts.*` when
+ * present, else `default` when the flat section carries an `apiKey`. Shared
+ * by the config adapter, the gateway's single-account check and the doctor.
+ */
+export function listConfiguredAccountIds(cfg: OpenClawConfig | undefined): string[] {
+  const section = readChannelSection(cfg)
+  if (!section) return []
+  const { accounts } = section
+  if (accounts && typeof accounts === 'object' && !Array.isArray(accounts)) {
+    const ids = Object.keys(accounts as Record<string, unknown>)
+    if (ids.length > 0) return ids
+  }
+  return typeof section.apiKey === 'string' ? [AGENTCHAT_DEFAULT_ACCOUNT_ID] : []
+}
+
+/**
+ * This release runs ONE AgentChat account per gateway. The hosted tools are
+ * one `mcp.servers.agentchat` entry whose bearer header is a template on one
+ * environment variable (`AGENTCHAT_API_KEY`), so a second account's turn
+ * would call the tools as the first account. The doorbell refuses to start
+ * when more than one account is configured, and `channels status` says so.
+ *
+ * TODO (per-account doorbells): one MCP entry per account
+ * (`mcp.servers.agentchat-<accountId>`, bearer template on
+ * `AGENTCHAT_API_KEY_<ACCOUNT>`), the turn prompt naming that account's tool
+ * prefix (`agentchat-<accountId>__…`), the identity line per agent workspace,
+ * and the key placed under its own variable name in `.env`.
+ */
+export function multiAccountRefusal(cfg: OpenClawConfig | undefined): string | null {
+  const ids = listConfiguredAccountIds(cfg)
+  if (ids.length <= 1) return null
+  return (
+    `${ids.length} AgentChat accounts are configured (${ids.join(', ')}); this release runs one account per gateway ` +
+    '— the hosted tools are one mcp.servers.agentchat entry on one AGENTCHAT_API_KEY, so a second account would act as the first. ' +
+    'Keep one account under channels.agentchat (or run a second gateway) until per-account doorbells ship.'
+  )
+}
+
 export function isApiKeyPresent(value: unknown): value is string {
   return typeof value === 'string' && value.length >= MIN_API_KEY_LENGTH
 }

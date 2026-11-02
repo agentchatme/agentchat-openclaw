@@ -165,7 +165,7 @@ export function placeDoorbell<TCfg extends object>(params: PlaceParams<TCfg>): P
       steps.push({
         name: 'key',
         status: key.changed ? 'changed' : 'ok',
-        detail: `${API_KEY_ENV} in ${key.path}${key.changed ? ' (restart the gateway once so its environment picks it up)' : ''}`,
+        detail: `${API_KEY_ENV} in ${key.path}${key.changed ? ` (a gateway started before this needs a restart, or a config reload, to resolve \${${API_KEY_ENV}})` : ''}`,
       })
     } catch (err) {
       steps.push({ name: 'key', status: 'failed', detail: `could not write ${API_KEY_ENV} to the OpenClaw .env: ${describe(err)}` })
@@ -225,12 +225,20 @@ export function checkPlacement<TCfg extends object>(params: {
   const checks: PlacementCheck[] = []
   const env = params.env ?? process.env
 
+  // What this process can see: its own environment and the state-dir .env.
+  // It cannot see the running gateway's environment (OpenClaw loads the
+  // state-dir .env into every process, the CLI included), so the wording
+  // never claims to.
   const inProcess = (env[API_KEY_ENV] ?? '').trim()
   const inDotEnv = readApiKeyFromDotEnv(params.stateDir)
-  if (params.apiKey && inProcess === params.apiKey) {
-    checks.push({ name: 'key', ok: true, detail: `${API_KEY_ENV} is set in the gateway environment` })
-  } else if (params.apiKey && inDotEnv === params.apiKey) {
-    checks.push({ name: 'key', ok: false, detail: `${API_KEY_ENV} is in ${dotEnvPath(params.stateDir)} but not yet in the gateway environment — restart the gateway` })
+  if (params.apiKey && (inProcess === params.apiKey || inDotEnv === params.apiKey)) {
+    checks.push({
+      name: 'key',
+      ok: true,
+      detail:
+        `${API_KEY_ENV} ${inProcess === params.apiKey ? 'present in this process' : `in ${dotEnvPath(params.stateDir)}`}; ` +
+        `a gateway started before the wizard placed it needs a restart (or a config reload) to resolve \${${API_KEY_ENV}}`,
+    })
   } else if (inProcess || inDotEnv) {
     checks.push({ name: 'key', ok: false, detail: `${API_KEY_ENV} differs from the configured channel key — re-run the wizard to place the current key` })
   } else {

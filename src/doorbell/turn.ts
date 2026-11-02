@@ -46,9 +46,9 @@ export const ACCEPT_GROUP_INVITE_TOOL = mcpToolName('agentchat_accept_group_invi
 export const REJECT_GROUP_INVITE_TOOL = mcpToolName('agentchat_reject_group_invite')
 
 /**
- * The main line's wake instruction — `DEFAULT_WAKE_INSTRUCTION` in the
- * platform's `services/wake-dialects.ts` — with the names OpenClaw gives the
- * hosted tools. The server sends these three sentences to every webhook
+ * The main line's wake instruction — the AgentChat platform's default wake
+ * instruction, the text every webhook doorbell receives — with the names
+ * OpenClaw gives the hosted tools. The server sends these three sentences to every webhook
  * doorbell; a socket doorbell carries the same text so the agent is
  * addressed the same way whichever doorbell rang. Update together with the
  * server.

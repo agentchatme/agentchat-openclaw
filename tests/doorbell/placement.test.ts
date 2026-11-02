@@ -91,7 +91,7 @@ describe('placeDoorbell + checkPlacement', () => {
     expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain('I am @alice on AgentChat')
     expect(readApiKeyFromDotEnv(stateDir)).toBe(KEY)
     const lines = formatPlacement(result.steps)
-    expect(lines[0]).toMatch(/^✓ key: AGENTCHAT_API_KEY in .*\.env \(restart the gateway/)
+    expect(lines[0]).toMatch(/^✓ key: AGENTCHAT_API_KEY in .*\.env \(a gateway started before this needs a restart, or a config reload, to resolve \$\{AGENTCHAT_API_KEY\}\)/)
     expect(lines[3]).toMatch(/^✓ mcp: hosted tools registered as mcp\.servers\.agentchat/)
   })
 
@@ -116,12 +116,17 @@ describe('placeDoorbell + checkPlacement', () => {
     expect(checks[3]!.detail).toMatch(/openclaw doctor --fix/)
   })
 
-  it('checkPlacement: key in .env but not in the gateway environment → restart hint; in the environment → ok', () => {
+  it('checkPlacement: the key check reports what THIS process sees and never claims to know the gateway\'s environment', () => {
     const placed = placeDoorbell({ cfg: cfgFor(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', stateDir })
-    const notYet = checkPlacement({ cfg: placed.cfg, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', stateDir, env: {} })
-    expect(notYet.find((c) => c.name === 'key')).toMatchObject({ ok: false, detail: expect.stringMatching(/restart the gateway/) })
+    const fromDotEnv = checkPlacement({ cfg: placed.cfg, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', stateDir, env: {} })
+    expect(fromDotEnv.find((c) => c.name === 'key')).toMatchObject({
+      ok: true,
+      detail: expect.stringMatching(/AGENTCHAT_API_KEY in .*\.env; a gateway started before the wizard placed it needs a restart \(or a config reload\) to resolve \$\{AGENTCHAT_API_KEY\}/),
+    })
     const live = checkPlacement({ cfg: placed.cfg, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', stateDir, env: { AGENTCHAT_API_KEY: KEY } })
     expect(live.every((c) => c.ok)).toBe(true)
+    expect(live.find((c) => c.name === 'key')!.detail).toMatch(/present in this process; a gateway started before/)
+    expect(live.find((c) => c.name === 'key')!.detail).not.toMatch(/gateway environment/)
     const stale = checkPlacement({ cfg: placed.cfg, handle: 'alice', apiKey: 'ac_live_' + 'z'.repeat(24), apiBase: 'https://api.agentchat.me', stateDir, env: { AGENTCHAT_API_KEY: KEY } })
     expect(stale.find((c) => c.name === 'key')!.detail).toMatch(/differs from the configured channel key/)
   })
