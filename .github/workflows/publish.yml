@@ -16,15 +16,27 @@ name: Publish
 #     publish.yml + the npm-publish environment; sanim's one-tap approval
 #     gates every release. Converted 2026-07-13; see agentchat-mcp for the
 #     evidence that killed token publishing.
-#   - ClawHub: `CLAWHUB_TOKEN` repo secret. Mint via `clawhub login` on a
-#     trusted machine, then copy the `token` field from
-#     %APPDATA%\clawhub\config.json (Windows) or ~/.config/clawhub/config.json.
+#   - ClawHub: trusted publishing too (no token). In GitHub Actions the
+#     clawhub CLI requests a GitHub OIDC token (audience `clawhub`) and
+#     ClawHub mints a short-lived publish token for that one package
+#     version, if the package's trusted publisher matches this repo +
+#     publish.yml + the npm-publish environment. Configure (once, as the
+#     package owner):
+#       clawhub package trusted-publisher set @agentchatme/openclaw \
+#         --repository agentchatme/agentchat-openclaw \
+#         --workflow-filename publish.yml --environment npm-publish
+#     There is no `clawhub login` here: without a matching trusted
+#     publisher the publish fails loudly instead of falling back to a token.
 #
 # Why npm first, ClawHub second: ClawHub source-links the GitHub repo at
 # the published commit, so npm being current is irrelevant to ClawHub's
 # build — but if ClawHub's scanner blocks, we want npm to have the version
 # already so users on `npm install` are unaffected. The recovery path
 # (`clawhub-only`) lets us retry ClawHub without re-tagging.
+#
+# Approval: both publish jobs run in the `npm-publish` environment, which
+# requires the maintainer. A normal release asks twice (npm, then ClawHub);
+# a clawhub-only recovery asks once. No path publishes without approval.
 
 on:
   push:
@@ -74,10 +86,7 @@ jobs:
   publish-npm:
     runs-on: ubuntu-latest
     needs: test
-    environment: npm-publish # human approval gate — one tap per release.
-    # publish-clawhub inherits this gate transitively via `needs`; the
-    # `clawhub-only` recovery dispatch is the one ungated path and is
-    # restricted to repo maintainers by workflow_dispatch itself.
+    environment: npm-publish # human approval gate (publish-clawhub has its own)
     permissions:
       id-token: write # OIDC exchange with npm (trusted publishing)
       contents: read
@@ -134,6 +143,13 @@ jobs:
         github.event_name == 'push'
         || (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'prod' || github.event.inputs.target == 'clawhub-only'))
       )
+    # Its own approval, same environment as npm: the clawhub-only recovery
+    # path used to be the one ungated publish. The environment is also what
+    # ClawHub's trusted publisher is bound to.
+    environment: npm-publish
+    permissions:
+      id-token: write # OIDC exchange with ClawHub (trusted publishing)
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -158,13 +174,11 @@ jobs:
       - name: Verify source-install cleanliness
         run: pnpm run test:install-source
 
+      # Pinned: this tool receives the publish credential, so a new release
+      # of it is a deliberate bump, not whatever `latest` is on release day.
+      # 0.25.0 is the version that published 0.8.0 and carries the OIDC path.
       - name: Install ClawHub CLI
-        run: npm install -g clawhub@latest
-
-      - name: Authenticate to ClawHub
-        env:
-          CLAWHUB_TOKEN: ${{ secrets.CLAWHUB_TOKEN }}
-        run: clawhub login --token "$CLAWHUB_TOKEN" --no-browser
+        run: npm install -g clawhub@0.25.0
 
       # Publish flags pinned explicitly rather than letting clawhub
       # auto-detect from package.json + git, because the CLI accepts every
