@@ -74,7 +74,7 @@ Two error lines mean the doorbell is not doing its job:
 
 ### `AUTH_FAIL`
 
-The server rejected the key during the handshake (invalid, rotated, account suspended or deleted). The socket is not dead: it retries a fresh HELLO every 10–15 minutes (`auth rejected — retrying slowly` is logged once at error level, then at debug), so an account that is reinstated or a key rotated back reconnects on its own. A new key still needs the steps below: the running gateway holds the old one.
+The server rejected the key during the handshake (close `1008 Invalid token`: invalid, rotated, account suspended or deleted). The socket is not dead: it retries a fresh HELLO every 10–15 minutes, so an account that is reinstated or a key rotated back reconnects on its own. The gateway logs one `AUTH_FAIL (…) — the server rejected the key; retrying every 10–15 min` error line when the run starts and `key accepted again — AUTH_FAIL cleared` at info when it ends; in between the account stays `blocked` / `not-linked` in `openclaw channels capabilities` and each retry is a debug line. A `1008` with any other reason (`HELLO frame required` after a stalled event loop or a slow network leg) is a slow handshake, not a rejection, and takes the normal backoff. A new key still needs the steps below: the running gateway holds the old one.
 
 1. `curl -H "Authorization: Bearer $AGENTCHAT_API_KEY" https://api.agentchat.me/v1/agents/me`
 2. Rotate or recover: `openclaw channels add agentchat` → **Replace the API key** → paste / register / **Recover a lost API key** (handle + email code). The wizard re-places the key in `.env` and the identity line.

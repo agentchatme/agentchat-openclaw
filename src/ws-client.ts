@@ -89,15 +89,32 @@ const MAX_FRAME_BYTES = 2 * 1024 * 1024
 // `stored` until this client acknowledges them — which it never does.
 const HELLO_CAPABILITIES: readonly string[] = ['ack']
 
-// WebSocket close codes that mean "the server rejected this session" when the
-// SERVER sends them during the handshake: the AgentChat server closes a
-// rejected HELLO with 1008 (policy violation). 4401/4403 are accepted as the
-// same signal. A close with one of these codes that this client initiated
-// itself carries no such meaning (see `closeInitiatedLocally`), and the same
-// code arriving after `hello.ok` (key rotated, account suspended) is an
-// eviction — the next HELLO is the evidence, so it takes the normal
-// reconnect path and lands here only if that HELLO is rejected too.
-const AUTH_CLOSE_CODES = new Set([1008, 4401, 4403])
+// Close codes that mean "the server rejected this session" when the SERVER
+// sends them during the handshake. 4401/4403 are unambiguous. 1008 (policy
+// violation) is not: the AgentChat server closes a rejected HELLO with
+// 1008 'Invalid token', but also uses 1008 for a handshake that was merely
+// too slow ('HELLO frame required', from its own 5 s timer) — which a
+// gateway event-loop stall or one slow network leg produces with a
+// perfectly good key. So 1008 counts as a rejection only with the server's
+// auth reason (the server's own close classification keys on reasons the
+// same way); any other 1008 takes the normal backoff. A close this client
+// initiated itself never counts (see `closeInitiatedLocally`), and these
+// codes after `hello.ok` (key rotated, account suspended) are an eviction:
+// the next HELLO is the evidence, so they take the normal reconnect path.
+const UNAMBIGUOUS_AUTH_CLOSE_CODES: ReadonlySet<number> = new Set([4401, 4403])
+const AMBIGUOUS_AUTH_CLOSE_CODE = 1008
+const SERVER_AUTH_CLOSE_REASONS: readonly string[] = ['invalid token']
+
+/**
+ * True iff a server-originated close with this code and reason, received
+ * during the handshake, means the key was rejected. Pure; exported for tests.
+ */
+export function isHandshakeRejection(code: number, reason: string): boolean {
+  if (UNAMBIGUOUS_AUTH_CLOSE_CODES.has(code)) return true
+  if (code !== AMBIGUOUS_AUTH_CLOSE_CODE) return false
+  const lower = reason.toLowerCase()
+  return SERVER_AUTH_CLOSE_REASONS.some((known) => lower.includes(known))
+}
 
 /** One parsed inbound server frame. */
 export interface InboundFrame {
@@ -544,8 +561,9 @@ export class AgentchatWsClient {
     const wasDraining = this.state.kind === 'DRAINING'
     const ours = this.closeInitiatedLocally
     this.closeInitiatedLocally = false
-    // Only a close the SERVER sent during the handshake is a rejection.
-    const serverAuthClose = !ours && AUTH_CLOSE_CODES.has(code)
+    // Only a close the SERVER sent during the handshake, with a code and
+    // reason that mean rejection, is a rejection.
+    const serverAuthClose = !ours && isHandshakeRejection(code, reason)
 
     this.stopHeartbeat()
     if (this.helloAckTimer) {

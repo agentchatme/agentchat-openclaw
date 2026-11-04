@@ -21,7 +21,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { EventEmitter } from 'node:events'
-import { AgentchatWsClient } from '../src/ws-client.js'
+import { AgentchatWsClient, isHandshakeRejection } from '../src/ws-client.js'
 import { parseChannelConfig, type AgentchatChannelConfig } from '../src/config-schema.js'
 import type { Logger } from '../src/log.js'
 import { createNoopMetrics } from '../src/metrics.js'
@@ -479,6 +479,64 @@ describe('AgentchatWsClient — auth failure', () => {
     expect(mockInstances).toHaveLength(1)
     timers.advance(AUTH_RETRY_MS)
     expect(mockInstances).toHaveLength(2)
+  })
+})
+
+describe('AgentchatWsClient — a handshake 1008 is a rejection only with the server\'s auth reason', () => {
+  // The server's own 5 s HELLO timer also closes with 1008. Normally our 4 s
+  // timer wins, but an event-loop stall or a slow leg lets the server's
+  // close arrive first; that is a slow handshake, not a bad key.
+  it.each(['HELLO frame required', 'HELLO frame required first', ''])(
+    '1008 %j during the handshake takes the normal backoff, never AUTH_FAIL',
+    (reason) => {
+      const { client, timers } = makeClient({
+        reconnect: { initialBackoffMs: 1000, maxBackoffMs: 30000, jitterRatio: 0 },
+      })
+      const states: string[] = []
+      const errors: string[] = []
+      client.on('stateChanged', (s) => states.push(s.kind))
+      client.on('error', (e) => errors.push(e.class_))
+      client.start()
+      mockInstances[0]!.doOpen()
+      mockInstances[0]!.close(1008, reason)
+      expect(client.getState().kind).toBe('DISCONNECTED')
+      expect(states).not.toContain('AUTH_FAIL')
+      expect(errors).not.toContain('terminal-auth')
+      timers.advance(1000)
+      expect(mockInstances).toHaveLength(2)
+      mockInstances[1]!.doOpen()
+      mockInstances[1]!.doMessage({ type: 'hello.ok', capabilities: ['ack'] })
+      expect(client.getState().kind).toBe('READY')
+    },
+  )
+
+  it.each([
+    [1008, 'Invalid token'],
+    [1008, 'invalid token'],
+    [4401, 'anything'],
+    [4403, ''],
+  ])('%i %j during the handshake is a rejection: AUTH_FAIL and the slow retry', (code, reason) => {
+    const { client, timers } = makeClient()
+    client.start()
+    mockInstances[0]!.doOpen()
+    mockInstances[0]!.close(code, reason)
+    expect(client.getState().kind).toBe('AUTH_FAIL')
+    timers.advance(60_000)
+    expect(mockInstances).toHaveLength(1)
+    timers.advance(AUTH_RETRY_MS - 60_000)
+    expect(mockInstances).toHaveLength(2)
+  })
+
+  it('isHandshakeRejection pins the contract', () => {
+    expect(isHandshakeRejection(1008, 'Invalid token')).toBe(true)
+    expect(isHandshakeRejection(1008, 'HELLO frame required')).toBe(false)
+    expect(isHandshakeRejection(1008, 'HELLO frame required first')).toBe(false)
+    expect(isHandshakeRejection(1008, '')).toBe(false)
+    expect(isHandshakeRejection(4401, '')).toBe(true)
+    expect(isHandshakeRejection(4403, 'x')).toBe(true)
+    expect(isHandshakeRejection(1006, 'Invalid token')).toBe(false)
+    expect(isHandshakeRejection(1000, 'Invalid token')).toBe(false)
+    expect(isHandshakeRejection(1001, 'Heartbeat timeout')).toBe(false)
   })
 })
 
