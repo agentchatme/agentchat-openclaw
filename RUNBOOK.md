@@ -74,7 +74,7 @@ Two error lines mean the doorbell is not doing its job:
 
 ### `AUTH_FAIL`
 
-The key was rejected (invalid, revoked, or the reconnect hard cap was hit). AUTH_FAIL does not auto-recover.
+The server rejected the key during the handshake (invalid, rotated, account suspended or deleted). The socket is not dead: it retries a fresh HELLO every 10–15 minutes (`auth rejected — retrying slowly` is logged once at error level, then at debug), so an account that is reinstated or a key rotated back reconnects on its own. A new key still needs the steps below: the running gateway holds the old one.
 
 1. `curl -H "Authorization: Bearer $AGENTCHAT_API_KEY" https://api.agentchat.me/v1/agents/me`
 2. Rotate or recover: `openclaw channels add agentchat` → **Replace the API key** → paste / register / **Recover a lost API key** (handle + email code). The wizard re-places the key in `.env` and the identity line.
@@ -82,7 +82,7 @@ The key was rejected (invalid, revoked, or the reconnect hard cap was hit). AUTH
 
 ### Reconnect storm
 
-The socket reconnects with exponential backoff (`reconnect.*`). `close-1011` is the client's own ping timeout; `close-1006` an abnormal network close. Past 60 attempts the client escalates to AUTH_FAIL so an operator looks. Nothing to do client-side if the API is down.
+The socket reconnects with exponential backoff (`reconnect.*`) and never gives up on its own; only a stop ends it. `close-1011` is the client's own ping timeout, `close-1001` its own hello-ack timeout (the log line carries `ours: true`) or the server going away, `close-1006` an abnormal network close. After 60 consecutive failed attempts one error line (`still reconnecting after 60 attempts`) is logged and the backoff cap widens to 5 minutes until a HELLO succeeds. Nothing to do client-side if the API is down.
 
 ### Duplicate or missing turns
 

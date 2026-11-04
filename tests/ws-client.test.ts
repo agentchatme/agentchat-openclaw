@@ -8,11 +8,13 @@
  *
  * What we cover:
  *   - Happy path: open → HELLO → hello.ok → READY, inbound frame delivery
- *   - Auth failure: hello.error → AUTH_FAIL + terminal error emitted
- *   - Reconnect: close → exponential backoff → second attempt
+ *   - Auth failure: a server-sent rejection → AUTH_FAIL + terminal-auth
+ *     error, then a slow retry that clears on the next hello.ok
+ *   - Our own closes (hello-ack timeout, ping timeout) are never auth
+ *   - Reconnect: close → exponential backoff → second attempt, forever
  *   - Heartbeat: ping at interval, pong clears timer, miss → PING_TIMEOUT
- *   - Graceful drain: stop(deadline) moves to DRAINING, then CLOSED
- *   - Hard cap: reconnect loop surfaces AUTH_FAIL after N attempts
+ *   - Graceful drain: stop(deadline) moves to DRAINING, then CLOSED, and
+ *     stop() is the only thing that ends the client
  *   - Malformed inbound → validation error, connection stays up
  *   - Ack capability: HELLO advertises `ack`; the client never acknowledges
  */
@@ -340,9 +342,13 @@ describe('AgentchatWsClient — happy path', () => {
   })
 })
 
+// With random=0.5 the ±jitterRatio (default 0.2) factor is exactly 1.0, so
+// the auth retry lands at its base interval of 12.5 minutes.
+const AUTH_RETRY_MS = 750_000
+
 describe('AgentchatWsClient — auth failure', () => {
-  it('moves to AUTH_FAIL on hello.error and emits terminal-auth', () => {
-    const { client } = makeClient()
+  it('moves to AUTH_FAIL on hello.error, emits terminal-auth, and retries later', () => {
+    const { client, timers } = makeClient()
     const errors: { class_: string; message: string }[] = []
     client.on('error', (e) => errors.push({ class_: e.class_, message: e.message }))
     client.start()
@@ -354,35 +360,191 @@ describe('AgentchatWsClient — auth failure', () => {
     })
     expect(client.getState().kind).toBe('AUTH_FAIL')
     expect(errors.some((e) => e.class_ === 'terminal-auth')).toBe(true)
+    // We hang up on a rejection frame with a normal close, not a policy code.
+    expect(sock.closedWith?.code).toBe(1000)
+    // The slow retry is scheduled even on this path.
+    timers.advance(AUTH_RETRY_MS - 1)
+    expect(mockInstances).toHaveLength(1)
+    timers.advance(1)
+    expect(mockInstances).toHaveLength(2)
+    expect(client.getState().kind).toBe('CONNECTING')
   })
 
-  it('close code 1008 during authenticating moves to AUTH_FAIL', () => {
-    const { client } = makeClient()
+  it('a server close 1008 during the handshake moves to AUTH_FAIL, retries every 10–15 min, and a later hello.ok clears it', () => {
+    const { client, timers } = makeClient()
+    const states: string[] = []
+    const errors: string[] = []
+    const auths: number[] = []
+    const closed: number[] = []
+    client.on('stateChanged', (s) => states.push(s.kind))
+    client.on('error', (e) => errors.push(e.class_))
+    client.on('authenticated', (at) => auths.push(at))
+    client.on('closed', () => closed.push(1))
+
     client.start()
-    const sock = mockInstances[0]!
-    sock.doOpen()
-    sock.close(1008, 'auth rejected')
+    mockInstances[0]!.doOpen()
+    mockInstances[0]!.close(1008, 'Invalid token')
     expect(client.getState().kind).toBe('AUTH_FAIL')
+    expect(errors).toContain('terminal-auth')
+    // AUTH_FAIL is not CLOSED: the client is waiting, not gone.
+    expect(closed).toHaveLength(0)
+
+    // Not the fast backoff (1 s) — the slow cadence.
+    timers.advance(60_000)
+    expect(mockInstances).toHaveLength(1)
+    timers.advance(AUTH_RETRY_MS - 60_000)
+    expect(mockInstances).toHaveLength(2)
+    expect(client.getState().kind).toBe('CONNECTING')
+
+    // Still rejected → back to AUTH_FAIL, another slow retry.
+    mockInstances[1]!.doOpen()
+    mockInstances[1]!.close(1008, 'Invalid token')
+    expect(client.getState().kind).toBe('AUTH_FAIL')
+    timers.advance(AUTH_RETRY_MS)
+    expect(mockInstances).toHaveLength(3)
+
+    // The account was reinstated: this HELLO succeeds and the client is READY.
+    mockInstances[2]!.doOpen()
+    mockInstances[2]!.doMessage({ type: 'hello.ok', capabilities: ['ack'] })
+    expect(client.getState().kind).toBe('READY')
+    expect(auths).toHaveLength(1)
+    expect(client.ackNegotiated).toBe(true)
+
+    // Recovery reset the attempt counter: a network drop now uses the fast
+    // backoff again (initialBackoffMs 1000, jitter factor 1.0).
+    mockInstances[2]!.close(1006, 'gone')
+    expect(client.getState().kind).toBe('DISCONNECTED')
+    timers.advance(1000)
+    expect(mockInstances).toHaveLength(4)
+    expect(states).not.toContain('CLOSED')
   })
 
-  it('reconfigured() clears AUTH_FAIL back to DISCONNECTED', () => {
-    const { client } = makeClient()
+  it('logs the rejection once at error level, then at debug while it persists', () => {
+    const { client, timers, logs } = makeClientWithLogs()
     client.start()
-    const sock = mockInstances[0]!
-    sock.doOpen()
-    sock.close(1008, 'auth rejected')
+    for (let i = 0; i < 3; i++) {
+      const sock = mockInstances[mockInstances.length - 1]!
+      sock.doOpen()
+      sock.close(1008, 'Invalid token')
+      expect(client.getState().kind).toBe('AUTH_FAIL')
+      timers.advance(AUTH_RETRY_MS)
+    }
+    const rejected = logs.filter((l) => l.msg?.startsWith('auth rejected'))
+    expect(rejected.map((l) => l.level)).toEqual(['error', 'debug', 'debug'])
+  })
+
+  it('an eviction after hello.ok (key rotated, account suspended) takes the normal reconnect; the next HELLO decides', () => {
+    const { client, timers } = makeClient()
+    client.start()
+    mockInstances[0]!.doOpen()
+    mockInstances[0]!.doMessage({ type: 'hello.ok', capabilities: ['ack'] })
+    expect(client.getState().kind).toBe('READY')
+
+    mockInstances[0]!.close(1008, 'API key rotated')
+    expect(client.getState().kind).toBe('DISCONNECTED')
+    timers.advance(1000)
+    expect(mockInstances).toHaveLength(2)
+
+    // The old key is really gone: the handshake is rejected → slow retry.
+    mockInstances[1]!.doOpen()
+    mockInstances[1]!.close(1008, 'Invalid token')
+    expect(client.getState().kind).toBe('AUTH_FAIL')
+    timers.advance(AUTH_RETRY_MS - 1)
+    expect(mockInstances).toHaveLength(2)
+    timers.advance(1)
+    expect(mockInstances).toHaveLength(3)
+  })
+
+  it('reconfigured() in AUTH_FAIL retries at once and cancels the slow timer', () => {
+    const { client, timers } = makeClient()
+    client.start()
+    mockInstances[0]!.doOpen()
+    mockInstances[0]!.close(1008, 'Invalid token')
     expect(client.getState().kind).toBe('AUTH_FAIL')
     client.reconfigured()
-    expect(client.getState().kind).toBe('DISCONNECTED')
+    expect(client.getState().kind).toBe('CONNECTING')
+    expect(mockInstances).toHaveLength(2)
+    // The slow timer was cancelled: nothing else opens while this attempt is pending.
+    timers.advance(AUTH_RETRY_MS * 2)
+    expect(mockInstances).toHaveLength(2)
   })
 
-  it('start() throws when in AUTH_FAIL without reconfigured', () => {
-    const { client } = makeClient()
+  it('start() in AUTH_FAIL is a no-op: the retry already pending is the plan', () => {
+    const { client, timers } = makeClient()
+    client.start()
+    mockInstances[0]!.doOpen()
+    mockInstances[0]!.close(1008, 'Invalid token')
+    expect(() => client.start()).not.toThrow()
+    expect(client.getState().kind).toBe('AUTH_FAIL')
+    expect(mockInstances).toHaveLength(1)
+    timers.advance(AUTH_RETRY_MS)
+    expect(mockInstances).toHaveLength(2)
+  })
+})
+
+describe('AgentchatWsClient — our own closes are never auth', () => {
+  it('hello-ack timeout schedules a reconnect with backoff, never AUTH_FAIL', () => {
+    const { client, timers } = makeClient({
+      reconnect: { initialBackoffMs: 1000, maxBackoffMs: 30000, jitterRatio: 0 },
+    })
+    const states: string[] = []
+    const errors: string[] = []
+    const closed: number[] = []
+    client.on('stateChanged', (s) => states.push(s.kind))
+    client.on('error', (e) => errors.push(e.class_))
+    client.on('closed', () => closed.push(1))
+
     client.start()
     const sock = mockInstances[0]!
     sock.doOpen()
-    sock.close(1008, 'auth rejected')
-    expect(() => client.start()).toThrow(/AUTH_FAIL/)
+    expect(client.getState().kind).toBe('AUTHENTICATING')
+
+    // No hello.ok within 4 s: we hang up ourselves.
+    timers.advance(4000)
+    expect(sock.closedWith?.reason).toBe('hello ack timeout')
+    expect(sock.closedWith?.code).not.toBe(1008)
+    expect(client.getState().kind).toBe('DISCONNECTED')
+    expect(states).not.toContain('AUTH_FAIL')
+    expect(errors).toContain('retry-transient')
+    expect(errors).not.toContain('terminal-auth')
+    expect(closed).toHaveLength(0)
+
+    // The normal backoff: a second attempt 1 s later, which succeeds.
+    timers.advance(1000)
+    expect(mockInstances).toHaveLength(2)
+    mockInstances[1]!.doOpen()
+    mockInstances[1]!.doMessage({ type: 'hello.ok', capabilities: ['ack'] })
+    expect(client.getState().kind).toBe('READY')
+  })
+
+  it('repeated hello-ack timeouts keep backing off and reconnecting', () => {
+    const { client, timers } = makeClient({
+      reconnect: { initialBackoffMs: 1000, maxBackoffMs: 30000, jitterRatio: 0 },
+    })
+    client.start()
+    for (let i = 0; i < 5; i++) {
+      const sock = mockInstances[mockInstances.length - 1]!
+      sock.doOpen()
+      timers.advance(4000) // hello-ack timeout → our close
+      expect(client.getState().kind).toBe('DISCONNECTED')
+      timers.advance(1000 * 2 ** i) // 1 s, 2 s, 4 s, 8 s, 16 s
+      expect(mockInstances).toHaveLength(i + 2)
+    }
+    expect(client.getState().kind).toBe('CONNECTING')
+  })
+
+  it('a close we initiated with an auth code is still ours (defence in depth)', () => {
+    // No production path sends 1008 from the client any more; this pins the
+    // rule that the classification is by origin, not by code.
+    const { client, timers } = makeClient()
+    client.start()
+    const sock = mockInstances[0]!
+    sock.doOpen()
+    // Reach into the private helper: it is the one place that marks a close as ours.
+    ;(client as unknown as { closeSocket: (code: number, reason: string) => void }).closeSocket(1008, 'ours')
+    expect(client.getState().kind).toBe('DISCONNECTED')
+    timers.advance(1000)
+    expect(mockInstances).toHaveLength(2)
   })
 })
 
@@ -540,25 +702,111 @@ describe('AgentchatWsClient — malformed inbound', () => {
   })
 })
 
-describe('AgentchatWsClient — reconnect hard cap', () => {
-  it('surfaces AUTH_FAIL after RECONNECT_HARD_CAP_ATTEMPTS exceeded', () => {
-    const { client, timers } = makeClient({
+describe('AgentchatWsClient — a long outage never ends the client', () => {
+  const LONG_OUTAGE_CAP_MS = 5 * 60_000
+
+  it('keeps reconnecting past 60 failed attempts with the cap widened to 5 minutes, logging one error line', () => {
+    const { client, timers, logs } = makeClientWithLogs({
       reconnect: { initialBackoffMs: 100, maxBackoffMs: 1000, jitterRatio: 0 },
     })
+    const states: string[] = []
+    client.on('stateChanged', (s) => states.push(s.kind))
     client.start()
-    // Loop closing immediately; we need 60 successful attempt-transitions
-    // before the hard cap bites. Each attempt: open → send close.
-    for (let i = 0; i < 65; i++) {
-      const sock = mockInstances[mockInstances.length - 1]
-      if (!sock) break
-      // Force-close before HELLO_OK so each counts as a reconnect.
-      if (sock.readyState !== MockWebSocket.CLOSED) {
-        sock.close(1006, 'flap')
-      }
-      // Advance enough for any scheduled backoff (max 1000ms with no jitter).
+
+    // Attempts 1..60 fail before hello.ok. Backoff saturates at 1 s.
+    for (let i = 0; i < 60; i++) {
+      mockInstances[mockInstances.length - 1]!.close(1006, 'flap')
       timers.advance(1000)
-      if (client.getState().kind === 'AUTH_FAIL') break
     }
+    // Attempt 61 is scheduled with the long-outage cap, so 1 s was not enough.
+    expect(mockInstances).toHaveLength(60)
+    expect(client.getState().kind).toBe('DISCONNECTED')
+    timers.advance(LONG_OUTAGE_CAP_MS - 1000 - 1)
+    expect(mockInstances).toHaveLength(60)
+    timers.advance(1)
+    expect(mockInstances).toHaveLength(61)
+    expect(client.getState().kind).toBe('CONNECTING')
+
+    // And it goes on: attempts 62..70, each 5 minutes apart.
+    for (let i = 0; i < 9; i++) {
+      mockInstances[mockInstances.length - 1]!.close(1006, 'flap')
+      timers.advance(LONG_OUTAGE_CAP_MS)
+    }
+    expect(mockInstances).toHaveLength(70)
+    expect(client.getState().kind).toBe('CONNECTING')
+    expect(states).not.toContain('AUTH_FAIL')
+    expect(states).not.toContain('CLOSED')
+
+    const stillReconnecting = logs.filter((l) => l.msg?.startsWith('still reconnecting after'))
+    expect(stillReconnecting).toHaveLength(1)
+    expect(stillReconnecting[0]!.level).toBe('error')
+
+    // The server is back: one hello.ok and everything is reset.
+    mockInstances[69]!.doOpen()
+    mockInstances[69]!.doMessage({ type: 'hello.ok', capabilities: ['ack'] })
+    expect(client.getState().kind).toBe('READY')
+    mockInstances[69]!.close(1006, 'flap')
+    timers.advance(100) // initialBackoffMs again, not 5 minutes
+    expect(mockInstances).toHaveLength(71)
+  })
+
+  it('a configured maxBackoffMs above 5 minutes is respected as the long-outage cap', () => {
+    const { client, timers } = makeClient({
+      reconnect: { initialBackoffMs: 10_000, maxBackoffMs: 300_000, jitterRatio: 0 },
+    })
+    client.start()
+    for (let i = 0; i < 61; i++) {
+      mockInstances[mockInstances.length - 1]!.close(1006, 'flap')
+      timers.advance(300_000)
+    }
+    expect(mockInstances).toHaveLength(62)
+  })
+})
+
+describe('AgentchatWsClient — only stop() ends the client', () => {
+  it('stop() in AUTH_FAIL moves to CLOSED, emits closed once, and no socket opens afterwards', () => {
+    const { client, timers } = makeClient()
+    const closed: number[] = []
+    client.on('closed', () => closed.push(1))
+    client.start()
+    mockInstances[0]!.doOpen()
+    mockInstances[0]!.close(1008, 'Invalid token')
     expect(client.getState().kind).toBe('AUTH_FAIL')
+
+    client.stop()
+    expect(client.getState().kind).toBe('CLOSED')
+    expect(closed).toHaveLength(1)
+    timers.advance(AUTH_RETRY_MS * 3)
+    expect(mockInstances).toHaveLength(1)
+    expect(() => client.start()).toThrow(/closed/)
+  })
+
+  it('stop() while a backoff is pending cancels it: no socket opens after closed', () => {
+    const { client, timers } = makeClient({
+      reconnect: { initialBackoffMs: 1000, maxBackoffMs: 30000, jitterRatio: 0 },
+    })
+    const closed: number[] = []
+    client.on('closed', () => closed.push(1))
+    client.start()
+    mockInstances[0]!.close(1006, 'gone')
+    expect(client.getState().kind).toBe('DISCONNECTED')
+
+    client.stop()
+    expect(client.getState().kind).toBe('CLOSED')
+    expect(closed).toHaveLength(1)
+    timers.advance(60_000)
+    expect(mockInstances).toHaveLength(1)
+  })
+
+  it('start() while a backoff is pending does not open a second socket', () => {
+    const { client, timers } = makeClient({
+      reconnect: { initialBackoffMs: 1000, maxBackoffMs: 30000, jitterRatio: 0 },
+    })
+    client.start()
+    mockInstances[0]!.close(1006, 'gone')
+    client.start()
+    expect(mockInstances).toHaveLength(1)
+    timers.advance(1000)
+    expect(mockInstances).toHaveLength(2)
   })
 })

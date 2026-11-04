@@ -12,12 +12,16 @@
  *   DEGRADED        — heartbeat missed or send buffer full; still connected but impaired
  *   DRAINING        — SIGTERM received; flush in-flight sends, then close
  *   CLOSED          — terminal after clean shutdown
- *   AUTH_FAIL       — terminal after 401/403; operator action required (rotate key)
+ *   AUTH_FAIL       — the server rejected the key; the runtime retries slowly
+ *                     (keys get rotated back, accounts get reinstated)
  *
  * Invariants:
- *   - From AUTH_FAIL, no event can move us back to CONNECTING without
- *     an explicit RECONFIGURED event (operator rotated key).
- *   - From CLOSED, only SHUTDOWN is a no-op; anything else is a bug.
+ *   - CLOSED is the only terminal state: it is entered only by DRAIN_REQUESTED
+ *     / DRAIN_COMPLETED (the caller's own stop), never by anything the
+ *     network did. Every other state has a way back to CONNECTING.
+ *   - From AUTH_FAIL, CONNECT is the slow retry and RECONFIGURED is the
+ *     operator's "retry now"; both lead back to a fresh HELLO.
+ *   - From CLOSED, every event is a no-op.
  *   - DRAINING has a deadline (ms timestamp) after which we force-close.
  */
 
@@ -60,10 +64,6 @@ export function transition(state: ConnectionState, event: ConnectionEvent): Conn
         return { kind: 'CONNECTING', attempt: event.attempt, startedAt: event.now }
       }
       if (event.type === 'DRAIN_REQUESTED') return { kind: 'CLOSED' }
-      // Reconnect hard-cap elevation — the runtime has given up on transport
-      // retries and wants to force operator attention. Treat the same as a
-      // genuine auth reject: terminal until RECONFIGURED.
-      if (event.type === 'AUTH_REJECTED') return { kind: 'AUTH_FAIL', reason: event.reason }
       return state
     }
 
@@ -115,7 +115,11 @@ export function transition(state: ConnectionState, event: ConnectionEvent): Conn
     }
 
     case 'AUTH_FAIL': {
-      // Only an explicit reconfig (operator rotated key) can leave AUTH_FAIL.
+      // The slow retry: the runtime tries a fresh HELLO on its own schedule.
+      if (event.type === 'CONNECT') {
+        return { kind: 'CONNECTING', attempt: event.attempt, startedAt: event.now }
+      }
+      // Operator says the key changed — back to DISCONNECTED for an immediate retry.
       if (event.type === 'RECONFIGURED') return { kind: 'DISCONNECTED' }
       if (event.type === 'DRAIN_REQUESTED') return { kind: 'CLOSED' }
       return state
@@ -137,7 +141,10 @@ export function shouldReconnect(state: ConnectionState): boolean {
   return state.kind === 'DISCONNECTED'
 }
 
-/** True iff the state is terminal and no further transitions are expected. */
+/**
+ * True iff the state is terminal and no further transitions are expected.
+ * Only the caller's own stop ends the client; AUTH_FAIL keeps retrying.
+ */
 export function isTerminal(state: ConnectionState): boolean {
-  return state.kind === 'CLOSED' || state.kind === 'AUTH_FAIL'
+  return state.kind === 'CLOSED'
 }
