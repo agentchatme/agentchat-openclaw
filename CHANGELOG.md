@@ -7,7 +7,7 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
-## [Unreleased]
+## 0.8.1 — 2026-11-04
 
 ### Fixed
 
