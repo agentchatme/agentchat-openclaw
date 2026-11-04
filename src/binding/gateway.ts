@@ -174,6 +174,13 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           gateFailOpen: readReplyGateFailOpenFromEnv(),
           ...(gateTimeoutMs !== undefined ? { gateTimeoutMs } : {}),
         })
+        // True from the first AUTH_FAIL until a HELLO is accepted again (or
+        // the account stops). The socket retries a rejected key every 10–15
+        // minutes; each retry walks CONNECTING → AUTHENTICATING → AUTH_FAIL
+        // and re-emits terminal-auth. For the operator that is one
+        // situation, so it is one error line and one steady `blocked`
+        // status, not a health flap and an error every cycle.
+        let authBlocked = false
         return {
           invoker,
           handlers: {
@@ -188,25 +195,49 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
               void catchUpInvites(ctx.accountId, config, invoker, logger)
             },
             onError: (err) => {
-              ctx.log?.warn?.(`[agentchat:${ctx.accountId}] runtime error: ${err.message} (class=${err.class_})`)
+              // The AUTH_FAIL state change already said it at error level.
+              const level = err.class_ === 'terminal-auth' && authBlocked ? 'debug' : 'warn'
+              ctx.log?.[level]?.(`[agentchat:${ctx.accountId}] runtime error: ${err.message} (class=${err.class_})`)
             },
             onStateChanged: (next) => {
-              const running = next.kind !== 'CLOSED' && next.kind !== 'AUTH_FAIL'
+              if (next.kind === 'AUTH_FAIL') {
+                if (authBlocked) {
+                  ctx.log?.debug?.(`[agentchat:${ctx.accountId}] still AUTH_FAIL (${next.reason}) — next retry in 10–15 min`)
+                  return
+                }
+                authBlocked = true
+                ctx.log?.error?.(
+                  `[agentchat:${ctx.accountId}] AUTH_FAIL (${next.reason}) — the server rejected the key; retrying every 10–15 min; rotate the key or re-run openclaw channels add agentchat`,
+                )
+                ctx.setStatus(
+                  withLifecycle(
+                    { ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastDisconnect: { at: Date.now(), error: `AUTH_FAIL: ${next.reason}` } },
+                    'blocked',
+                  ),
+                )
+                return
+              }
+              if (authBlocked && next.kind !== 'READY' && next.kind !== 'CLOSED') {
+                // A slow retry in flight (or the network down meanwhile).
+                // Blocked until a HELLO is accepted; the status holds.
+                ctx.log?.debug?.(`[agentchat:${ctx.accountId}] AUTH_FAIL retry: ${next.kind.toLowerCase()}`)
+                return
+              }
+              if (authBlocked) {
+                authBlocked = false
+                if (next.kind === 'READY') ctx.log?.info?.(`[agentchat:${ctx.accountId}] key accepted again — AUTH_FAIL cleared`)
+              }
+              const running = next.kind !== 'CLOSED'
               const connected = next.kind === 'READY' || next.kind === 'DEGRADED'
               const lifecycle: Lifecycle =
                 next.kind === 'READY' || next.kind === 'DEGRADED'
                   ? 'ready'
-                  : next.kind === 'AUTH_FAIL'
-                    ? 'blocked'
-                    : next.kind === 'CLOSED'
-                      ? 'stopped'
-                      : runtime.getHealth().counters.knocks > 0
-                        ? 'recovering'
-                        : 'starting'
+                  : next.kind === 'CLOSED'
+                    ? 'stopped'
+                    : runtime.getHealth().counters.knocks > 0
+                      ? 'recovering'
+                      : 'starting'
               ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running, connected, statusState: statusStateFor(next.kind) }, lifecycle))
-              if (next.kind === 'AUTH_FAIL') {
-                ctx.log?.error?.(`[agentchat:${ctx.accountId}] AUTH_FAIL — rotate the key or re-run openclaw channels add agentchat`)
-              }
             },
           },
         }

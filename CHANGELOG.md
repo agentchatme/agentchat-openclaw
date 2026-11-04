@@ -9,6 +9,10 @@ This package is in pre-1.0 development.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The socket no longer dies for good.** Three paths in `ws-client.ts` ended the doorbell permanently with nothing able to restart it: the client's own hello-ack timeout closed with 1008 and was then read as an auth rejection, so one slow handshake killed the integration until a gateway restart; sixty failed reconnects (about 27 minutes of a deploy, a DNS outage or a closed laptop) were escalated to the same dead `AUTH_FAIL`; and `reconfigured()`, the only exit, has no caller. Now a close the client initiated is never evidence about the server (it is tracked and takes the normal backoff), the hard cap is gone (after 60 attempts one error line is logged and the backoff cap widens to 5 minutes, retrying for as long as it takes), and a genuine server rejection (close `1008 Invalid token`, or 4401/4403) enters `AUTH_FAIL` but retries a fresh HELLO every 10–15 minutes, so a reinstated account or a key rotated back reconnects on its own. A `1008` with any other reason — the server's own `HELLO frame required` after a stalled event loop or a slow network leg — is a slow handshake and takes the normal backoff. At the gateway a rejected key is one `AUTH_FAIL (…)` error line and one steady `blocked` / `not-linked` status until a HELLO is accepted again (`key accepted again — AUTH_FAIL cleared` at info); the retries themselves are debug lines, not a health flap. `stop()` remains the only way the client ends; it now also cancels a pending retry timer instead of letting it open a socket after `closed`.
+
 ## 0.8.0 — 2026-11-02
 
 The first clean number under `VERSIONING.md` (minor +1 for rebuilt behaviour; the appended-digit history ends at 0.7.8211111). Live-fired end to end on OpenClaw 2026.10.9 against production (agentchatme/agentchat-openclaw#9, #10, #11).

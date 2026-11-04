@@ -26,9 +26,13 @@
  *     is what settles delivery. There is no code path in this module that
  *     can emit a frame other than HELLO: delivery is judged, never
  *     confirmed by the transport.
- *   - `RECONNECT_HARD_CAP_ATTEMPTS` guards against runaway reconnect loops
- *     after catastrophic network events; crosses into `AUTH_FAIL` so the
- *     operator sees a clear signal instead of silent retry forever.
+ *   - The client never gives up on its own. Only `stop()` ends it. A close
+ *     the client itself initiated (hello-ack timeout, ping timeout, its own
+ *     drain) is never read as a verdict from the server; a server-originated
+ *     auth close enters `AUTH_FAIL` and retries slowly, because keys get
+ *     rotated back and accounts get reinstated. A long outage widens the
+ *     backoff cap to `RECONNECT_LONG_OUTAGE_BACKOFF_MS` and logs one error
+ *     line so an operator sees it without a log flood.
  *   - Frame parsing is defensive: malformed JSON, unknown `type`, missing
  *     payload — all classified as `validation` errors (non-terminal for
  *     the connection, but dropped with a metric + log).
@@ -62,11 +66,19 @@ import { PACKAGE_VERSION } from './version.js'
 // ourselves 4s so a clean close + reconnect happens before the server drops.
 const HELLO_ACK_TIMEOUT_MS = 4_000
 
-// Reconnect attempts above this threshold almost certainly mean the network
-// is partitioned from the AgentChat control plane, or the API key was
-// revoked at the edge (without a terminal 401). Surface AUTH_FAIL so the
-// operator has a clear signal rather than silent forever-retry.
-const RECONNECT_HARD_CAP_ATTEMPTS = 60
+// After this many consecutive failed attempts (about half an hour at the
+// default 30 s cap) the outage is long: one error line is logged for the
+// operator and the backoff cap widens to RECONNECT_LONG_OUTAGE_BACKOFF_MS.
+// Retrying continues until the server is back — a deploy, a DNS outage or a
+// laptop closed overnight is not a reason to stay dead afterwards.
+const RECONNECT_LONG_OUTAGE_AFTER_ATTEMPTS = 60
+const RECONNECT_LONG_OUTAGE_BACKOFF_MS = 5 * 60_000
+
+// After the server rejects the key, retry a fresh HELLO at this cadence
+// (jittered by `reconnect.jitterRatio`: 10–15 min at the default 0.2). A
+// rejected key is not a dead end: keys get rotated back, suspended accounts
+// get reinstated, and a server-side lookup failure also presents as a reject.
+const AUTH_RETRY_INTERVAL_MS = 750_000
 
 // Maximum frame size we'll accept from the server. Matches AgentChat's
 // own server-side outbound cap (2 MiB — large attachments go via the REST
@@ -77,10 +89,32 @@ const MAX_FRAME_BYTES = 2 * 1024 * 1024
 // `stored` until this client acknowledges them — which it never does.
 const HELLO_CAPABILITIES: readonly string[] = ['ack']
 
-// WebSocket close codes we treat as auth failures (terminal until operator
-// reconfigures). 1008 = policy violation; AgentChat uses it + 4401/4403 for
-// auth-related rejects. Other 4xxx codes are treated as retry-transient.
-const AUTH_CLOSE_CODES = new Set([1008, 4401, 4403])
+// Close codes that mean "the server rejected this session" when the SERVER
+// sends them during the handshake. 4401/4403 are unambiguous. 1008 (policy
+// violation) is not: the AgentChat server closes a rejected HELLO with
+// 1008 'Invalid token', but also uses 1008 for a handshake that was merely
+// too slow ('HELLO frame required', from its own 5 s timer) — which a
+// gateway event-loop stall or one slow network leg produces with a
+// perfectly good key. So 1008 counts as a rejection only with the server's
+// auth reason (the server's own close classification keys on reasons the
+// same way); any other 1008 takes the normal backoff. A close this client
+// initiated itself never counts (see `closeInitiatedLocally`), and these
+// codes after `hello.ok` (key rotated, account suspended) are an eviction:
+// the next HELLO is the evidence, so they take the normal reconnect path.
+const UNAMBIGUOUS_AUTH_CLOSE_CODES: ReadonlySet<number> = new Set([4401, 4403])
+const AMBIGUOUS_AUTH_CLOSE_CODE = 1008
+const SERVER_AUTH_CLOSE_REASONS: readonly string[] = ['invalid token']
+
+/**
+ * True iff a server-originated close with this code and reason, received
+ * during the handshake, means the key was rejected. Pure; exported for tests.
+ */
+export function isHandshakeRejection(code: number, reason: string): boolean {
+  if (UNAMBIGUOUS_AUTH_CLOSE_CODES.has(code)) return true
+  if (code !== AMBIGUOUS_AUTH_CLOSE_CODE) return false
+  const lower = reason.toLowerCase()
+  return SERVER_AUTH_CLOSE_REASONS.some((known) => lower.includes(known))
+}
 
 /** One parsed inbound server frame. */
 export interface InboundFrame {
@@ -96,7 +130,7 @@ export interface WsClientEvents {
   error: (error: AgentChatChannelError) => void
   /** Fired once per `hello.ok` — the runtime turns it into the connect knock. */
   authenticated: (at: UnixMillis) => void
-  /** Fired after a clean close + CLOSED state (after stop() or terminal auth failure). */
+  /** Fired once the client reached CLOSED — only ever after `stop()`. */
   closed: () => void
 }
 
@@ -150,6 +184,15 @@ export class AgentchatWsClient {
   private ws: WsInstance | null = null
   private attempt = 0
   private _ackNegotiated = false
+  /**
+   * Set by `closeSocket()` before it closes the current socket, read and
+   * cleared by `handleClose()`. A close this client asked for says nothing
+   * about the server, whatever code travelled with it.
+   */
+  private closeInitiatedLocally = false
+  /** One error line per long outage / per run of rejected keys, then debug. */
+  private longOutageAnnounced = false
+  private authFailAnnounced = false
 
   private helloAckTimer: NodeJS.Timeout | null = null
   private pingTimer: NodeJS.Timeout | null = null
@@ -199,22 +242,15 @@ export class AgentchatWsClient {
   }
 
   /**
-   * Kick off connection. No-op if already connecting, authenticating, or
-   * ready. Throws on `AUTH_FAIL` — the caller must call `reconfigured()`
-   * after rotating the API key before retrying.
+   * Kick off connection. No-op if already connecting, authenticating, ready,
+   * or waiting out a backoff / auth retry. Throws only on `CLOSED`.
    */
   start(): void {
-    if (this.state.kind === 'AUTH_FAIL') {
-      throw new AgentChatChannelError(
-        'terminal-auth',
-        'cannot start: channel is in AUTH_FAIL — rotate api key and call reconfigured()',
-      )
-    }
     if (this.state.kind === 'CLOSED') {
       throw new Error('cannot start: client is closed. Create a new instance.')
     }
-    if (this.state.kind !== 'DISCONNECTED') {
-      // Already in progress — nothing to do.
+    if (this.state.kind !== 'DISCONNECTED' || this.reconnectTimer) {
+      // Already in progress (AUTH_FAIL has its own retry timer) — nothing to do.
       return
     }
     this.openSocket(1)
@@ -259,13 +295,15 @@ export class AgentchatWsClient {
   }
 
   /**
-   * Signal that operator has rotated the API key. Transitions from
-   * AUTH_FAIL back to DISCONNECTED; the next `start()` call will attempt
-   * a fresh HELLO with the current config.
+   * Signal that the operator has rotated the API key: leave AUTH_FAIL and
+   * retry now instead of waiting for the slow retry timer. A no-op in every
+   * other state (the client is already connecting or connected).
    */
   reconfigured(): void {
     if (this.state.kind !== 'AUTH_FAIL') return
+    this.clearReconnectTimer()
     this.applyEvent({ type: 'RECONFIGURED' })
+    this.openSocket(1)
   }
 
   on<E extends keyof WsClientEvents>(event: E, handler: Listener<E>): () => void {
@@ -278,7 +316,9 @@ export class AgentchatWsClient {
   // ─── Internals: socket lifecycle ─────────────────────────────────────
 
   private openSocket(attempt: number): void {
+    if (this.state.kind === 'CLOSED') return
     this.attempt = attempt
+    this.closeInitiatedLocally = false
     const now = this.now()
     this.applyEvent({ type: 'CONNECT', now, attempt })
 
@@ -356,13 +396,15 @@ export class AgentchatWsClient {
     }
 
     // Bound the handshake. Server has a 5s HELLO_TIMEOUT; we stay under.
+    // 1001 (going away): a slow handshake is our own decision to hang up,
+    // not a policy verdict, and `handleClose` sees it as ours either way.
     this.helloAckTimer = this._setTimeout(() => {
       this.helloAckTimer = null
       this.logger.warn({ timeoutMs: HELLO_ACK_TIMEOUT_MS }, 'hello ack timeout')
       this.emitError(
         new AgentChatChannelError('retry-transient', 'hello ack timeout'),
       )
-      this.closeSocket(1008, 'hello ack timeout')
+      this.closeSocket(1001, 'hello ack timeout')
     }, HELLO_ACK_TIMEOUT_MS)
   }
 
@@ -478,28 +520,50 @@ export class AgentchatWsClient {
     this.logger.info({ ackNegotiated: this._ackNegotiated }, 'hello.ok')
     this.applyEvent({ type: 'HELLO_OK', now })
     this.attempt = 0
+    this.longOutageAnnounced = false
+    this.authFailAnnounced = false
     this.startHeartbeat()
     this.emit('authenticated', now)
   }
 
+  /** The server answered HELLO with a rejection frame (not a close). */
   private handleAuthRejected(reason: string): void {
     if (this.helloAckTimer) {
       this._clearTimeout(this.helloAckTimer)
       this.helloAckTimer = null
     }
-    this.logger.error({ reason }, 'auth rejected — moving to AUTH_FAIL')
+    // Enter AUTH_FAIL first so the socket's own close event (synchronous
+    // in some transports) finds the retry already scheduled and does nothing.
+    this.enterAuthFail(reason)
+    this.closeSocket(1000, 'auth rejected')
+  }
+
+  /**
+   * The server rejected this key. AUTH_FAIL is not the end: retry a fresh
+   * HELLO every `AUTH_RETRY_INTERVAL_MS` (jittered). The first rejection in a
+   * run logs at error so an operator sees it; the following ones at debug.
+   */
+  private enterAuthFail(reason: string): void {
+    this.logger[this.authFailAnnounced ? 'debug' : 'error'](
+      { reason, retryIntervalMs: AUTH_RETRY_INTERVAL_MS, attempt: this.attempt },
+      'auth rejected — retrying slowly until the key is accepted again',
+    )
+    this.authFailAnnounced = true
     this.applyEvent({ type: 'AUTH_REJECTED', reason })
     this.emitError(
       new AgentChatChannelError('terminal-auth', `auth rejected: ${reason}`),
     )
-    this.closeSocket(1008, 'auth rejected')
+    this.scheduleAuthRetry()
   }
 
   private handleClose(code: number, reason: string): void {
-    const now = this.now()
     const wasAuthenticating = this.state.kind === 'AUTHENTICATING'
     const wasDraining = this.state.kind === 'DRAINING'
-    const authClass = AUTH_CLOSE_CODES.has(code)
+    const ours = this.closeInitiatedLocally
+    this.closeInitiatedLocally = false
+    // Only a close the SERVER sent during the handshake, with a code and
+    // reason that mean rejection, is a rejection.
+    const serverAuthClose = !ours && isHandshakeRejection(code, reason)
 
     this.stopHeartbeat()
     if (this.helloAckTimer) {
@@ -511,23 +575,23 @@ export class AgentchatWsClient {
 
     // Widened read: TS narrows `this.state` from the comparisons above and
     // would otherwise reject this check (see the same note in `stop()`).
-    if ((this.state as ConnectionState).kind === 'CLOSED') {
+    const kind = (this.state as ConnectionState).kind
+    if (kind === 'CLOSED') {
       // `drainCompleted()` already moved us to CLOSED and emitted `closed`;
       // this is the socket's own close event arriving afterwards. Nothing to
       // transition, nothing to emit twice.
       this.logger.debug({ code, reason }, 'socket closed after CLOSED — no-op')
       return
     }
+    if (kind === 'AUTH_FAIL') {
+      // `handleAuthRejected` already entered AUTH_FAIL and scheduled the
+      // retry; this is our own close of that socket arriving afterwards.
+      this.logger.debug({ code, reason }, 'socket closed after AUTH_FAIL — retry already scheduled')
+      return
+    }
 
-    if (authClass && wasAuthenticating) {
-      this.applyEvent({ type: 'AUTH_REJECTED', reason: `close ${code}: ${reason}` })
-      this.emitError(
-        new AgentChatChannelError(
-          'terminal-auth',
-          `socket closed with auth code ${code}: ${reason}`,
-        ),
-      )
-      this.emit('closed')
+    if (serverAuthClose && wasAuthenticating) {
+      this.enterAuthFail(`close ${code}: ${reason}`)
       return
     }
 
@@ -539,7 +603,7 @@ export class AgentchatWsClient {
     }
 
     this.logger.info(
-      { code, reason, attempt: this.attempt },
+      { code, reason, ours, attempt: this.attempt },
       'socket closed — scheduling reconnect',
     )
     this.scheduleReconnect(`close-${code}`)
@@ -547,6 +611,8 @@ export class AgentchatWsClient {
 
   private closeSocket(code: number, reason: string): void {
     if (!this.ws) return
+    // Mark before closing: `ws` may emit `close` synchronously from here.
+    this.closeInitiatedLocally = true
     try {
       this.ws.close(code, reason)
     } catch {
@@ -623,14 +689,17 @@ export class AgentchatWsClient {
 
     const nextAttempt = this.attempt + 1
 
-    if (nextAttempt > RECONNECT_HARD_CAP_ATTEMPTS) {
-      const msg = `reconnect hard cap (${RECONNECT_HARD_CAP_ATTEMPTS}) reached`
-      this.logger.error({ attempt: nextAttempt }, msg)
-      this.applyEvent({ type: 'AUTH_REJECTED', reason: msg })
-      this.emitError(
-        new AgentChatChannelError('terminal-auth', msg),
+    if (nextAttempt > RECONNECT_LONG_OUTAGE_AFTER_ATTEMPTS && !this.longOutageAnnounced) {
+      // Once per outage, at error level: the operator should know the
+      // control plane has been unreachable for this long. Retrying goes on.
+      this.longOutageAnnounced = true
+      this.logger.error(
+        {
+          attempt: nextAttempt,
+          maxBackoffMs: Math.max(this.config.reconnect.maxBackoffMs, RECONNECT_LONG_OUTAGE_BACKOFF_MS),
+        },
+        `still reconnecting after ${RECONNECT_LONG_OUTAGE_AFTER_ATTEMPTS} attempts — backing off further, not giving up`,
       )
-      return
     }
 
     const delay = this.computeReconnectDelay(nextAttempt)
@@ -646,19 +715,52 @@ export class AgentchatWsClient {
     }, delay)
   }
 
+  /** AUTH_FAIL's own cadence: a fresh HELLO every AUTH_RETRY_INTERVAL_MS, jittered. */
+  private scheduleAuthRetry(): void {
+    if (this.state.kind !== 'AUTH_FAIL') return
+    this.clearReconnectTimer()
+    const nextAttempt = this.attempt + 1
+    const delay = this.jittered(AUTH_RETRY_INTERVAL_MS)
+    this.metrics.incReconnect({ reason: 'auth-retry' })
+    this.logger.debug({ attempt: nextAttempt, delayMs: delay }, 'scheduling auth retry')
+    this.reconnectTimer = this._setTimeout(() => {
+      this.reconnectTimer = null
+      this.openSocket(nextAttempt)
+    }, delay)
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      this._clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+  }
+
   private computeReconnectDelay(attempt: number): number {
-    const { initialBackoffMs, maxBackoffMs, jitterRatio } = this.config.reconnect
+    const { initialBackoffMs, maxBackoffMs } = this.config.reconnect
     // `attempt` is the total connection count (1 = initial connect, 2+ =
     // reconnects). Backoff scales with the *reconnect* count, so the first
     // reconnect uses `initialBackoffMs * 2^0 = initialBackoffMs`.
     const reconnectCount = Math.max(1, attempt - 1)
     const exp = initialBackoffMs * Math.pow(2, Math.min(reconnectCount - 1, 20))
-    const capped = Math.min(exp, maxBackoffMs)
-    // Symmetric ±jitterRatio. Thundering-herd-safe: a fleet that all drops
-    // at the same instant re-enters the connect queue spread across
-    // capped * [1-jitterRatio, 1+jitterRatio].
+    // A long outage widens the cap: a down control plane is polled every few
+    // minutes instead of every `maxBackoffMs`, for as long as it takes.
+    const cap =
+      attempt > RECONNECT_LONG_OUTAGE_AFTER_ATTEMPTS
+        ? Math.max(maxBackoffMs, RECONNECT_LONG_OUTAGE_BACKOFF_MS)
+        : maxBackoffMs
+    return this.jittered(Math.min(exp, cap))
+  }
+
+  /**
+   * Symmetric ±`jitterRatio`. Thundering-herd-safe: a fleet that all drops
+   * at the same instant re-enters the connect queue spread across
+   * ms * [1-jitterRatio, 1+jitterRatio].
+   */
+  private jittered(ms: number): number {
+    const { jitterRatio } = this.config.reconnect
     const jitter = 1 - jitterRatio + this.random() * 2 * jitterRatio
-    return Math.max(0, Math.floor(capped * jitter))
+    return Math.max(0, Math.floor(ms * jitter))
   }
 
   // ─── Internals: drain ────────────────────────────────────────────────
@@ -708,6 +810,11 @@ export class AgentchatWsClient {
       return
     }
     this.state = next
+    if (next.kind === 'CLOSED') {
+      // A backoff or auth-retry timer pending at stop() must die with the
+      // client, or it would open a fresh socket after `closed` was emitted.
+      this.clearReconnectTimer()
+    }
     this.metrics.setConnectionState(next.kind)
     this.logger.info(
       { from: prev.kind, to: next.kind, event: event.type },

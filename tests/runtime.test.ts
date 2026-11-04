@@ -226,6 +226,22 @@ describe('AgentchatChannelRuntime — lifecycle', () => {
     expect(transitions).toContain('CLOSED')
   })
 
+  it('stop() resolves from AUTH_FAIL: a rejected key is not a dead end for the lifecycle', async () => {
+    const errs: string[] = []
+    const transitions: string[] = []
+    const runtime = makeRuntime({ onError: (e) => errs.push(e.class_), onStateChanged: (s) => transitions.push(s.kind) })
+    runtime.start()
+    const sock = mockInstances[0]!
+    sock.doOpen()
+    sock.close(1008, 'Invalid token')
+    expect(runtime.getHealth().state.kind).toBe('AUTH_FAIL')
+    expect(runtime.getHealth().authenticated).toBe(false)
+    expect(errs).toContain('terminal-auth')
+    await runtime.stop()
+    expect(runtime.getHealth().state.kind).toBe('CLOSED')
+    expect(transitions).toEqual(['CONNECTING', 'AUTHENTICATING', 'AUTH_FAIL', 'CLOSED'])
+  })
+
   it('onError fires on a malformed frame and a throwing onError is swallowed', () => {
     const errs: string[] = []
     const runtime = makeRuntime({

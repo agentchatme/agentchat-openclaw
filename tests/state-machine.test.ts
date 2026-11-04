@@ -33,21 +33,44 @@ describe('state machine — happy path', () => {
 })
 
 describe('state machine — failure paths', () => {
-  it('CONNECTING → AUTH_FAIL on AUTH_REJECTED is terminal', () => {
+  it('AUTHENTICATING → AUTH_FAIL on AUTH_REJECTED is not terminal', () => {
     const s = transition(
-      { kind: 'CONNECTING', attempt: 1, startedAt: NOW },
+      { kind: 'AUTHENTICATING', startedAt: NOW },
       { type: 'AUTH_REJECTED', reason: 'invalid-api-key' },
     )
     expect(s.kind).toBe('AUTH_FAIL')
-    expect(isTerminal(s)).toBe(true)
+    expect(isTerminal(s)).toBe(false)
+    expect(canSend(s)).toBe(false)
   })
 
-  it('AUTH_FAIL is sticky — only RECONFIGURED can exit', () => {
+  it('AUTH_FAIL leaves on CONNECT (slow retry), RECONFIGURED or DRAIN_REQUESTED only', () => {
     const authFail: ConnectionState = { kind: 'AUTH_FAIL', reason: 'expired' }
-    expect(transition(authFail, { type: 'CONNECT', now: NOW, attempt: 1 })).toEqual(authFail)
+    expect(transition(authFail, { type: 'CONNECT', now: NOW, attempt: 7 })).toEqual({
+      kind: 'CONNECTING',
+      attempt: 7,
+      startedAt: NOW,
+    })
+    expect(transition(authFail, { type: 'RECONFIGURED' })).toEqual({ kind: 'DISCONNECTED' })
+    expect(transition(authFail, { type: 'DRAIN_REQUESTED', now: NOW, deadline: NOW + 1 })).toEqual({ kind: 'CLOSED' })
     expect(transition(authFail, { type: 'SOCKET_OPEN', now: NOW })).toEqual(authFail)
     expect(transition(authFail, { type: 'HELLO_OK', now: NOW })).toEqual(authFail)
-    expect(transition(authFail, { type: 'RECONFIGURED' })).toEqual({ kind: 'DISCONNECTED' })
+    expect(transition(authFail, { type: 'SOCKET_CLOSED', code: 1006, reason: '' })).toEqual(authFail)
+  })
+
+  it('nothing the network does reaches CLOSED — only the caller\'s own drain', () => {
+    const live: ConnectionState[] = [
+      { kind: 'DISCONNECTED' },
+      { kind: 'CONNECTING', attempt: 1, startedAt: NOW },
+      { kind: 'AUTHENTICATING', startedAt: NOW },
+      { kind: 'READY', connectedAt: NOW },
+      { kind: 'DEGRADED', since: NOW, reason: 'ping-timeout' },
+      { kind: 'AUTH_FAIL', reason: 'bad-key' },
+    ]
+    for (const state of live) {
+      expect(isTerminal(state)).toBe(false)
+      expect(transition(state, { type: 'SOCKET_CLOSED', code: 1008, reason: 'Invalid token' }).kind).not.toBe('CLOSED')
+      expect(transition(state, { type: 'AUTH_REJECTED', reason: 'Invalid token' }).kind).not.toBe('CLOSED')
+    }
   })
 
   it('READY → DEGRADED on PING_TIMEOUT', () => {

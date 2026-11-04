@@ -153,6 +153,81 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
     built.invoker?.stop()
   })
 
+  it('a rejected key is one error line and one steady blocked status across the slow-retry cycle; an accepted HELLO clears it', async () => {
+    const { ctx, log, status } = ctxFor({ channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } })
+    let setStatusCalls = 0
+    const original = ctx.setStatus
+    ctx.setStatus = (next: Record<string, unknown>) => {
+      setStatusCalls += 1
+      original(next)
+    }
+    await agentchatGatewayAdapter.startAccount!(ctx as never)
+    const build = vi.mocked(registerDoorbell).mock.calls[0]![0].build
+    const fakeRuntime = { getHealth: () => ({ state: { kind: 'AUTH_FAIL' }, authenticated: false, ackNegotiated: false, counters: { frames: 0, selfFiltered: 0, knocks: 0, invites: 0 } }) }
+    const built = build(fakeRuntime as never)
+    const h = built.handlers
+    const state = (kind: string, extra: object = {}) => h.onStateChanged!({ kind, ...extra } as never, { kind: 'DISCONNECTED' } as never)
+    const rejected = () => {
+      // The socket's order: the state change first, then the error event.
+      state('AUTH_FAIL', { reason: 'close 1008: Invalid token' })
+      h.onError!(Object.assign(new Error('auth rejected: close 1008: Invalid token'), { class_: 'terminal-auth' }) as never)
+    }
+    const errorLines = () => log.error.mock.calls.map((c) => String(c[0]))
+    const warnLines = () => log.warn.mock.calls.map((c) => String(c[0]))
+
+    // First rejection: one error line with the reason; blocked, not running, not linked.
+    state('CONNECTING', { attempt: 1, startedAt: 0 })
+    state('AUTHENTICATING', { startedAt: 0 })
+    rejected()
+    expect(errorLines()).toHaveLength(1)
+    expect(errorLines()[0]).toMatch(/AUTH_FAIL \(close 1008: Invalid token\) — the server rejected the key; retrying every 10–15 min/)
+    expect(warnLines()).toHaveLength(0)
+    expect(status()).toMatchObject({ running: false, connected: false, statusState: 'not-linked', lifecycle: 'blocked' })
+    expect((status().lastDisconnect as { error: string }).error).toBe('AUTH_FAIL: close 1008: Invalid token')
+    const callsAfterFirst = setStatusCalls
+
+    // Three slow-retry cycles, one with the network down in between: no new
+    // error or warn line, no status write, the snapshot still says blocked.
+    for (let i = 0; i < 3; i++) {
+      state('CONNECTING', { attempt: 2 + i, startedAt: 0 })
+      if (i === 1) {
+        state('DISCONNECTED')
+        state('CONNECTING', { attempt: 3, startedAt: 0 })
+      }
+      state('AUTHENTICATING', { startedAt: 0 })
+      rejected()
+    }
+    expect(errorLines()).toHaveLength(1)
+    expect(warnLines()).toHaveLength(0)
+    expect(setStatusCalls).toBe(callsAfterFirst)
+    expect(status()).toMatchObject({ running: false, connected: false, statusState: 'not-linked', lifecycle: 'blocked' })
+    expect(log.debug.mock.calls.some((c) => /still AUTH_FAIL/.test(String(c[0])))).toBe(true)
+    expect(log.debug.mock.calls.some((c) => /class=terminal-auth/.test(String(c[0])))).toBe(true)
+
+    // The key is accepted again: ready, linked, one info line, latch cleared.
+    state('CONNECTING', { attempt: 5, startedAt: 0 })
+    state('AUTHENTICATING', { startedAt: 0 })
+    state('READY', { connectedAt: 5 })
+    expect(status()).toMatchObject({ running: true, connected: true, statusState: 'linked', lifecycle: 'ready' })
+    expect(log.info.mock.calls.some((c) => /key accepted again — AUTH_FAIL cleared/.test(String(c[0])))).toBe(true)
+    // Ordinary errors are warnings again.
+    h.onError!(Object.assign(new Error('malformed json frame'), { class_: 'validation' }) as never)
+    expect(warnLines()).toHaveLength(1)
+
+    // A later rejection is a new situation: one more error line.
+    state('DISCONNECTED')
+    state('CONNECTING', { attempt: 2, startedAt: 0 })
+    state('AUTHENTICATING', { startedAt: 0 })
+    rejected()
+    expect(errorLines()).toHaveLength(2)
+    expect(status().lifecycle).toBe('blocked')
+
+    // stop() while blocked ends it: stopped.
+    state('CLOSED')
+    expect(status()).toMatchObject({ running: false, connected: false, lifecycle: 'stopped' })
+    built.invoker?.stop()
+  })
+
   it('refusal and off report lifecycle blocked / stopped', async () => {
     const two = ctxFor({ channels: { agentchat: { accounts: { a: { apiKey: KEY }, b: { apiKey: KEY } } } } }, 'a')
     await agentchatGatewayAdapter.startAccount!(two.ctx as never)
