@@ -59,9 +59,11 @@ export function spellToolsForOpenClaw(text: string): string {
 /**
  * The prompt a wake turn starts with: the served wake instruction and, when
  * the gate decided a specific conversation, one factual line naming it. The
- * gate records `reply` as the turn is admitted, which marks the conversation
- * read and takes it off the tray — so the turn is told which conversation
- * to open; the tray alone would no longer show it.
+ * `reply` verdict is recorded as the turn is admitted, which marks the
+ * conversation read and takes it off the tray — so the turn is told which
+ * conversation to open, and that the verdict is already taken care of.
+ * Whether the tray still shows the card when the turn looks depends on the
+ * race between the record and the turn's first call, so the line says so.
  */
 export function wakeTurnPrompt(texts: Pick<Texts, 'wake_instruction'>, conversationId?: string): string {
   const instruction = texts.wake_instruction.trim()
@@ -69,11 +71,11 @@ export function wakeTurnPrompt(texts: Pick<Texts, 'wake_instruction'>, conversat
   return `${instruction}\n\n${conversationLine(conversationId)}`
 }
 
-/** The one line of ours in a wake turn: a fact about this turn, with OpenClaw's tool name. */
+/** The one line of ours in a wake turn: facts about this turn, with OpenClaw's tool name. */
 export function conversationLine(conversationId: string): string {
   return (
-    `Conversation to answer in this turn: ${conversationId}. The gate decided reply and recorded it, ` +
-    `so this conversation is already marked read and no longer on the tray — open it with ${GET_CONVERSATION_TOOL}.`
+    `Conversation to answer in this turn: ${conversationId}. The gate decided reply and your reply verdict for it is being recorded; ` +
+    `if this conversation still shows on the tray, do not record another verdict for it — open it with ${GET_CONVERSATION_TOOL} and reply.`
   )
 }
 

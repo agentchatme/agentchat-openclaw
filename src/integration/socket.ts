@@ -41,6 +41,11 @@ import { AGENTCHAT_CLIENT_IDENTITY } from '../client-identity.js'
 import { groupInviteFromRecord, type GroupInvite } from './invites.js'
 import type { WakeSource } from './invoker.js'
 
+/** A server wake frame's `reason` → the fixed wake-source set (the metric label must stay bounded). */
+export function wakeSourceOf(reason: unknown): WakeSource {
+  return reason === 'reminder' ? 'reminder' : 'other'
+}
+
 /**
  * The connection as the gateway reports it. The SDK keeps its own machine
  * private; these are derived from its events: `connecting` until the first
@@ -130,10 +135,18 @@ export function isKeyRejection(code: number, reason: string): boolean {
 /**
  * The SDK's one signal that its reconnect loop is off for good: the error it
  * emits after a terminal close code (`realtime.ts`, "closed with terminal
- * code"). There is no typed event for it, so the message is matched.
+ * code <code> (<reason>)"). There is no typed event for it, so the message
+ * is matched.
  */
 export function isRealtimeStopped(error: Error): boolean {
-  return /terminal code/i.test(error.message)
+  return terminalCloseOf(error) !== null
+}
+
+/** The close code and reason inside the SDK's terminal-close error, or null for any other error. */
+export function terminalCloseOf(error: Error): { code: number; reason: string } | null {
+  const match = /terminal code (\d+)(?: \((.*?)\))?;/i.exec(error.message)
+  if (!match) return null
+  return { code: Number(match[1]), reason: match[2] ?? '' }
 }
 
 /** The SDK realtime options for a channel config: `wss://…` base, the account's backoff, the integration identity. */
@@ -255,14 +268,13 @@ export class IntegrationSocket {
 
     realtime.onError((error) => {
       if (this.stopping) return
+      this.metrics.incError({ errorClass: classifyRealtimeError(error) })
       if (isRealtimeStopped(error)) {
-        this.metrics.incError({ errorClass: 'auth' })
         this.logger.warn({ err: error.message }, 'the SDK stopped reconnecting')
         this.setState('blocked')
         this.guard('onStopped', () => this.handlers.onStopped?.(error.message))
         return
       }
-      this.metrics.incError({ errorClass: classifyRealtimeError(error) })
       this.logger.debug({ err: error.message }, 'socket error')
       this.guard('onError', () => this.handlers.onError?.(error))
     })
@@ -294,10 +306,10 @@ export class IntegrationSocket {
 
   private onWakeFrame(frame: WakeFrame): void {
     this.frames += 1
-    const reason = typeof frame.payload?.reason === 'string' && frame.payload.reason.length > 0 ? frame.payload.reason : 'wake'
+    const reason: unknown = frame.payload?.reason
     const detail: WakeDetail = { conversationId: frame.payload.conversation_id }
     this.logger.info({ ...detail, reason, step: frame.payload.step }, 'wake — server wake frame')
-    this.wake(reason, detail)
+    this.wake(wakeSourceOf(reason), detail)
   }
 
   private onInvite(message: WsMessage): void {
@@ -336,10 +348,16 @@ export class IntegrationSocket {
   }
 }
 
-/** Low-cardinality class for the error metric. */
+/**
+ * Low-cardinality class for the error metric. The SDK's terminal-close error
+ * is `auth` only when the close was a key rejection (4401/4403, or 1008 with
+ * the server's `Invalid token`); a terminal `1008 HELLO frame required` is
+ * `transport`, the same reading `isKeyRejection` gives the close itself.
+ */
 export function classifyRealtimeError(error: Error): 'auth' | 'transport' | 'handler' | 'protocol' | 'other' {
   const message = error.message
-  if (/terminal code/i.test(message)) return 'auth'
+  const terminal = terminalCloseOf(error)
+  if (terminal) return isKeyRejection(terminal.code, terminal.reason) ? 'auth' : 'transport'
   if (/handler failed/i.test(message)) return 'handler'
   if (/failed validation|not an object|expected a bare array/i.test(message)) return 'protocol'
   if (error.name === 'ConnectionError' || /websocket|hello|sync drain|sync ack/i.test(message)) return 'transport'

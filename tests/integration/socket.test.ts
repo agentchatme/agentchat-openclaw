@@ -19,7 +19,16 @@ import * as path from 'node:path'
 import { parseChannelConfig } from '../../src/config-schema.js'
 import { AgentInvoker } from '../../src/integration/invoker.js'
 import { InviteLedger } from '../../src/integration/invites.js'
-import { IntegrationSocket, isKeyRejection, isRealtimeStopped, realtimeOptionsFor, type SocketHandlers } from '../../src/integration/socket.js'
+import {
+  IntegrationSocket,
+  classifyRealtimeError,
+  isKeyRejection,
+  isRealtimeStopped,
+  realtimeOptionsFor,
+  terminalCloseOf,
+  wakeSourceOf,
+  type SocketHandlers,
+} from '../../src/integration/socket.js'
 import type { MetricsRecorder } from '../../src/metrics.js'
 import { PACKAGE_VERSION } from '../../src/version.js'
 import { MockWebSocket, MockWebSocketCtor, messageNew, sentFrames, settle, wakeFrame } from '../helpers/mock-websocket.js'
@@ -146,13 +155,16 @@ describe('IntegrationSocket — wakes', () => {
     const ws = MockWebSocket.latest()
     ws.simulateReady()
     ws.simulateMessage(wakeFrame('conv_9', 2))
+    // A reason this version does not know is still a wake, labelled `other` (the metric label stays bounded).
+    ws.simulateMessage({ ...wakeFrame('conv_10'), payload: { ...(wakeFrame('conv_10').payload as object), reason: 'something-new' } })
     await settle()
     expect(wakes).toEqual([
       ['connect', {}],
       ['reminder', { conversationId: 'conv_9' }],
+      ['other', { conversationId: 'conv_10' }],
     ])
     expect(sentFrames(ws, 'ack')).toEqual([])
-    expect(metrics.wakes).toEqual(['connect', 'reminder'])
+    expect(metrics.wakes).toEqual(['connect', 'reminder', 'other'])
   })
 
   it('group.invite.received is the second wake kind; malformed invites are dropped', async () => {
@@ -230,9 +242,9 @@ describe('IntegrationSocket — the SDK connection events, mapped', () => {
     expect(metrics.errors).toEqual(['auth'])
   })
 
-  it('a terminal close with another reason is not a key rejection, but the SDK still stops: `onStopped` is the signal', async () => {
+  it('a terminal close with another reason is not a key rejection (error class `transport`), but the SDK still stops: `onStopped` is the signal', async () => {
     const events: string[] = []
-    const { socket } = makeSocket({
+    const { socket, metrics } = makeSocket({
       onDisconnected: (info) => events.push(`disconnected:${info.code}:${info.keyRejected}`),
       onStopped: () => events.push('stopped'),
     })
@@ -243,6 +255,7 @@ describe('IntegrationSocket — the SDK connection events, mapped', () => {
     await settle()
     expect(events).toEqual(['disconnected:1008:false', 'stopped'])
     expect(socket.getHealth().state).toBe('blocked')
+    expect(metrics.errors).toEqual(['transport'])
   })
 
   it('stop() is final: `stopped`, the SDK socket is closed, and nothing fires afterwards', async () => {
@@ -277,10 +290,29 @@ describe('isKeyRejection / isRealtimeStopped / realtimeOptionsFor', () => {
     expect(isKeyRejection(1000, '')).toBe(false)
   })
 
-  it("recognises the SDK's terminal-close error and nothing else", () => {
-    expect(isRealtimeStopped(new Error('WebSocket closed with terminal code 1008 (Invalid token); the server rejected the session and auto-reconnect has stopped.'))).toBe(true)
+  it("recognises the SDK's terminal-close error and nothing else, and reads the code and reason out of it", () => {
+    const rejected = new Error('WebSocket closed with terminal code 1008 (Invalid token); the server rejected the session and auto-reconnect has stopped.')
+    expect(isRealtimeStopped(rejected)).toBe(true)
+    expect(terminalCloseOf(rejected)).toEqual({ code: 1008, reason: 'Invalid token' })
+    expect(terminalCloseOf(new Error('WebSocket closed with terminal code 4401; the server rejected the session and auto-reconnect has stopped.'))).toEqual({ code: 4401, reason: '' })
     expect(isRealtimeStopped(new Error('HELLO ack timeout'))).toBe(false)
     expect(isRealtimeStopped(new Error('WebSocket error'))).toBe(false)
+  })
+
+  it('classifies errors for the metric with a bounded label: auth only for a rejected key, transport for other terminal closes', () => {
+    expect(classifyRealtimeError(new Error('WebSocket closed with terminal code 1008 (Invalid token); the server rejected the session and auto-reconnect has stopped.'))).toBe('auth')
+    expect(classifyRealtimeError(new Error('WebSocket closed with terminal code 4403 (forbidden); the server rejected the session and auto-reconnect has stopped.'))).toBe('auth')
+    expect(classifyRealtimeError(new Error('WebSocket closed with terminal code 1008 (HELLO frame required); the server rejected the session and auto-reconnect has stopped.'))).toBe('transport')
+    expect(classifyRealtimeError(new Error('HELLO ack timeout'))).toBe('transport')
+    expect(classifyRealtimeError(new Error('message.new handler failed: boom'))).toBe('handler')
+    expect(classifyRealtimeError(new Error('wake frame failed validation: step is not an integer'))).toBe('protocol')
+    expect(classifyRealtimeError(new Error('something else'))).toBe('other')
+  })
+
+  it('maps a server wake reason onto the fixed source set', () => {
+    expect(wakeSourceOf('reminder')).toBe('reminder')
+    expect(wakeSourceOf('digest')).toBe('other')
+    expect(wakeSourceOf(undefined)).toBe('other')
   })
 
   it('maps the channel config onto the SDK realtime options: wss base, ack on receipt, the configured backoff, the OpenClaw identity', () => {

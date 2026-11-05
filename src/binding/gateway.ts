@@ -181,17 +181,20 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     // daily. Unreachable with nothing cached → the store says so once and the
     // integration starts anyway; turns wait for the first copy.
     const texts = new TextsStore({ client, accountId: ctx.accountId, logger })
-    await texts.start()
     const handle = config.agentHandle
     if (handle) {
-      // A fresh server copy that differs from the placed line refreshes it;
-      // an absent line is the wizard's / doctor's to place.
+      // A server copy that differs from the placed line refreshes it (an
+      // install upgraded from a release that bundled the line gets the
+      // served one on its first start); an absent line is the wizard's /
+      // doctor's to place. Registered BEFORE the first load so the first
+      // copy counts.
       texts.onServerCopy((copy) => {
         const refreshed = refreshIdentityLine(ctx.cfg, ctx.accountId, handle, copy.identity_line)
         if (refreshed.outcome === 'updated') ctx.log?.info?.(`[agentchat:${ctx.accountId}] identity line refreshed from the served texts in ${refreshed.path}`)
         else if (refreshed.outcome === 'failed') ctx.log?.warn?.(`[agentchat:${ctx.accountId}] identity line could not be refreshed in ${refreshed.path}: ${refreshed.detail ?? 'unknown error'}`)
       })
     }
+    await texts.start()
     const invites = new InviteLedger({
       accountId: ctx.accountId,
       onWriteError: (err) => ctx.log?.warn?.(`[agentchat:${ctx.accountId}] invite ledger could not be written: ${err instanceof Error ? err.message : String(err)}`),

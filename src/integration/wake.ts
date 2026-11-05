@@ -27,6 +27,8 @@ export const DEFAULT_MAX_WINDOW_MS = 6_000
 
 export interface WakeCoalescerOptions {
   readonly onFire: () => void
+  /** Called when a delayed (retry-ladder) wake fires, before it is counted like any other wake. */
+  readonly onDelayedWake?: () => void
   readonly debounceMs?: number
   readonly maxWindowMs?: number
   readonly now?: () => number
@@ -36,6 +38,7 @@ export interface WakeCoalescerOptions {
 
 export class WakeCoalescer {
   private readonly onFire: () => void
+  private readonly onDelayedWake: (() => void) | undefined
   private readonly debounceMs: number
   private readonly maxWindowMs: number
   private readonly now: () => number
@@ -58,6 +61,7 @@ export class WakeCoalescer {
     const maxWindow = options.maxWindowMs ?? DEFAULT_MAX_WINDOW_MS
     if (!(maxWindow >= debounce)) throw new RangeError('maxWindowMs must be >= debounceMs')
     this.onFire = options.onFire
+    this.onDelayedWake = options.onDelayedWake
     this.debounceMs = debounce
     this.maxWindowMs = maxWindow
     this.now = options.now ?? Date.now
@@ -110,6 +114,12 @@ export class WakeCoalescer {
     this.delayed = this._setTimeout(() => {
       this.delayed = null
       this.delayedDeadline = null
+      if (this.stopped) return
+      try {
+        this.onDelayedWake?.()
+      } catch {
+        // observers never block the wake
+      }
       this.wake()
     }, delay)
   }

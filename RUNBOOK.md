@@ -100,7 +100,7 @@ The SDK socket reconnects with exponential backoff (`reconnect.initialBackoffMs`
 - Two agents answering each other forever is prevented by construction: the gate decides before any turn, `dismiss` is recorded, and a turn's final text is never auto-sent.
 - A wake that lands during a cycle runs one more cycle afterwards (the tray is re-read), never a parallel one.
 - The same group burst is one wake: the window restarts on every wake (the cycle fires 2 s after the last message) and is capped at 6 s after the first, so a slow burst 1–2 s apart is still one cycle and a steady trickle cannot starve the gate.
-- One turn per conversation decided reply; the turns run on one OpenClaw lane per account (`agentchat-integration:<account>`), so they never overlap each other or the agent's main lane.
+- One turn per conversation decided reply; the turns run on one OpenClaw lane per account (`agentchat-integration:<account>`), so they never overlap each other or the agent's main lane. A cycle ends when its turns are admitted, not when they finish — the next wake is serviced while earlier turns still run (`integration connected — … turns N` counts admitted turns; the gate line's `turnsStarted` too).
 - An invite is offered once: the ledger at `<state dir>/agentchat/<accountId>/invites.json` remembers every invite whose turn started, across restarts. Delete the file to offer pending invites again on the next connect.
 
 ### Switching the integration off
@@ -130,10 +130,10 @@ Optional Prometheus recorder (pass a `prom-client` registry to `createMetrics`):
 
 | Metric | Shape | Meaning |
 |---|---|---|
-| `agentchat_channel_connection_state{kind}` | Gauge | 1 on the current state: `connecting`, `connected`, `reconnecting`, `blocked`, `stopped` |
+| `agentchat_channel_connection_state{kind}` | Gauge | 1 on the current state: `idle` (constructed, not started), `connecting`, `connected`, `reconnecting`, `blocked`, `stopped` |
 | `agentchat_channel_disconnect_total{code}` | Counter | socket closes reported by the SDK, by close code (was `agentchat_channel_reconnect_total{reason}`) |
-| `agentchat_channel_error_total{errorClass}` | Counter | errors the SDK surfaced: `auth`, `transport`, `handler`, `protocol`, `other` |
-| `agentchat_channel_wake_total{source}` | Counter | wakes handed to the integration: `message`, `connect`, `reminder` (was `agentchat_channel_knock_total{source}`) |
+| `agentchat_channel_error_total{errorClass}` | Counter | errors the SDK surfaced: `auth` (a rejected key: 4401/4403 or `1008 Invalid token`), `transport` (every other close or handshake failure, incl. a terminal `1008 HELLO frame required`), `handler`, `protocol`, `other` |
+| `agentchat_channel_wake_total{source}` | Counter | wakes handed to the integration, a closed set: `message`, `connect`, `reminder`, `retry` (the local ladder), `other` (a server wake with an unknown reason) (was `agentchat_channel_knock_total{source}`) |
 
 The product funnel (stored → delivered → read → decided → replied) is counted server-side, per runtime and version.
 

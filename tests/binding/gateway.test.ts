@@ -16,6 +16,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import * as path from 'node:path'
 
 vi.mock('../../src/binding/runtime-registry.js', () => ({
   registerIntegration: vi.fn(async () => ({})),
@@ -36,6 +39,8 @@ vi.mock('../../src/binding/sdk-client.js', async () => {
 
 import { agentchatGatewayAdapter, statusStateFor, waitUntilAbort } from '../../src/binding/gateway.js'
 import { registerIntegration } from '../../src/binding/runtime-registry.js'
+import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
+import { IDENTITY_LINE } from '../helpers/texts.js'
 
 const KEY = 'ac_live_' + 'g'.repeat(24)
 
@@ -143,6 +148,32 @@ describe('gateway.startAccount', () => {
       expect(log.warn).not.toHaveBeenCalled()
     } finally {
       if (before !== undefined) process.env.AGENTCHAT_API_KEY = before
+    }
+  })
+
+  it('the first served copy refreshes a placed identity line that differs (an install upgraded from a release that bundled the line)', async () => {
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-gateway-ws-'))
+    try {
+      const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
+      const bundled = 'I am @alice on AgentChat (api.agentchat.me). On any AgentChat wake I call agentchat_inbox first and decide per card.'
+      writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: bundled })
+      const { ctx, log } = ctxFor(cfg)
+      await agentchatGatewayAdapter.startAccount!(ctx as never)
+      const content = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')
+      expect(content).toContain(IDENTITY_LINE)
+      expect(content).not.toContain(bundled)
+      expect(log.info.mock.calls.some((c) => /identity line refreshed from the served texts/.test(String(c[0])))).toBe(true)
+      // A second start with the same served copy leaves the file alone.
+      const before = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')
+      await agentchatGatewayAdapter.startAccount!(ctxFor(cfg).ctx as never)
+      expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toBe(before)
+      for (const call of vi.mocked(registerIntegration).mock.calls) {
+        const built = call[0].build({} as never)
+        built.texts?.stop()
+        built.invoker?.stop()
+      }
+    } finally {
+      fs.rmSync(workspace, { recursive: true, force: true })
     }
   })
 

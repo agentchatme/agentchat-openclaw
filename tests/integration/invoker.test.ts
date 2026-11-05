@@ -17,6 +17,7 @@ import * as path from 'node:path'
 import { AgentInvoker } from '../../src/integration/invoker.js'
 import { InviteLedger } from '../../src/integration/invites.js'
 import type { TurnRequest, TurnStarter } from '../../src/integration/model.js'
+import type { MetricsRecorder } from '../../src/metrics.js'
 import { Clock } from '../helpers/clock.js'
 import { capturingLogger } from '../helpers/logger.js'
 import { card, fakeClient, tray, type FakeClientOptions } from '../helpers/fake-client.js'
@@ -65,6 +66,13 @@ function make(opts: MakeOptions) {
       return { ran: true, runId: `run_${turns.length}`, done: Promise.resolve({ ran: true, runId: `run_${turns.length}`, status: 'ok' }) }
     })
   const logger = capturingLogger()
+  const wakeSources: string[] = []
+  const metrics: MetricsRecorder = {
+    incWake: ({ source }) => void wakeSources.push(source),
+    incDisconnect: () => undefined,
+    incError: () => undefined,
+    setConnectionState: () => undefined,
+  }
   const invoker = new AgentInvoker({
     accountId: 'default',
     agentId: 'main',
@@ -74,6 +82,7 @@ function make(opts: MakeOptions) {
     texts,
     invites,
     logger,
+    metrics,
     gateEnabled: opts.gateEnabled,
     debounceMs: 2000,
     now: () => clock.now,
@@ -83,7 +92,7 @@ function make(opts: MakeOptions) {
   const settle = async () => {
     for (let i = 0; i < 20; i++) await invoker.settled()
   }
-  return { clock, client, posts, trayCalls, events, texts, invites, stateDir, turns, invoker, logger, settle, modelCalls: () => modelCalls }
+  return { clock, client, posts, trayCalls, events, texts, invites, stateDir, turns, invoker, logger, settle, wakeSources, modelCalls: () => modelCalls }
 }
 
 const tmpDirs: string[] = []
@@ -196,6 +205,38 @@ describe('AgentInvoker — wake → tray → gate → one turn per reply', () =>
     expect(t.trayCalls()).toBe(2)
   })
 
+  it('a cycle ends when its turns are admitted, not when they finish: the next wake is serviced while a turn still runs', async () => {
+    let finish!: () => void
+    const done = new Promise<{ ran: true; runId: string; status: string }>((resolve) => {
+      finish = () => resolve({ ran: true, runId: 'run_slow', status: 'ok' })
+    })
+    const t = make({
+      trays: [tray([card('conv_a', 'msg_a')]), tray([card('conv_b', 'msg_b')])],
+      answer: async () => decisions(['conv_a', 'reply'], ['conv_b', 'reply']),
+      startTurn: async () => ({ ran: true, runId: 'run_slow', done }),
+    })
+    tmpDirs.push(t.stateDir)
+    t.invoker.wake('message')
+    t.clock.advance(2000)
+    await t.settle()
+    expect(t.invoker.cycles).toBe(1)
+    expect(t.invoker.counters().turnsInFlight).toBe(1)
+    expect(t.posts.map((p) => p.conversationId)).toEqual(['conv_a'])
+
+    // The first turn has not ended; a second wake still gets its cycle (and its own turn, queued on the lane).
+    t.invoker.wake('message')
+    t.clock.advance(2000)
+    await t.settle()
+    expect(t.invoker.cycles).toBe(2)
+    expect(t.invoker.counters().turnsInFlight).toBe(2)
+    expect(t.posts.map((p) => p.conversationId)).toEqual(['conv_a', 'conv_b'])
+
+    finish()
+    await t.settle()
+    expect(t.invoker.counters().turnsInFlight).toBe(0)
+    expect(t.logger.at('info').filter((l) => /turn complete/.test(l.msg ?? ''))).toHaveLength(2)
+  })
+
   it('a truncated tray wakes again for the rest', async () => {
     const t = make({
       trays: [tray([card('conv_a', 'msg_a')], { truncated: true }), tray([])],
@@ -247,6 +288,8 @@ describe('AgentInvoker — failure policy and the ladder', () => {
     await t.settle()
     expect(t.turns).toHaveLength(1)
     expect(t.invoker.counters().retryRung).toBe(0)
+    // The ladder's re-wake is counted as its own wake source.
+    expect(t.wakeSources).toEqual(['retry'])
   })
 
   it('an unusable answer fails closed the same way', async () => {

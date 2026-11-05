@@ -204,10 +204,23 @@ manifest.setup = {
 
 // Only fields the manifest reference knows may sit at the top level
 // (`manifest-unknown-fields`); package and install metadata belongs in
-// `package.json#openclaw`.
+// `package.json#openclaw`. The list is the documented reference
+// (docs.openclaw.ai/plugins/manifest) plus every field of OpenClaw's own
+// `PluginManifest` type (dist/manifest-registry, 2026.6.10) minus the
+// deprecated `channelEnvVars`, so a legitimate field this plugin does not use
+// today is never refused while a stray key still is.
 const KNOWN_TOP_LEVEL = new Set([
+  // documented reference
   'id', 'name', 'description', 'version', 'kind', 'channels', 'skills', 'setup',
   'configSchema', 'uiHints', 'contracts', 'mcpServers', 'channelConfigs', 'channelAccountKeyPolicies',
+  // the rest of OpenClaw's PluginManifest type
+  'providers', 'providerCatalogEntry', 'providerEndpoints', 'providerRequest', 'providerAuthEnvVars',
+  'providerAuthAliases', 'providerAuthChoices', 'requiresPlugins', 'enabledByDefault',
+  'enabledByDefaultOnPlatforms', 'legacyPluginIds', 'autoEnableWhenConfiguredProviders', 'modelSupport',
+  'modelCatalog', 'modelPricing', 'modelIdNormalization', 'secretProviderIntegrations', 'cliBackends',
+  'syntheticAuthRefs', 'nonSecretAuthMarkers', 'commandAliases', 'activation', 'qaRunners',
+  'mediaUnderstandingProviderMetadata', 'imageGenerationProviderMetadata', 'videoGenerationProviderMetadata',
+  'musicGenerationProviderMetadata', 'toolMetadata', 'configContracts',
 ])
 const unknown = Object.keys(manifest).filter((key) => !KNOWN_TOP_LEVEL.has(key))
 if (unknown.length > 0) {

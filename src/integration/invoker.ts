@@ -22,12 +22,16 @@
  *
  * One cycle at a time per account: a wake that lands while a cycle runs is
  * remembered and runs once the cycle ends (the tray is re-read, so whatever
- * the earlier wake announced is covered). A cycle that could not complete —
- * model unreachable, server error, turn refused — re-wakes itself on a
- * local ladder (1 m, 5 m, 30 m) because a connected socket gets no re-ring
- * from the server; the cards wait on the tray meanwhile. One outage climbs
- * the ladder one rung: a retry already on its way is never replaced by a
- * later one.
+ * the earlier wake announced is covered). A cycle ends when its turns are
+ * ADMITTED, not when they finish: OpenClaw serializes the turns on the
+ * account's lane (`integrationLane`), so the next cycle's turn simply queues
+ * behind, and holding the wake loop for up to 15 minutes per turn would only
+ * delay the next tray read. Completion is logged as it happens. A cycle
+ * that could not complete — model unreachable, server error, turn refused —
+ * re-wakes itself on a local ladder (1 m, 5 m, 30 m) because a connected
+ * socket gets no re-ring from the server; the cards wait on the tray
+ * meanwhile. One outage climbs the ladder one rung: a retry already on its
+ * way is never replaced by a later one.
  *
  * Group invites are a second wake kind: not on the tray, not gated, one turn
  * each with the served invite prompt, serialized on the same worker. An
@@ -39,8 +43,10 @@
 import { gate, type AgentChatClient, type InboxTray, type Texts } from 'agentchatme'
 
 import type { Logger } from '../log.js'
+import type { MetricsRecorder } from '../metrics.js'
+import { createNoopMetrics } from '../metrics.js'
 import { WakeCoalescer, DEFAULT_DEBOUNCE_MS } from './wake.js'
-import type { GateModelCall, TurnStarter, TurnOutcome } from './model.js'
+import type { GateModelCall, TurnStarter, TurnOutcome, TurnAdmission } from './model.js'
 import type { GroupInvite } from './invites.js'
 import { OPENCLAW_TOOL_NAMER, integrationLane, inviteSessionKey, inviteTurnPrompt, wakeSessionKey, wakeTurnPrompt } from './turn.js'
 
@@ -52,8 +58,13 @@ import { OPENCLAW_TOOL_NAMER, integrationLane, inviteSessionKey, inviteTurnPromp
  */
 export const RETRY_LADDER_MS: readonly number[] = [60_000, 300_000, 1_800_000]
 
-/** Where a wake came from; for the log line and the metric label only. */
-export type WakeSource = 'message' | 'connect' | 'reminder' | 'retry' | (string & {})
+/**
+ * Where a wake came from — a closed set, because it is a metric label:
+ * `message` (a peer wrote), `connect` (an accepted HELLO), `reminder` (the
+ * server's wake frame for a deferred conversation), `retry` (the local
+ * ladder), `other` (a server wake with a reason this version does not know).
+ */
+export type WakeSource = 'message' | 'connect' | 'reminder' | 'retry' | 'other'
 
 /** The two SDK resources a cycle uses; `AgentChatClient` satisfies it. */
 export type InvokerClient = Pick<AgentChatClient, 'inbox' | 'decisions'>
@@ -79,6 +90,8 @@ export interface AgentInvokerOptions {
   readonly texts: TextsSource
   readonly invites: InviteStore
   readonly logger: Logger
+  /** Counts the ladder's re-wakes (`agentchat_channel_wake_total{source="retry"}`). The socket counts the others. */
+  readonly metrics?: MetricsRecorder
   /** `false`: no gate step — one turn per cycle with the served wake instruction; the agent judges in-turn. */
   readonly gateEnabled?: boolean
   readonly debounceMs?: number
@@ -92,6 +105,8 @@ export interface InvokerCounters {
   readonly cycles: number
   readonly turns: number
   readonly inviteTurns: number
+  /** Turns admitted whose run has not ended yet (OpenClaw's lane serializes them). */
+  readonly turnsInFlight: number
   readonly wakes: number
   readonly absorbed: number
   readonly retryRung: number
@@ -139,6 +154,7 @@ export class AgentInvoker {
   private readonly texts: TextsSource
   private readonly invites: InviteStore
   private readonly logger: Logger
+  private readonly metrics: MetricsRecorder
   private readonly gateEnabled: boolean
   private readonly ladder: readonly number[]
   private readonly now: () => number
@@ -150,6 +166,7 @@ export class AgentInvoker {
   private pendingInvites: GroupInvite[] = []
   private invitesDirty = false
   private retryRung = 0
+  private turnsInFlight = 0
 
   cycles = 0
   turns = 0
@@ -164,11 +181,16 @@ export class AgentInvoker {
     this.texts = options.texts
     this.invites = options.invites
     this.logger = options.logger.child({ component: 'integration', accountId: options.accountId })
+    this.metrics = options.metrics ?? createNoopMetrics()
     this.gateEnabled = options.gateEnabled ?? true
     this.ladder = options.retryLadderMs ?? RETRY_LADDER_MS
     this.now = options.now ?? Date.now
     this.coalescer = new WakeCoalescer({
       onFire: () => this.onWakeFired(),
+      onDelayedWake: () => {
+        this.logger.debug({ source: 'retry' }, 'wake')
+        this.metrics.incWake({ source: 'retry' })
+      },
       debounceMs: options.debounceMs ?? DEFAULT_DEBOUNCE_MS,
       now: this.now,
       ...(options.setTimeout ? { setTimeout: options.setTimeout } : {}),
@@ -221,6 +243,7 @@ export class AgentInvoker {
       cycles: this.cycles,
       turns: this.turns,
       inviteTurns: this.inviteTurns,
+      turnsInFlight: this.turnsInFlight,
       wakes: this.coalescer.wakes,
       absorbed: this.coalescer.absorbed,
       retryRung: this.retryRung,
@@ -319,16 +342,19 @@ export class AgentInvoker {
   /** Gate off: the agent judges in-turn with the hosted tools. One turn, nothing recorded here. */
   private async runUngated(cards: number, texts: Texts, truncated: boolean, started: number): Promise<CycleResult> {
     this.logger.info({ cards }, 'gate off — starting one turn with the served wake instruction')
-    const outcome = await this.runWakeTurn(wakeTurnPrompt(texts))
-    if (!outcome.ran) {
-      this.logger.warn({ error: outcome.error, ...this.retry() }, 'turn not started — re-waking later')
+    const sessionKey = wakeSessionKey(this.agentId, this.now())
+    this.logger.info({ sessionKey }, 'turn start')
+    const admission = await this.startTurn({ sessionKey, prompt: wakeTurnPrompt(texts), lane: integrationLane(this.accountId) })
+    if (!admission.ran) {
+      this.logger.warn({ sessionKey, error: admission.error, ...this.retry() }, 'turn not started — re-waking later')
     } else {
+      this.admitted(sessionKey, admission, 'turn complete (final text discarded; the send is a hosted-tool call)')
       this.retryRung = 0
     }
     return {
       ...this.result('gate_off', cards, truncated, started),
-      turnsStarted: outcome.ran ? 1 : 0,
-      turnsRefused: outcome.ran ? 0 : 1,
+      turnsStarted: admission.ran ? 1 : 0,
+      turnsRefused: admission.ran ? 0 : 1,
     }
   }
 
@@ -353,11 +379,11 @@ export class AgentInvoker {
     // One turn per conversation decided reply. The verdict is recorded the
     // moment OpenClaw admits the run (the conversation is read from then
     // on); a refused run records nothing, so the next wake gates it again.
+    // The cycle does not wait for the runs to end: the lane serializes them.
     let turnsStarted = 0
     let turnsRefused = 0
     let recordFailures = decided.recordFailures.length
     let recorded = decided.recorded
-    const waits: Promise<TurnOutcome>[] = []
     for (const entry of decided.reply) {
       const sessionKey = wakeSessionKey(this.agentId, this.now())
       this.logger.info({ sessionKey, conversationId: entry.conversationId }, 'turn start')
@@ -368,7 +394,7 @@ export class AgentInvoker {
         continue
       }
       turnsStarted += 1
-      this.turns += 1
+      this.admitted(sessionKey, admission, 'turn complete (final text discarded; the send is a hosted-tool call)')
       try {
         await entry.record()
         recorded += 1
@@ -376,17 +402,7 @@ export class AgentInvoker {
         recordFailures += 1
         this.logger.warn({ conversationId: entry.conversationId, err: describe(err) }, 'reply verdict not recorded — the turn runs; the conversation stays unread until it decides')
       }
-      waits.push(
-        admission.done.then((outcome) => {
-          this.logger[outcome.error ? 'warn' : 'info'](
-            { sessionKey, runId: outcome.runId, status: outcome.status, ...(outcome.error ? { error: outcome.error } : {}) },
-            'turn complete (final text discarded; the send is a hosted-tool call)',
-          )
-          return outcome
-        }),
-      )
     }
-    await Promise.all(waits)
 
     const summary = {
       cards,
@@ -450,19 +466,26 @@ export class AgentInvoker {
 
   // ─── turns ──────────────────────────────────────────────────────────
 
-  /** One wake turn without a conversation (gate off). Waits for it. */
-  private async runWakeTurn(prompt: string): Promise<TurnOutcome> {
-    const sessionKey = wakeSessionKey(this.agentId, this.now())
-    this.logger.info({ sessionKey }, 'turn start')
-    const admission = await this.startTurn({ sessionKey, prompt, lane: integrationLane(this.accountId) })
-    if (!admission.ran) return { ran: false, error: admission.error }
+  /**
+   * Book an admitted turn and log its end whenever it comes. The cycle moves
+   * on at once; OpenClaw's lane keeps the runs of one account in order.
+   */
+  private admitted(sessionKey: string, admission: Extract<TurnAdmission, { ran: true }>, completeLine: string): void {
     this.turns += 1
-    const outcome = await admission.done
-    this.logger[outcome.error ? 'warn' : 'info'](
-      { sessionKey, runId: outcome.runId, status: outcome.status, ...(outcome.error ? { error: outcome.error } : {}) },
-      'turn complete (final text discarded; the send is a hosted-tool call)',
+    this.turnsInFlight += 1
+    void admission.done.then(
+      (outcome: TurnOutcome) => {
+        this.turnsInFlight -= 1
+        this.logger[outcome.error ? 'warn' : 'info'](
+          { sessionKey, runId: outcome.runId, status: outcome.status, ...(outcome.error ? { error: outcome.error } : {}) },
+          completeLine,
+        )
+      },
+      (err: unknown) => {
+        this.turnsInFlight -= 1
+        this.logger.warn({ sessionKey, runId: admission.runId, err: describe(err) }, `${completeLine} — the wait failed`)
+      },
     )
-    return outcome
   }
 
   /**
@@ -499,11 +522,7 @@ export class AgentInvoker {
       this.inviteTurns += 1
       this.invites.markOffered(invite.inviteId)
       this.pendingInvites = this.pendingInvites.filter((pending) => pending.inviteId !== invite.inviteId)
-      const outcome = await admission.done
-      this.logger[outcome.error ? 'warn' : 'info'](
-        { sessionKey, runId: outcome.runId, status: outcome.status, ...(outcome.error ? { error: outcome.error } : {}) },
-        'group-invite turn complete',
-      )
+      this.admitted(sessionKey, admission, 'group-invite turn complete')
     }
     if (this.stopped) return
     if (waitingForTexts > 0) {

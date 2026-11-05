@@ -55,7 +55,7 @@ describe('turn prompts — served texts, never bundled', () => {
     expect(prompt).toContain(conversationLine('conv_a'))
     expect(conversationLine('conv_a')).toMatch(/Conversation to answer in this turn: conv_a\./)
     expect(conversationLine('conv_a')).toContain('agentchat__agentchat_get_conversation')
-    expect(conversationLine('conv_a')).toMatch(/marked read and no longer on the tray/)
+    expect(conversationLine('conv_a')).toMatch(/your reply verdict for it is being recorded; if this conversation still shows on the tray, do not record another verdict for it/)
   })
 
   it('an invite turn is exactly the served invite prompt', () => {
