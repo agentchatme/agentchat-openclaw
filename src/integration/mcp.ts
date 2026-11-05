@@ -3,7 +3,7 @@
  *
  * The tools an agent uses on AgentChat are defined once, in the hosted tool
  * layer at `https://api.agentchat.me/mcp` (Streamable HTTP, bearer key). The
- * doorbell does not define tools; it tells OpenClaw where they are.
+ * integration does not define tools; it tells OpenClaw where they are.
  *
  * What OpenClaw offers, verified against the installed 2026.6.10 package and
  * the current docs (docs.openclaw.ai/tools/mcp, /plugins/manifest,

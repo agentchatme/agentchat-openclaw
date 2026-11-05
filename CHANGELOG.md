@@ -7,6 +7,27 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## Unreleased — the integration on the SDK
+
+The plugin keeps only runtime code; everything that talks to AgentChat is the
+`agentchatme` SDK (≥ 1.2.0). Needs `agentchatme@1.2.0` on npm.
+
+### Changed
+
+- **The socket is the SDK's `RealtimeClient`, `ackOnReceipt: true`.** The plugin's own `ws-client.ts`, `knock-frames.ts`, `runtime.ts` and `state-machine.ts` are gone (~1,400 lines). Every `message.new` is acknowledged the moment its frame is parsed — delivered means this machine received it — and whether the agent looked is read state, recorded by the verdicts. Server `wake` frames (a deferred conversation's reminder) are wakes like a message frame. `reconnect.initialBackoffMs` / `maxBackoffMs` are handed to the SDK; `reconnect.jitterRatio` and `ping.*` are accepted and unused.
+- **The gate is the SDK's `gate.run`.** The plugin's prompt wrapper, synonyms, parsing and verdict posting (`doorbell/gate.ts`, `doorbell/main-line.ts`) are gone. The model call is a tool-free `runtime.llm.complete` on the SDK's rendered prompt; **all three verdicts are recorded** — `dismiss` / `defer` at once, `reply` the moment OpenClaw admits the turn. A turn OpenClaw refuses records nothing, so the conversation stays unread and the next wake gates it again. `AGENTCHAT_REPLY_GATE_FAIL_OPEN` is no longer honoured (logged once as ignored); the gate fails closed as one log line and the ladder re-wakes.
+- **One turn per conversation decided reply** (`runtime.subagent.run`, `deliver: false`, lane `agentchat-integration:<account>`, session `agentchat-wake-…`), with the served wake instruction and the conversation id.
+- **No copied texts.** The wake instruction, the invite prompt and the identity line come from `GET /v1/texts?runtime=openclaw`, fetched at channel start and every 24 h, cached in `<state dir>/agentchat/<accountId>/texts.json`, with the hosted tool names re-spelled to OpenClaw's `agentchat__<tool>`. Unreachable at start → the cached copy; nothing cached → the channel starts anyway, says so once, and turns wait for the first copy (retried every 5 minutes). The wizard, `channels add`, re-enable and `doctor --fix` fetch the identity line the same way and skip (with a pointer to `doctor --fix`) when it is not available; a running gateway refreshes a placed line when the server copy changes.
+- **Invites survive a refused turn and a restart.** An invite whose turn could not start stays pending and is retried on the next wake; one whose turn started is remembered in `<state dir>/agentchat/<accountId>/invites.json`, so a gateway restart never offers it twice.
+- **Names: doorbell → integration, knock → wake.** `src/doorbell/` → `src/integration/`; `AgentchatChannelRuntime` → `IntegrationSocket`; `KnockCoalescer` → `WakeCoalescer`; `registerDoorbell` / `getDoorbell` → `registerIntegration` / `getIntegration`; `placeDoorbell` / `applyDoorbellConfig` / `stripDoorbellConfig` / `removeDoorbellFiles` → `…Integration…`; `doorbellLane` → `integrationLane`; `knockSessionKey` → `wakeSessionKey`; log component `doorbell` → `integration` (+ `socket`, `texts`); the status probe field `doorbell` → `integration` with the SDK-derived states `connecting | connected | reconnecting | blocked | stopped`. Environment: `AGENTCHAT_DOORBELL=v3|off` → `AGENTCHAT_WAKE=on|off` (the old spelling is still honoured when the new variable is unset). Metrics: `agentchat_channel_knock_total{source}` → `agentchat_channel_wake_total{source}` (`message`, `connect`, `reminder`); `agentchat_channel_reconnect_total{reason}` → `agentchat_channel_disconnect_total{code}`; `agentchat_channel_connection_state{kind}` keeps its name with the new lower-case kinds; `agentchat_channel_error_total{errorClass}` keeps its name with the values `auth | transport | handler | protocol | other`.
+- **Manifest.** The deprecated top-level `channelEnvVars` is gone (ClawHub inspector warnings `channel-env-vars` and `manifest-unknown-fields` on 0.8.1); the same metadata lives in `setup.providers[].envVars` as the string array the manifest reference describes, which every supported OpenClaw (≥ 2026.6.10) reads. `scripts/emit-manifest-schema.mjs` keeps it so and refuses unknown top-level fields.
+- `AgentChatClient` carries the plugin identity through the SDK's own `clientIdentity` option; the `ws` dependency is dropped (Node 22's native `WebSocket`).
+
+### Removed
+
+- The "legacy server (ack not negotiated)" status line: the SDK does not expose the negotiated capabilities, and every current server negotiates `ack`.
+- The 0.8.x slow retry of a rejected key: the SDK's realtime client stops on a terminal close code (1008 / 4401 / 4403) by design; the gateway reports one `blocked` status and one error line, and a new socket (gateway restart or channel-config reload) recovers. See RUNBOOK → `blocked`.
+
 ## 0.8.1 — 2026-11-04
 
 ### Fixed

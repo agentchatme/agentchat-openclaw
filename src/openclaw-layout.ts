@@ -5,7 +5,7 @@
  * filesystem reads, no network. Every env read goes through
  * `credentials/read-env.ts`. One resolver, shared by the identity-line
  * placement (`binding/agents-anchor.ts`), the key placement
- * (`doorbell/placement.ts`), the gateway and the doctor, so the four never
+ * (`integration/placement.ts`), the gateway and the doctor, so the four never
  * disagree about which workspace or state dir an agent uses.
  *
  * Mirrors OpenClaw 2026.10.9 (`src/agents/workspace-default-path.ts`,

@@ -7,17 +7,20 @@ vi.mock('../../src/binding/sdk-client.js', () => ({
   getClient: () => ({
     getMe: async () => ({ handle: 'alice', status: 'active', paused_by_owner: 'none' }),
   }),
+  createSdkClient: () => ({}),
 }))
-vi.mock('../../src/doorbell/mcp.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../src/doorbell/mcp.js')>()
+vi.mock('../../src/integration/mcp.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/integration/mcp.js')>()
   return { ...actual, probeHostedMcp: vi.fn(async () => ({ ok: true, status: 200, serverName: 'agentchat', serverVersion: '1' })) }
 })
 
 import { agentchatStatusAdapter } from '../../src/binding/status.js'
-import { placeDoorbell } from '../../src/doorbell/placement.js'
-import { probeHostedMcp } from '../../src/doorbell/mcp.js'
-import { registerDoorbell, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
-import type { AgentchatChannelRuntime } from '../../src/runtime.js'
+import { placeIntegration } from '../../src/integration/placement.js'
+import { probeHostedMcp } from '../../src/integration/mcp.js'
+import { registerIntegration, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
+import type { IntegrationSocket, SocketState } from '../../src/integration/socket.js'
+import type { TextsStore } from '../../src/integration/texts.js'
+import { IDENTITY_LINE } from '../helpers/texts.js'
 
 const KEY = 'ac_live_' + 's'.repeat(24)
 
@@ -40,17 +43,29 @@ function account(cfg: object) {
   }
 }
 
+function stubSocket(state: SocketState): IntegrationSocket {
+  return {
+    async start() {},
+    async stop() {},
+    getHealth: () => ({ state, connectedAt: null, counters: { frames: 0, selfFiltered: 0, wakes: 3, invites: 0, disconnects: 0 } }),
+  } as unknown as IntegrationSocket
+}
+
+const silent = { trace() {}, debug() {}, info() {}, warn() {}, error() {}, child() { return this } } as never
+
 describe('status adapter — the doctor-style probe', () => {
   let workspace: string
   const savedEnv = process.env.AGENTCHAT_API_KEY
   beforeEach(() => {
     workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-status-'))
     delete process.env.AGENTCHAT_API_KEY
+    delete process.env.AGENTCHAT_WAKE
   })
-  afterEach(() => {
+  afterEach(async () => {
     fs.rmSync(workspace, { recursive: true, force: true })
     if (savedEnv === undefined) delete process.env.AGENTCHAT_API_KEY
     else process.env.AGENTCHAT_API_KEY = savedEnv
+    await resetRegistryForTest()
   })
 
   it('reports key, hosted MCP reachability and placement; not ok until everything is placed', async () => {
@@ -64,11 +79,11 @@ describe('status adapter — the doctor-style probe', () => {
     const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
     expect(lines[0]).toEqual({ text: 'authenticated as @alice', tone: 'success' })
     expect(lines.some((l) => l.text.startsWith('hosted MCP server reachable'))).toBe(true)
-    expect(lines.some((l) => l.text.includes('doorbell not running in this process'))).toBe(true)
+    expect(lines.some((l) => l.text.includes('integration not running in this process'))).toBe(true)
   })
 
   it('is ok once placed with the key in the environment', async () => {
-    const placed = placeDoorbell({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', stateDir: process.env.OPENCLAW_STATE_DIR })
+    const placed = placeIntegration({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
     process.env.AGENTCHAT_API_KEY = KEY
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account(placed.cfg) as never, timeoutMs: 2000, cfg: placed.cfg as never } as never)
     expect(probe.ok).toBe(true)
@@ -90,35 +105,46 @@ describe('status adapter — the doctor-style probe', () => {
     expect(probe.ok).toBe(false)
     expect(probe.refusal).toMatch(/2 AgentChat accounts are configured \(a, b\); this release runs one account per gateway/)
     const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
-    expect(lines.find((l) => l.text.startsWith('doorbell not started —'))?.tone).toBe('error')
+    expect(lines.find((l) => l.text.startsWith('integration not started —'))?.tone).toBe('error')
   })
 
-  it('a legacy server (no ack negotiated) is an error line: envelopes are marked delivered on push', async () => {
-    await resetRegistryForTest()
-    const stub = {
-      start() {},
-      async stop() {},
-      getHealth: () => ({ state: { kind: 'READY' }, authenticated: true, ackNegotiated: false, counters: { frames: 0, selfFiltered: 0, knocks: 1, invites: 0 } }),
-    }
-    await registerDoorbell({
+  it('a running integration reports the socket state, the counters and where the texts came from', async () => {
+    await registerIntegration({
       accountId: 'default',
       config: account({}).config as never,
-      logger: { trace() {}, debug() {}, info() {}, warn() {}, error() {}, child() { return this } } as never,
-      createRuntime: () => stub as unknown as AgentchatChannelRuntime,
-      build: () => ({ invoker: null, handlers: {} }),
+      logger: silent,
+      createSocket: () => stubSocket('connected'),
+      build: () => ({ invoker: { counters: () => ({ wakes: 3, cycles: 2, turns: 1 }), stop() {} } as never, texts: { source: 'cache', stop() {} } as unknown as TextsStore, handlers: {} }),
     })
-    try {
-      const placed = placeDoorbell({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', stateDir: process.env.OPENCLAW_STATE_DIR })
-      process.env.AGENTCHAT_API_KEY = KEY
-      const probe = await agentchatStatusAdapter.probeAccount!({ account: account(placed.cfg) as never, timeoutMs: 2000, cfg: placed.cfg as never } as never)
-      expect(probe.doorbell?.ackNegotiated).toBe(false)
-      expect(probe.ok).toBe(false)
-      const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
-      const legacy = lines.find((l) => l.text.startsWith('server did not negotiate the ack capability'))
-      expect(legacy?.tone).toBe('error')
-    } finally {
-      await resetRegistryForTest()
-    }
+    const cfg = { agents: { defaults: { workspace } } }
+    const probe = await agentchatStatusAdapter.probeAccount!({ account: account(cfg) as never, timeoutMs: 2000, cfg: cfg as never } as never)
+    expect(probe.integration).toEqual({ mode: 'on', state: 'connected', wakes: 3, cycles: 2, turns: 1, texts: 'cache' })
+    const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+    expect(lines.find((l) => l.text.startsWith('integration connected'))).toEqual({ text: 'integration connected — wakes 3, cycles 2, turns 1', tone: 'success' })
+    expect(lines.find((l) => l.text.startsWith('served texts from the cached copy'))?.tone).toBe('warn')
+  })
+
+  it('a blocked integration without texts is a warn line and an error line', async () => {
+    await registerIntegration({
+      accountId: 'default',
+      config: account({}).config as never,
+      logger: silent,
+      createSocket: () => stubSocket('blocked'),
+      build: () => ({ invoker: null, texts: { source: null, stop() {} } as unknown as TextsStore, handlers: {} }),
+    })
+    const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
+    expect(probe.integration).toEqual({ mode: 'on', state: 'blocked', texts: 'missing' })
+    const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+    expect(lines.find((l) => l.text.startsWith('integration blocked'))?.tone).toBe('warn')
+    expect(lines.find((l) => l.text.startsWith('served texts not available yet'))?.tone).toBe('error')
+  })
+
+  it('AGENTCHAT_WAKE=off is a warn line', async () => {
+    process.env.AGENTCHAT_WAKE = 'off'
+    const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
+    expect(probe.integration?.mode).toBe('off')
+    const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+    expect(lines.find((l) => l.text.startsWith('integration off'))?.tone).toBe('warn')
   })
 
   it('a disabled account: not ok, and the capabilities lines name `config set … enabled true`, never channels add', async () => {

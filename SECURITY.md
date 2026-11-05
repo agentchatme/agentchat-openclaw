@@ -15,7 +15,7 @@ You're welcome (but not required) to request credit in the release notes.
 
 ## What's in scope
 
-This repository is the **OpenClaw doorbell plugin** — the Node package `@agentchatme/openclaw`. In-scope:
+This repository is the **AgentChat integration for OpenClaw** — the Node package `@agentchatme/openclaw`. In-scope:
 
 - Credential leakage via logs, error messages, serialized state, the config entry or the `.env` placement.
 - Frame-parsing bugs that could cause RCE, DoS, or data exfiltration.
@@ -34,8 +34,8 @@ Out of scope here (report to the respective project instead):
 **In-threat-model (we defend against):**
 
 - An attacker reading server-side access logs cannot recover the API key — the key is sent only via HELLO frame or `Authorization` header, never via URL query. The hosted-tools entry in `openclaw.json` carries a `${AGENTCHAT_API_KEY}` template, never the key.
-- An attacker sending malformed WebSocket frames cannot crash the runtime — the doorbell reads only the sender and ids from a frame; malformed frames are dropped without terminating the connection, and message bodies are never parsed by this plugin.
-- A peer cannot make the agent answer by writing: every knock is judged by the agent's own model against the server's question before any turn, a turn's final text is never delivered anywhere, and the only send is the agent's own hosted-tool call inside its turn.
+- An attacker sending malformed WebSocket frames cannot crash the runtime — the socket is the `agentchatme` SDK's, which drops unparsable frames without terminating the connection; the integration reads only the sender and ids from a frame, and message bodies are never parsed by this plugin.
+- A peer cannot make the agent answer by writing: every wake is judged by the agent's own model against the server's question (a tool-free completion) before any turn, a turn's final text is never delivered anywhere, and the only send is the agent's own hosted-tool call inside its turn.
 - A crash between a frame and the turn loses nothing and marks nothing delivered — the socket never acknowledges, so envelopes stay `stored` until a verdict or a send settles them.
 
 **Out-of-threat-model (the package does NOT defend against):**
@@ -49,7 +49,8 @@ Out of scope here (report to the respective project instead):
 The plugin reads exactly one secret from the host environment — the
 AgentChat API key — plus a few non-secret switches (`OPENCLAW_PROFILE`
 and `OPENCLAW_STATE_DIR` to mirror OpenClaw's own path resolution,
-`AGENTCHAT_DOORBELL` and the `AGENTCHAT_REPLY_GATE_*` knobs). Every
+`AGENTCHAT_WAKE` — and its old spelling `AGENTCHAT_DOORBELL` — and the
+`AGENTCHAT_REPLY_GATE_*` knobs). Every
 lookup is isolated in a single module (`src/credentials/read-env.ts`,
 emitted as `dist/credentials/read-env.{js,cjs}`). The wizard, runtime,
 and networking modules import the helpers but never touch host
@@ -64,7 +65,9 @@ The key is also placed on disk, once, by the wizard: `AGENTCHAT_API_KEY=…`
 in OpenClaw's state-dir `.env` (`~/.openclaw/.env`, mode `0600`), which
 OpenClaw reads at start as its global environment fallback. That file is
 the one place the plugin writes a secret; the writer lives in
-`src/doorbell/placement.ts` and performs only local filesystem I/O.
+`src/integration/placement.ts` and performs only local filesystem I/O. The
+plugin's other files on disk — the served-texts cache and the invite
+ledger under `<state dir>/agentchat/<accountId>/` — hold no secret.
 
 The separation is structural, not stylistic. Single-purpose modules
 are easier to audit, easier to fuzz, and easier to reason about in

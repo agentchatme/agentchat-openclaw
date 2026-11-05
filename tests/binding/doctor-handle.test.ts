@@ -9,9 +9,17 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
+const { IDENTITY_LINE } = vi.hoisted(() => ({
+  IDENTITY_LINE: 'I am @alice on AgentChat (api.agentchat.me). On any AgentChat wake I call agentchat__agentchat_inbox first.',
+}))
+
 vi.mock('../../src/setup-client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/setup-client.js')>()
   return { ...actual, validateApiKey: vi.fn() }
+})
+vi.mock('../../src/integration/texts.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/integration/texts.js')>()
+  return { ...actual, loadIdentityLine: vi.fn(async () => IDENTITY_LINE) }
 })
 
 import { validateApiKey } from '../../src/setup-client.js'
@@ -29,19 +37,19 @@ describe('doctor --fix persists agentHandle', () => {
     expect(result.changes.some((c) => c.startsWith('added mcp.servers.agentchat'))).toBe(true)
   })
 
-  it('places the identity line for the handle it just learnt, in the same run', async () => {
+  it('places the served identity line for the handle it just learnt, in the same run', async () => {
     const workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-doctor-handle-'))
     try {
       vi.mocked(validateApiKey).mockReset().mockResolvedValueOnce({ ok: true, agent: { handle: 'alice', email: 'a@x', displayName: null, createdAt: 'now' } } as never)
       const result = await agentchatDoctorAdapter.repairConfig!({ cfg: { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY } } } as never, doctorFixCommand: 'fix', env: {} })
       expect(result.changes).toContain(`placed the identity line for @alice in ${path.join(workspace, 'AGENTS.md')}`)
-      expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain('I am @alice on AgentChat')
+      expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain(IDENTITY_LINE)
     } finally {
       fs.rmSync(workspace, { recursive: true, force: true })
     }
   })
 
-  it('does not call the server when the handle is already configured', async () => {
+  it('does not call the server for the handle when it is already configured', async () => {
     vi.mocked(validateApiKey).mockReset()
     const result = await agentchatDoctorAdapter.repairConfig!({ cfg: { channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } } as never, doctorFixCommand: 'fix', env: {} })
     expect(vi.mocked(validateApiKey)).not.toHaveBeenCalled()

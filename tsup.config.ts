@@ -21,7 +21,7 @@ export default defineConfig({
     // rationale.
     'binding/agents-anchor': 'src/binding/agents-anchor.ts',
     // OpenClaw layout resolver (state dir, workspace, agent roster) —
-    // pure, shared by the anchor module and the doorbell; its own dist
+    // pure, shared by the anchor module and the integration; its own dist
     // file so the anchor bundle keeps no inlined copy.
     'openclaw-layout': 'src/openclaw-layout.ts',
   },
@@ -55,7 +55,7 @@ export default defineConfig({
     '../credentials/read-env.js',
     '../credentials/read-env.cjs',
     // AGENTS.md anchor — kept as its own runtime file. Consumers in
-    // src/ import './binding/agents-anchor.js'; src/doorbell/ imports
+    // src/ import './binding/agents-anchor.js'; src/integration/ imports
     // '../binding/agents-anchor.js'. Both are rewritten to the dist-root
     // sibling by scripts/fix-cjs-extensions.mjs.
     './binding/agents-anchor.js',
@@ -63,7 +63,7 @@ export default defineConfig({
     '../binding/agents-anchor.js',
     '../binding/agents-anchor.cjs',
     // OpenClaw layout — imported as './openclaw-layout.js' from src/ and as
-    // '../openclaw-layout.js' from src/binding/ and src/doorbell/.
+    // '../openclaw-layout.js' from src/binding/ and src/integration/.
     './openclaw-layout.js',
     './openclaw-layout.cjs',
     '../openclaw-layout.js',

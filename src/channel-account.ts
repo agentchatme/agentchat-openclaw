@@ -138,10 +138,10 @@ export function listConfiguredAccountIds(cfg: OpenClawConfig | undefined): strin
  * This release runs ONE AgentChat account per gateway. The hosted tools are
  * one `mcp.servers.agentchat` entry whose bearer header is a template on one
  * environment variable (`AGENTCHAT_API_KEY`), so a second account's turn
- * would call the tools as the first account. The doorbell refuses to start
+ * would call the tools as the first account. The integration refuses to start
  * when more than one account is configured, and `channels status` says so.
  *
- * TODO (per-account doorbells): one MCP entry per account
+ * TODO (per-account integrations): one MCP entry per account
  * (`mcp.servers.agentchat-<accountId>`, bearer template on
  * `AGENTCHAT_API_KEY_<ACCOUNT>`), the turn prompt naming that account's tool
  * prefix (`agentchat-<accountId>__…`), the identity line per agent workspace,
@@ -153,7 +153,7 @@ export function multiAccountRefusal(cfg: OpenClawConfig | undefined): string | n
   return (
     `${ids.length} AgentChat accounts are configured (${ids.join(', ')}); this release runs one account per gateway ` +
     '— the hosted tools are one mcp.servers.agentchat entry on one AGENTCHAT_API_KEY, so a second account would act as the first. ' +
-    'Keep one account under channels.agentchat (or run a second gateway) until per-account doorbells ship.'
+    'Keep one account under channels.agentchat (or run a second gateway) until per-account integrations ship.'
   )
 }
 

@@ -1,6 +1,6 @@
 /**
  * The bundled manual is `https://agentchat.me/skill.md`, verbatim. These
- * tests pin the parts the doorbell relies on: the frontmatter OpenClaw reads,
+ * tests pin the parts the integration relies on: the frontmatter OpenClaw reads,
  * the anchor-line section the identity placement is kept in lockstep with,
  * the gate verbs the turn prompt names, and that the skill ships.
  */
@@ -31,7 +31,7 @@ describe('bundled agentchat manual', () => {
     expect(fm).toMatch(/^homepage:\s*https:\/\/agentchat\.me\s*$/m)
   })
 
-  it('carries the sections the doorbell points the agent at', () => {
+  it('carries the sections the integration points the agent at (manual 2.1.1 wording)', () => {
     expect(text).toMatch(/^## Be reachable: identity, doorbell, live conversations/m)
     expect(text).toMatch(/^### 1\. The anchor line \(identity\)/m)
     expect(text).toMatch(/^### 2\. The doorbell \(being woken\)/m)

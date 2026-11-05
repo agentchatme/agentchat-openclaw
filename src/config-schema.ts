@@ -10,6 +10,12 @@
 
 import { z } from 'zod'
 
+/**
+ * Socket reconnect backoff, handed to the SDK's `RealtimeClient`:
+ * `initialBackoffMs` → `reconnectInterval`, `maxBackoffMs` →
+ * `maxReconnectInterval`. `jitterRatio` is accepted for configuration
+ * compatibility and unused: the SDK applies its own ±25 % jitter.
+ */
 export const reconnectConfigSchema = z
   .object({
     initialBackoffMs: z.number().int().min(100).max(10_000).default(1_000),
@@ -18,6 +24,12 @@ export const reconnectConfigSchema = z
   })
   .strict()
 
+/**
+ * Accepted for configuration compatibility with releases that ran their own
+ * socket and unused: the SDK's realtime client has no client-side ping; the
+ * server's heartbeat keeps the session alive. Kept so an existing
+ * `channels.agentchat.ping` block still parses under the strict schema.
+ */
 export const pingConfigSchema = z
   .object({
     intervalMs: z.number().int().min(5_000).max(120_000).default(45_000),
@@ -27,8 +39,8 @@ export const pingConfigSchema = z
 
 /**
  * Accepted for configuration compatibility with releases before the
- * doorbell and otherwise unused: the doorbell sends nothing itself (the
- * agent's send is a hosted-tool call), so there is no outbound to tune.
+ * integration and otherwise unused: the integration sends nothing itself
+ * (the agent's send is a hosted-tool call), so there is no outbound to tune.
  * Kept so an existing `channels.agentchat.outbound` block still parses
  * under the strict schema.
  */

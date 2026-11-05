@@ -1,29 +1,31 @@
 /**
- * Knock coalescing — one gate cycle per burst, not per frame.
+ * Wake coalescing — one gate cycle per burst, not per frame.
  *
- * A `message.new` frame is a knock: a hint that the tray changed, never the
- * carrier of what changed. A group burst arrives as many frames seconds
- * apart; the server already bundles its *wakes* for such bursts, and the
- * doorbell does the same for the socket. The window is trailing-edge: every
- * knock restarts it, so the cycle fires `debounceMs` after the LAST knock of
- * the burst — with a hard cap: no later than `maxWindowMs` after the FIRST
- * knock, so a steady trickle cannot starve the gate. Whoever fires then
- * reads the whole tray, so nothing a later frame announced is missed — the
- * tray is the truth, the knock is not.
+ * A `message.new` frame, a `wake` frame and a successful connect are all
+ * wakes: a hint that the tray changed, never the carrier of what changed. A
+ * group burst arrives as many frames seconds apart; the server already
+ * bundles its webhook wakes for such bursts, and the integration does the
+ * same for the socket. The window is trailing-edge: every wake restarts it,
+ * so the cycle fires `debounceMs` after the LAST wake of the burst — with a
+ * hard cap: no later than `maxWindowMs` after the FIRST wake, so a steady
+ * trickle cannot starve the gate. Whoever fires then reads the whole tray,
+ * so nothing a later frame announced is missed — the tray is the truth, the
+ * wake is not.
  *
- * `knockAfter` serves the local retry ladder: when a gate cycle could not
- * complete (model unreachable, server error) the doorbell schedules another
- * knock later instead of dropping the tray. The server's own ladder only
- * rings webhooks; a connected socket gets no re-ring, so the doorbell
- * carries that duty itself. When a delayed knock is already pending the
- * SOONER deadline wins — a later retry never pushes an earlier one back.
+ * `wakeAfter` serves the local retry ladder: when a gate cycle could not
+ * complete (model unreachable, server error, turn refused) the invoker
+ * schedules another wake later instead of dropping the tray. The server's
+ * own ladder only rings webhooks; a connected socket gets no re-ring, so the
+ * integration carries that duty itself. When a delayed wake is already
+ * pending the SOONER deadline wins — a later retry never pushes an earlier
+ * one back.
  */
 
 export const DEFAULT_DEBOUNCE_MS = 2_000
-/** A burst fires at most this long after its first knock, however many knocks keep landing. */
+/** A burst fires at most this long after its first wake, however many wakes keep landing. */
 export const DEFAULT_MAX_WINDOW_MS = 6_000
 
-export interface KnockCoalescerOptions {
+export interface WakeCoalescerOptions {
   readonly onFire: () => void
   readonly debounceMs?: number
   readonly maxWindowMs?: number
@@ -32,7 +34,7 @@ export interface KnockCoalescerOptions {
   readonly clearTimeout?: (handle: NodeJS.Timeout) => void
 }
 
-export class KnockCoalescer {
+export class WakeCoalescer {
   private readonly onFire: () => void
   private readonly debounceMs: number
   private readonly maxWindowMs: number
@@ -46,11 +48,11 @@ export class KnockCoalescer {
   private delayedDeadline: number | null = null
   private stopped = false
 
-  knocks = 0
+  wakes = 0
   absorbed = 0
   fires = 0
 
-  constructor(options: KnockCoalescerOptions) {
+  constructor(options: WakeCoalescerOptions) {
     const debounce = options.debounceMs ?? DEFAULT_DEBOUNCE_MS
     if (!(debounce >= 0)) throw new RangeError('debounceMs must be >= 0')
     const maxWindow = options.maxWindowMs ?? DEFAULT_MAX_WINDOW_MS
@@ -68,18 +70,18 @@ export class KnockCoalescer {
     return this.timer !== null
   }
 
-  /** True while a retry knock is scheduled and has not fired. */
+  /** True while a retry wake is scheduled and has not fired. */
   get delayedPending(): boolean {
     return this.delayed !== null
   }
 
   /**
-   * A knock. The first one of a burst arms the window; every later one is
+   * A wake. The first one of a burst arms the window; every later one is
    * absorbed and restarts it (trailing edge), never past the burst's cap.
    */
-  knock(): void {
+  wake(): void {
     if (this.stopped) return
-    this.knocks += 1
+    this.wakes += 1
     const now = this.now()
     if (this.timer === null) {
       this.burstStartedAt = now
@@ -93,8 +95,8 @@ export class KnockCoalescer {
     this.timer = this._setTimeout(() => this.fire(), delay)
   }
 
-  /** A delayed knock (retry ladder). The sooner pending deadline is kept. */
-  knockAfter(delayMs: number): void {
+  /** A delayed wake (retry ladder). The sooner pending deadline is kept. */
+  wakeAfter(delayMs: number): void {
     if (this.stopped) return
     const delay = Math.max(0, delayMs)
     const deadline = this.now() + delay
@@ -108,11 +110,11 @@ export class KnockCoalescer {
     this.delayed = this._setTimeout(() => {
       this.delayed = null
       this.delayedDeadline = null
-      this.knock()
+      this.wake()
     }, delay)
   }
 
-  /** Cancel everything; later knocks are ignored. */
+  /** Cancel everything; later wakes are ignored. */
   stop(): void {
     this.stopped = true
     if (this.timer !== null) {
@@ -136,7 +138,7 @@ export class KnockCoalescer {
       this.onFire()
     } catch {
       // The callback belongs to the invoker; a failure there must not kill
-      // the timer machinery. The next knock re-arms as usual.
+      // the timer machinery. The next wake re-arms as usual.
     }
   }
 }

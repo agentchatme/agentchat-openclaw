@@ -2,15 +2,16 @@
  * ChannelDoctorAdapter — `openclaw doctor` for the placement.
  *
  * `collectPreviewWarnings` (plain `openclaw doctor`) reports what the
- * doorbell needs and does not find in the config, the environment and the
- * workspace. `repairConfig` (`openclaw doctor --fix` only — OpenClaw never
- * calls it in preview) adds the `mcp.servers.agentchat` entry (a template on
- * `AGENTCHAT_API_KEY`, never the key; hand-written entries are left alone),
- * persists `agentHandle`, writes the llm opt-in for a non-default bound
- * agent, and places a missing identity line for the configured handle — a
- * file, but the one placement a re-enable through
- * `openclaw config set channels.agentchat.enabled true` cannot restore any
- * other way. An identity line already present is never rewritten.
+ * integration needs and does not find in the config, the environment and
+ * the workspace — without touching the network: the identity line is
+ * checked against the last served copy when one is cached. `repairConfig`
+ * (`openclaw doctor --fix` only — OpenClaw never calls it in preview) adds
+ * the `mcp.servers.agentchat` entry (a template on `AGENTCHAT_API_KEY`,
+ * never the key; hand-written entries are left alone), persists
+ * `agentHandle`, writes the llm opt-in for a non-default bound agent, and
+ * places a missing identity line for the configured handle — fetching the
+ * served text first (server, then the cached copy). An identity line
+ * already holding that text is never rewritten.
  *
  * A disabled account gets one warning naming the re-enable route and no
  * repair: its identity line and tools entry are absent by design.
@@ -28,16 +29,18 @@ import {
   readAgentchatConfigField,
 } from '../channel-account.js'
 import { validateApiKey } from '../setup-client.js'
-import { checkPlacement, resolvePlacementAgentId, restoreIdentityLine } from '../doorbell/placement.js'
-import { DEFAULT_API_BASE, withHostedMcpEntry } from '../doorbell/mcp.js'
-import { LLM_AGENT_OVERRIDE_PATH, readLlmAgentOverrideOptIn, withLlmAgentOverrideOptIn } from '../doorbell/model.js'
+import { checkPlacement, resolvePlacementAgentId, restoreIdentityLine } from '../integration/placement.js'
+import { DEFAULT_API_BASE, withHostedMcpEntry } from '../integration/mcp.js'
+import { LLM_AGENT_OVERRIDE_PATH, readLlmAgentOverrideOptIn, withLlmAgentOverrideOptIn } from '../integration/model.js'
+import { cachedIdentityLine, loadIdentityLine } from '../integration/texts.js'
 import { resolveBoundAgentId, resolveOpenClawDefaultAgentId } from '../openclaw-layout.js'
+import { createSdkClient } from './sdk-client.js'
 
 export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
   collectPreviewWarnings({ cfg, doctorFixCommand, env }) {
     const warnings: string[] = []
     const refusal = multiAccountRefusal(cfg)
-    if (refusal) warnings.push(`[${AGENTCHAT_CHANNEL_ID}] doorbell will not start — ${refusal}`)
+    if (refusal) warnings.push(`[${AGENTCHAT_CHANNEL_ID}] integration will not start — ${refusal}`)
     for (const accountId of listConfiguredAccountIds(cfg)) {
       if (!isAgentchatAccountEnabled(cfg, accountId)) {
         warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${agentchatReenableHint(cfg, accountId)}`)
@@ -47,7 +50,7 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
       const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
       const handle = readAgentchatConfigField(cfg, accountId, 'agentHandle')
       const agentId = resolvePlacementAgentId(cfg, accountId)
-      for (const check of checkPlacement({ cfg, handle, apiKey, apiBase, agentId, accountId, env })) {
+      for (const check of checkPlacement({ cfg, handle, apiKey, apiBase, identityLine: cachedIdentityLine(accountId), agentId, accountId, env })) {
         if (check.ok) continue
         const fix = check.name === 'mcp' ? ` (${doctorFixCommand} adds it)` : ''
         warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${check.name}: ${check.detail}${fix}`)
@@ -69,7 +72,7 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
     let next: OpenClawConfig = cfg
     const bases = new Map<string, string | undefined>()
     // One identity line per workspace: with several accounts configured the
-    // doorbell refuses to start and the line would flip between handles.
+    // integration refuses to start and the line would flip between handles.
     const placeIdentityLines = multiAccountRefusal(cfg) === null
     for (const accountId of listConfiguredAccountIds(cfg)) {
       // Disabled: the identity line and the tools entry are absent by design.
@@ -101,12 +104,14 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
         if (optIn.changed) changes.push(`set ${LLM_AGENT_OVERRIDE_PATH} = true (account ${accountId} is bound to agent "${bound}")`)
       }
       // The identity line for the configured handle (including one learnt
-      // just above). Present → untouched, byte for byte.
+      // just above), with the served text. Present → untouched, byte for byte.
       const handle = readAgentchatConfigField(next, accountId, 'agentHandle')
       if (apiKey && handle && placeIdentityLines) {
-        const restored = restoreIdentityLine(next, accountId, handle)
+        const identityLine = await loadIdentityLine({ client: createSdkClient({ apiKey, apiBase }), accountId })
+        const restored = restoreIdentityLine(next, accountId, handle, identityLine)
         if (restored.outcome === 'placed') changes.push(`placed the identity line for @${handle.replace(/^@/, '')} in ${restored.path}`)
         else if (restored.outcome === 'failed') warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] could not place the identity line for @${handle.replace(/^@/, '')}: ${restored.detail ?? 'unknown error'}`)
+        else if (restored.outcome === 'skipped') warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] identity line for @${handle.replace(/^@/, '')} not placed: ${restored.detail ?? 'the served text is not available'}`)
       }
     }
     // One hosted server entry per API base; every configured account on the

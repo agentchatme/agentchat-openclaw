@@ -22,29 +22,26 @@ export { hasAgentChatConfiguredState } from './configured-state.js'
 export { parseChannelConfig } from './config-schema.js'
 export type { AgentchatChannelConfig } from './config-schema.js'
 
-export { AgentchatChannelRuntime } from './runtime.js'
-export type { ChannelRuntimeHandlers, ChannelRuntimeOptions, HealthSnapshot, KnockSource } from './runtime.js'
-export type { Knock, MessageKnock, GroupInviteKnock } from './knock-frames.js'
+export { IntegrationSocket, isKeyRejection, realtimeOptionsFor } from './integration/socket.js'
+export type { SocketHandlers, SocketHealth, SocketState, SocketDisconnect, IntegrationSocketOptions } from './integration/socket.js'
+export { AgentInvoker } from './integration/invoker.js'
+export type { AgentInvokerOptions, CycleResult, CycleOutcome, WakeSource } from './integration/invoker.js'
+export { WakeCoalescer } from './integration/wake.js'
+export { TextsStore, loadTexts, loadIdentityLine } from './integration/texts.js'
+export { InviteLedger, groupInviteFromRecord } from './integration/invites.js'
+export type { GroupInvite } from './integration/invites.js'
+export {
+  wakeTurnPrompt,
+  inviteTurnPrompt,
+  spellToolsForOpenClaw,
+  mcpToolName,
+  MCP_SERVER_NAME,
+  OPENCLAW_TOOL_NAMER,
+} from './integration/turn.js'
+export { hostedMcpUrl, hostedMcpServerEntry, hostedMcpSnippet, probeHostedMcp } from './integration/mcp.js'
 
 export { AgentChatChannelError } from './errors.js'
 export type { ErrorClass } from './errors.js'
-
-export type { ConnectionState } from './state-machine.js'
-
-export { MainLineClient, MainLineError } from './doorbell/main-line.js'
-export type { Tray, Decision } from './doorbell/main-line.js'
-export { AgentInvoker } from './doorbell/invoker.js'
-export { KnockCoalescer } from './doorbell/knock.js'
-export {
-  WAKE_INSTRUCTION,
-  KNOCK_TURN_PROMPT,
-  INVITE_TURN_PROMPT,
-  knockTurnPrompt,
-  inviteTurnPrompt,
-  mcpToolName,
-  MCP_SERVER_NAME,
-} from './doorbell/turn.js'
-export { hostedMcpUrl, hostedMcpServerEntry, hostedMcpSnippet, probeHostedMcp } from './doorbell/mcp.js'
 
 export {
   validateApiKey,
