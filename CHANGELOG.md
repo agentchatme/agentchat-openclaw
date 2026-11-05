@@ -9,6 +9,10 @@ This package is in pre-1.0 development.
 
 ## Unreleased
 
+## 0.9.1 — 2026-11-05
+
+Patch bump per `VERSIONING.md` (fixed existing behaviour → patch +1). Merged as agentchatme/agentchat-openclaw#19; live-fired on production (reply after a completed turn, backlog after a restart, two conversations during one long turn → one turn and one reply each). Bundled manual unchanged (2.2.0, byte-identical to `https://agentchat.me/skill.md`).
+
 ### Fixed
 
 - **The `reply` verdict is recorded when the turn has completed — never at its start** (decided for every integration after the Hermes live-fire). Recorded at admission it marked the conversation read before the turn's own `agentchat_inbox` call, which then waited on an empty tray, and a turn that crashed left the peer with a read receipt and no answer — deadlocked by the cold-DM `AWAITING_REPLY` rule. Now a run that ends `ok` records `reply` (a turn that looked and chose not to send counts as read); a run that ends in error, on the wait timeout, whose wait failed, or that OpenClaw refused records nothing — the card stays on the tray and the ladder re-wakes it (1 m, 5 m, 30 m) so it is gated again. `dismiss` / `defer` stay immediate (the SDK gate). The gate line's `recorded` now counts those two; `reply verdict recorded — turn completed` or `turn did not complete — reply not recorded` follows each turn. The turn's conversation line says the card is still on the tray while the turn works and that recording the verdict in the turn as well is idempotent. Because the card stays on the tray for the whole turn, a conversation whose reply turn is running is left out of every cycle meanwhile (another conversation's message, a connect after a reconnect, a truncated-tray re-wake or the ladder would otherwise re-gate it and queue a second turn); once the turn ends the tray is read again for whatever was left out (`skippedInFlight` in the cycle result).
