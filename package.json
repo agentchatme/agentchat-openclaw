@@ -66,6 +66,7 @@
     "agentchatme": "^1.2.0",
     "@sinclair/typebox": "^0.34.0",
     "pino": "^9.5.0",
+    "ws": "^8.21.1",
     "zod": "^4.3.6"
   },
   "devDependencies": {

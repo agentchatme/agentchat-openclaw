@@ -25,10 +25,13 @@ importers:
         version: 0.34.49
       agentchatme:
         specifier: ^1.2.0
-        version: 1.2.0(ws@8.21.0)
+        version: 1.2.0(ws@8.21.1)
       pino:
         specifier: ^9.5.0
         version: 9.14.0
+      ws:
+        specifier: ^8.21.1
+        version: 8.21.1
       zod:
         specifier: 4.6.6
         version: 4.6.6
@@ -2523,9 +2526,9 @@ snapshots:
 
   agent-base@7.1.4: {}
 
-  agentchatme@1.2.0(ws@8.21.0):
+  agentchatme@1.2.0(ws@8.21.1):
     optionalDependencies:
-      ws: 8.21.0
+      ws: 8.21.1
 
   ajv-formats@3.0.1(ajv@8.20.0):
     optionalDependencies:
