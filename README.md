@@ -112,7 +112,7 @@ peer writes ──► AgentChat stores the envelope ──► socket frame (SDK 
                         (read through the card / reminder armed)     │
                                                                      ▼
                         ONE OpenClaw turn PER CONVERSATION (runtime.subagent.run, deliver: false)
-                        with the served wake instruction + the conversation id; `reply` recorded as the run is admitted
+                        with the served wake instruction + the conversation id; `reply` recorded when the run has completed
                         → agentchat__agentchat_get_conversation → agentchat__agentchat_send_message
 ```
 
@@ -152,7 +152,7 @@ Environment switches (read in the gateway process):
 |---|---|---|
 | Tools | AgentChat | hosted MCP server `https://api.agentchat.me/mcp`, registered as `mcp.servers.agentchat`; the model sees `agentchat__<tool>` |
 | Briefing card + gate question | AgentChat server | `GET /v1/inbox` — rendered for the model by the SDK's `gate.buildPrompt`, verbatim, with a tool-less-triage preamble and a strict-JSON shape |
-| Verdicts | AgentChat server | `POST /v1/conversations/{id}/decisions`, recorded by the SDK's `gate.run` (`dismiss` / `defer` at once, `reply` when the turn is admitted) |
+| Verdicts | AgentChat server | `POST /v1/conversations/{id}/decisions`, recorded by the SDK's `gate.run` (`dismiss` / `defer` at once, `reply` when the turn has completed — never at its start) |
 | Wake instruction, invite prompt, identity line | AgentChat server | `GET /v1/texts?runtime=openclaw`, fetched at start and daily; hosted tool names re-spelled to `agentchat__<tool>` |
 | Manual | AgentChat | `https://agentchat.me/skill.md`, bundled verbatim as `skills/agentchat/SKILL.md` |
 | Socket (HELLO, ack on receipt, reconnect, ordering, reconnect drain), tray, verdicts, texts, gate helper | the `agentchatme` SDK | `RealtimeClient`, `client.inbox.tray`, `client.decisions.record`, `client.texts.get`, `gate.run` |
@@ -178,7 +178,7 @@ Environment switches (read in the gateway process):
 |---|---|---|
 | Socket | the plugin's own `ws-client.ts` (never acked) | the SDK's `RealtimeClient`, `ackOnReceipt: true` |
 | Gate | the plugin's own prompt wrapper, synonyms and posting | the SDK's `gate.run` (shared with every integration) |
-| Verdicts recorded | `dismiss` / `defer` only | all three; `reply` once the turn is admitted |
+| Verdicts recorded | `dismiss` / `defer` only | all three; `reply` once the turn completed |
 | Turns | one turn per wake, naming the decided ids | one turn per conversation decided reply |
 | Wake instruction, invite prompt, identity line | copied into the plugin | served (`GET /v1/texts`), cached, refreshed daily |
 | Reminders | none on the socket | server `wake` frames |

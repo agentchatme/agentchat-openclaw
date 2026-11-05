@@ -101,7 +101,7 @@ afterEach(() => {
 })
 
 describe('AgentInvoker — wake → tray → gate → one turn per reply', () => {
-  it('a burst of wakes is one cycle; every reply is its own turn with the served instruction and its conversation id; all three verdicts are recorded, reply only once its turn is admitted', async () => {
+  it('a burst of wakes is one cycle; every reply is its own turn with the served instruction and its conversation id; all three verdicts are recorded, reply only once its turn completed', async () => {
     const t = make({
       trays: [tray([card('conv_a', 'msg_a'), card('conv_b', 'msg_b'), card('conv_c', 'msg_c'), card('conv_d', 'msg_d')])],
       answer: decisions(['conv_a', 'reply', 'open_request'], ['conv_b', 'dismiss', 'closing'], ['conv_c', 'defer'], ['conv_d', 'reply']),
@@ -121,7 +121,7 @@ describe('AgentInvoker — wake → tray → gate → one turn per reply', () =>
       expect(turn.sessionKey).toMatch(/^agent:main:subagent:agentchat-wake-/)
       expect(turn.lane).toBe('agentchat-integration:default')
     }
-    // dismiss and defer are recorded by the gate at once; reply after each turn's admission.
+    // dismiss and defer are recorded by the gate at once; reply after each turn COMPLETED (the fake turn completes at once).
     expect(t.posts).toEqual([
       { conversationId: 'conv_b', body: { decision: 'dismiss', category: 'closing', through_message_id: 'msg_b' } },
       { conversationId: 'conv_c', body: { decision: 'defer', through_message_id: 'msg_c' } },
@@ -132,7 +132,9 @@ describe('AgentInvoker — wake → tray → gate → one turn per reply', () =>
     expect(t.events.indexOf('start:conv_d')).toBeLessThan(t.events.indexOf('record:conv_d:reply'))
     expect(t.invoker.counters()).toMatchObject({ wakes: 5, absorbed: 4, turns: 2, retryRung: 0 })
     const gateLine = t.logger.at('info').find((l) => l.msg === 'gate')
-    expect(gateLine?.obj).toMatchObject({ cards: 4, reply: 2, dismiss: 1, defer: 1, undecided: 0, recorded: 4, recordFailures: 0, turnsStarted: 2, turnsRefused: 0 })
+    // `recorded` counts the gate's own records (dismiss, defer); the reply verdicts land as the turns complete.
+    expect(gateLine?.obj).toMatchObject({ cards: 4, reply: 2, dismiss: 1, defer: 1, undecided: 0, recorded: 2, recordFailures: 0, turnsStarted: 2, turnsRefused: 0 })
+    expect(t.logger.at('info').filter((l) => l.msg === 'reply verdict recorded — turn completed').map((l) => l.obj.conversationId)).toEqual(['conv_a', 'conv_d'])
   })
 
   it('a turn OpenClaw refuses records no reply verdict: the conversation stays unread, the ladder re-wakes, and the next cycle gates it again', async () => {
@@ -221,7 +223,7 @@ describe('AgentInvoker — wake → tray → gate → one turn per reply', () =>
     await t.settle()
     expect(t.invoker.cycles).toBe(1)
     expect(t.invoker.counters().turnsInFlight).toBe(1)
-    expect(t.posts.map((p) => p.conversationId)).toEqual(['conv_a'])
+    expect(t.posts).toEqual([]) // the reply verdict waits for the turn to complete; the card is still on the tray
 
     // The first turn has not ended; a second wake still gets its cycle (and its own turn, queued on the lane).
     t.invoker.wake('message')
@@ -229,12 +231,14 @@ describe('AgentInvoker — wake → tray → gate → one turn per reply', () =>
     await t.settle()
     expect(t.invoker.cycles).toBe(2)
     expect(t.invoker.counters().turnsInFlight).toBe(2)
-    expect(t.posts.map((p) => p.conversationId)).toEqual(['conv_a', 'conv_b'])
+    expect(t.posts).toEqual([])
 
     finish()
     await t.settle()
     expect(t.invoker.counters().turnsInFlight).toBe(0)
-    expect(t.logger.at('info').filter((l) => /turn complete/.test(l.msg ?? ''))).toHaveLength(2)
+    expect(t.logger.at('info').filter((l) => /^turn complete/.test(l.msg ?? ''))).toHaveLength(2)
+    // Both turns completed: both reply verdicts recorded, in completion order.
+    expect(t.posts.map((p) => `${p.conversationId}:${p.body.decision}`)).toEqual(['conv_a:reply', 'conv_b:reply'])
   })
 
   it('a truncated tray wakes again for the rest', async () => {
@@ -362,15 +366,60 @@ describe('AgentInvoker — failure policy and the ladder', () => {
     expect(t.logger.at('warn').some((l) => /cards left on the tray/.test(l.msg ?? ''))).toBe(true)
   })
 
-  it('a reply verdict the server refuses does not stop the turn and is logged', async () => {
+  it('a reply verdict the server refuses after the turn completed is logged and the ladder re-wakes', async () => {
     const t = make({ trays: [tray([card('conv_a', 'msg_a')])], answer: decisions(['conv_a', 'reply']), rejectRecords: new Set(['conv_a']) })
     tmpDirs.push(t.stateDir)
     t.invoker.wake('message')
     t.clock.advance(2000)
     await t.settle()
     expect(t.turns).toHaveLength(1)
-    expect(t.logger.at('warn').some((l) => /reply verdict not recorded/.test(l.msg ?? ''))).toBe(true)
+    expect(t.logger.at('warn').some((l) => /reply verdict not recorded after the turn completed/.test(l.msg ?? ''))).toBe(true)
     expect(t.invoker.counters().retryRung).toBe(1)
+  })
+
+  it('a turn that ends in error records no reply verdict: the card stays on the tray, the ladder re-wakes, and a later completed turn records it', async () => {
+    let outcome: { status: string; error?: string } = { status: 'error', error: 'model crashed' }
+    const t = make({
+      trays: [tray([card('conv_a', 'msg_a')])],
+      answer: decisions(['conv_a', 'reply']),
+      startTurn: async () => ({ ran: true, runId: 'run_x', done: Promise.resolve({ ran: true, runId: 'run_x', ...outcome }) }),
+    })
+    tmpDirs.push(t.stateDir)
+    t.invoker.wake('message')
+    t.clock.advance(2000)
+    await t.settle()
+    expect(t.posts).toEqual([])
+    expect(t.invoker.turns).toBe(1)
+    expect(t.invoker.counters().retryRung).toBe(1)
+    const notRecorded = t.logger.at('warn').find((l) => l.msg === 'turn did not complete — reply not recorded; the conversation stays unread and is gated again')
+    expect(notRecorded?.obj).toMatchObject({ conversationId: 'conv_a', status: 'error', error: 'model crashed', retry: { kind: 'armed', rung: 1 } })
+
+    // The ladder's wake: the card is still there, the gate decides again, this turn completes, the verdict is recorded.
+    outcome = { status: 'ok' }
+    t.clock.advance(60_000 + 2000)
+    await t.settle()
+    expect(t.trayCalls()).toBe(2)
+    expect(t.modelCalls()).toBe(2)
+    expect(t.posts).toEqual([{ conversationId: 'conv_a', body: { decision: 'reply', through_message_id: 'msg_a' } }])
+    expect(t.invoker.counters().retryRung).toBe(0)
+  })
+
+  it('a turn that hits the wait timeout, or whose wait failed, records nothing either', async () => {
+    for (const outcome of [{ status: 'timeout' }, { status: 'unknown', error: 'wait failed' }]) {
+      const t = make({
+        trays: [tray([card('conv_a', 'msg_a')])],
+        answer: decisions(['conv_a', 'reply']),
+        startTurn: async () => ({ ran: true, runId: 'run_t', done: Promise.resolve({ ran: true, runId: 'run_t', ...outcome }) }),
+      })
+      tmpDirs.push(t.stateDir)
+      t.invoker.wake('message')
+      t.clock.advance(2000)
+      await t.settle()
+      expect(t.posts).toEqual([])
+      expect(t.invoker.counters().retryRung).toBe(1)
+      expect(t.logger.at('warn').some((l) => l.msg?.startsWith('turn did not complete — reply not recorded'))).toBe(true)
+      t.invoker.stop()
+    }
   })
 })
 

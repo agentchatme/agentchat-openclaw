@@ -15,11 +15,14 @@ import type { AgentchatChannelConfig } from '../config-schema.js'
 import { IntegrationSocket, type IntegrationSocketOptions, type SocketHandlers } from '../integration/socket.js'
 import type { AgentInvoker } from '../integration/invoker.js'
 import type { TextsStore } from '../integration/texts.js'
+import type { MetricsRecorder } from '../metrics.js'
 
 export interface IntegrationEntry {
   readonly socket: IntegrationSocket
   readonly invoker: AgentInvoker | null
   readonly texts: TextsStore | null
+  /** The recorder the socket (and the invoker) count into; the status probe reads its snapshot when it keeps one. */
+  readonly metrics: MetricsRecorder | null
   readonly config: AgentchatChannelConfig
   readonly logger: Logger
 }
@@ -85,7 +88,14 @@ export function registerIntegration(params: RegisterIntegrationParams): Promise<
     const socket = create({ config: params.config, logger: params.logger, handlers, ...(params.socketOptions ?? {}) })
     built = params.build(socket)
 
-    const entry: IntegrationEntry = { socket, invoker: built.invoker, texts: built.texts ?? null, config: params.config, logger: params.logger }
+    const entry: IntegrationEntry = {
+      socket,
+      invoker: built.invoker,
+      texts: built.texts ?? null,
+      metrics: params.socketOptions?.metrics ?? null,
+      config: params.config,
+      logger: params.logger,
+    }
     registry.set(params.accountId, entry)
     try {
       await socket.start()

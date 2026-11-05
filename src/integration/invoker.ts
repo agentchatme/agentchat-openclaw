@@ -13,11 +13,16 @@
  *    anchor. `reply` comes back as entries the invoker records itself.
  * 4. **Turn.** For every conversation decided `reply`, start ONE OpenClaw
  *    agent turn (`runtime.subagent.run`, `deliver: false`) with the served
- *    wake instruction and the conversation id. The moment OpenClaw admits
- *    the run the `reply` verdict is recorded — the conversation is read from
- *    then on. A turn OpenClaw refuses records nothing: the conversation
- *    stays unread, and the next wake gates it again (one more gate call, no
- *    silent drop). The turn's final text is discarded — nothing is
+ *    wake instruction and the conversation id. The `reply` verdict is
+ *    recorded when the run has COMPLETED (`status: ok`) — never at its
+ *    start: recorded at admission it marked the conversation read before
+ *    the turn's own inbox call, which then waited on an empty tray, and a
+ *    turn that crashed left the peer with a read receipt and no answer. A
+ *    completed turn counts as read even if it chose not to send. A turn
+ *    OpenClaw refuses, or one that ends in error or on the wait timeout,
+ *    records nothing: the conversation stays unread, the card stays on the
+ *    tray, and the ladder re-wakes so it is gated again (one more gate
+ *    call, no silent drop). The turn's final text is discarded — nothing is
  *    auto-routed anywhere.
  *
  * One cycle at a time per account: a wake that lands while a cycle runs is
@@ -29,7 +34,7 @@
  * delay the next tray read. Completion is logged as it happens. A cycle
  * that could not complete — model unreachable, server error, turn refused —
  * re-wakes itself on a local ladder (1 m, 5 m, 30 m) because a connected
- * socket gets no re-ring from the server; the cards wait on the tray
+ * socket gets no re-wake from the server; the cards wait on the tray
  * meanwhile. One outage climbs the ladder one rung: a retry already on its
  * way is never replaced by a later one.
  *
@@ -40,7 +45,7 @@
  * restart never offers it twice.
  */
 
-import { gate, type AgentChatClient, type InboxTray, type Texts } from 'agentchatme'
+import { gate, type AgentChatClient, type GateReply, type InboxTray, type Texts } from 'agentchatme'
 
 import type { Logger } from '../log.js'
 import type { MetricsRecorder } from '../metrics.js'
@@ -53,7 +58,7 @@ import { OPENCLAW_TOOL_NAMER, integrationLane, inviteSessionKey, inviteTurnPromp
 /**
  * Local re-wake ladder after a cycle that could not complete. Mirrors the
  * server's webhook ladder (1 m, 5 m, 30 m) — a connected socket never gets
- * that re-ring, so the integration carries it. After the last rung the cycle
+ * that re-wake, so the integration carries it. After the last rung the cycle
  * waits for the next wake; the cards are still on the tray.
  */
 export const RETRY_LADDER_MS: readonly number[] = [60_000, 300_000, 1_800_000]
@@ -134,6 +139,7 @@ export interface CycleResult {
   readonly dismiss: number
   readonly defer: number
   readonly undecided: number
+  /** `dismiss` / `defer` the server took in this cycle. `reply` verdicts are recorded as their turns complete, after the cycle. */
   readonly recorded: number
   readonly recordFailures: number
   readonly turnsStarted: number
@@ -376,14 +382,15 @@ export class AgentInvoker {
       return this.result('empty', cards, truncated, started)
     }
 
-    // One turn per conversation decided reply. The verdict is recorded the
-    // moment OpenClaw admits the run (the conversation is read from then
-    // on); a refused run records nothing, so the next wake gates it again.
-    // The cycle does not wait for the runs to end: the lane serializes them.
+    // One turn per conversation decided reply. The verdict is recorded when
+    // the run has completed (see `admitted`) — never here, at its start: a
+    // refused, crashed or timed-out turn records nothing, the card stays on
+    // the tray, and the ladder re-wakes so it is gated again. The cycle does
+    // not wait for the runs to end: the lane serializes them.
     let turnsStarted = 0
     let turnsRefused = 0
-    let recordFailures = decided.recordFailures.length
-    let recorded = decided.recorded
+    const recordFailures = decided.recordFailures.length
+    const recorded = decided.recorded
     for (const entry of decided.reply) {
       const sessionKey = wakeSessionKey(this.agentId, this.now())
       this.logger.info({ sessionKey, conversationId: entry.conversationId }, 'turn start')
@@ -394,14 +401,7 @@ export class AgentInvoker {
         continue
       }
       turnsStarted += 1
-      this.admitted(sessionKey, admission, 'turn complete (final text discarded; the send is a hosted-tool call)')
-      try {
-        await entry.record()
-        recorded += 1
-      } catch (err) {
-        recordFailures += 1
-        this.logger.warn({ conversationId: entry.conversationId, err: describe(err) }, 'reply verdict not recorded — the turn runs; the conversation stays unread until it decides')
-      }
+      this.admitted(sessionKey, admission, 'turn complete (final text discarded; the send is a hosted-tool call)', entry)
     }
 
     const summary = {
@@ -469,23 +469,58 @@ export class AgentInvoker {
   /**
    * Book an admitted turn and log its end whenever it comes. The cycle moves
    * on at once; OpenClaw's lane keeps the runs of one account in order.
+   *
+   * For a reply turn the end is also when the `reply` verdict is recorded —
+   * only if the run completed (`status: ok`, no error): a turn that looked
+   * and chose not to send still counts as read. A run that ended in error,
+   * on the wait timeout, or whose wait failed records nothing: the card stays
+   * on the tray and the ladder re-wakes so the conversation is gated again.
    */
-  private admitted(sessionKey: string, admission: Extract<TurnAdmission, { ran: true }>, completeLine: string): void {
+  private admitted(sessionKey: string, admission: Extract<TurnAdmission, { ran: true }>, completeLine: string, reply?: GateReply): void {
     this.turns += 1
     this.turnsInFlight += 1
     void admission.done.then(
-      (outcome: TurnOutcome) => {
+      async (outcome: TurnOutcome) => {
         this.turnsInFlight -= 1
-        this.logger[outcome.error ? 'warn' : 'info'](
+        const completed = outcome.ran && outcome.status === 'ok' && !outcome.error
+        this.logger[completed ? 'info' : 'warn'](
           { sessionKey, runId: outcome.runId, status: outcome.status, ...(outcome.error ? { error: outcome.error } : {}) },
           completeLine,
         )
+        if (!reply) return
+        if (!completed) {
+          this.logger.warn(
+            { sessionKey, conversationId: reply.conversationId, status: outcome.status, ...(outcome.error ? { error: outcome.error } : {}), ...this.retry() },
+            'turn did not complete — reply not recorded; the conversation stays unread and is gated again',
+          )
+          return
+        }
+        await this.recordReply(sessionKey, reply)
       },
-      (err: unknown) => {
+      async (err: unknown) => {
         this.turnsInFlight -= 1
         this.logger.warn({ sessionKey, runId: admission.runId, err: describe(err) }, `${completeLine} — the wait failed`)
+        if (reply) {
+          this.logger.warn(
+            { sessionKey, conversationId: reply.conversationId, err: describe(err), ...this.retry() },
+            'turn did not complete — reply not recorded; the conversation stays unread and is gated again',
+          )
+        }
       },
     )
+  }
+
+  /** The `reply` verdict for a completed turn. A record the server refuses leaves the conversation unread; the ladder re-wakes. */
+  private async recordReply(sessionKey: string, reply: GateReply): Promise<void> {
+    try {
+      await reply.record()
+      this.logger.info({ sessionKey, conversationId: reply.conversationId }, 'reply verdict recorded — turn completed')
+    } catch (err) {
+      this.logger.warn(
+        { sessionKey, conversationId: reply.conversationId, err: describe(err), ...this.retry() },
+        'reply verdict not recorded after the turn completed — the conversation stays unread; the next wake gates it again',
+      )
+    }
   }
 
   /**

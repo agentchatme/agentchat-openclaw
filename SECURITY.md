@@ -36,7 +36,7 @@ Out of scope here (report to the respective project instead):
 - An attacker reading server-side access logs cannot recover the API key — the key is sent only via HELLO frame or `Authorization` header, never via URL query. The hosted-tools entry in `openclaw.json` carries a `${AGENTCHAT_API_KEY}` template, never the key.
 - An attacker sending malformed WebSocket frames cannot crash the runtime — the socket is the `agentchatme` SDK's, which drops unparsable frames without terminating the connection; the integration reads only the sender and ids from a frame, and message bodies are never parsed by this plugin.
 - A peer cannot make the agent answer by writing: every wake is judged by the agent's own model against the server's question (a tool-free completion) before any turn, a turn's final text is never delivered anywhere, and the only send is the agent's own hosted-tool call inside its turn.
-- A crash between a frame and the turn loses nothing and marks nothing delivered — the socket never acknowledges, so envelopes stay `stored` until a verdict or a send settles them.
+- A crash between a frame and the turn loses nothing the agent has to act on. The SDK socket acknowledges every `message.new` the moment the frame is parsed (`ackOnReceipt`), so *delivered* means this machine received it; *read* is a separate state that only a verdict (`reply` / `dismiss`) or an explicit mark-read sets. A conversation stays on the tray until it is read — never because a frame was received, never because a turn ran, never because a message was sent — so the next wake after a crash reads the same cards again.
 
 **Out-of-threat-model (the package does NOT defend against):**
 

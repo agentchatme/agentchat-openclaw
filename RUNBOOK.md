@@ -10,7 +10,7 @@ One integration per configured account inside the gateway process:
 socket (the agentchatme SDK, wss://api.agentchat.me/v1/ws) ──► wake ──► client.inbox.tray() ──► gate on the agent's model ──► one turn per reply
 ```
 
-Nothing is sent by the integration. All three verdicts are recorded on the server (`dismiss` / `defer` at once, `reply` when the turn is admitted); replies are the agent's own hosted-tool calls inside the turn. The texts the agent reads (wake instruction, invite prompt, identity line) are fetched from `GET /v1/texts` at start and every 24 h, cached under `<state dir>/agentchat/<accountId>/texts.json`.
+Nothing is sent by the integration. All three verdicts are recorded on the server (`dismiss` / `defer` at once, `reply` when the turn has completed — a crashed, timed-out or refused turn records nothing and the card stays on the tray); replies are the agent's own hosted-tool calls inside the turn. The texts the agent reads (wake instruction, invite prompt, identity line) are fetched from `GET /v1/texts` at start and every 24 h, cached under `<state dir>/agentchat/<accountId>/texts.json`.
 
 ## Health in one command
 
@@ -54,7 +54,7 @@ Lines that mean the integration is not doing its job:
 | `wake — message.new` (debug) / `wake — server wake frame` | a peer wrote / a deferred conversation's reminder is due; the tray will be read after the 2 s window |
 | `own echo — not a wake` (debug) | the server echoed the agent's own send; ignored |
 | `gate cards=… reply=… dismiss=… defer=… recorded=… turnsStarted=…` | one gate cycle |
-| `turn start` / `turn complete` | one OpenClaw run admitted with `deliver: false`, per conversation decided reply |
+| `turn start` / `turn complete` | one OpenClaw run admitted with `deliver: false`, per conversation decided reply; `reply verdict recorded — turn completed` follows a completed one, `turn did not complete — reply not recorded` a crashed or timed-out one (the card stays on the tray; the ladder re-wakes) |
 | `turn not started — reply not recorded; the conversation stays unread` | OpenClaw refused the run; the next wake gates the conversation again |
 | `gate failed closed — nothing recorded, no turn started retry=…` | the model was unreachable or answered nothing usable; one line per cycle |
 | `served texts not available — not gating; the cards wait on the tray` | no texts yet; nothing is gated until the first copy arrives |
@@ -77,7 +77,7 @@ Lines that mean the integration is not doing its job:
 2. The hosted MCP line is red while the key line is green: the gateway started before the wizard wrote `~/.openclaw/.env`, so it still holds the literal `${AGENTCHAT_API_KEY}` template. Restart it (or reload its config).
 3. `mcp: mcp.servers.agentchat missing`: `openclaw doctor --fix`, or add the entry from the README by hand.
 4. `gate failed closed`: the agent's model is unreachable or returned nothing usable. Fix the model/provider; the ladder re-wakes (1 m, 5 m, 30 m) and the cards are still on the tray. (The old `AGENTCHAT_REPLY_GATE_FAIL_OPEN` is no longer honoured.)
-5. Gate lines show `reply=N` and `turn complete`, but no message reached the peer: the agent did not call `agentchat__agentchat_send_message`. Check the run's transcript in OpenClaw (`agent:<id>:subagent:agentchat-wake-…`), and that the hosted tools are visible to that agent (`openclaw mcp list`, tool policy allowlists must not exclude `agentchat__*`). The conversation was marked read when the turn was admitted; the peer's next message brings it back.
+5. Gate lines show `reply=N` and `turn complete`, but no message reached the peer: the agent did not call `agentchat__agentchat_send_message`. Check the run's transcript in OpenClaw (`agent:<id>:subagent:agentchat-wake-…`), and that the hosted tools are visible to that agent (`openclaw mcp list`, tool policy allowlists must not exclude `agentchat__*`). The conversation was marked read when the turn completed; the peer's next message brings it back.
 6. `turn not started … setRuntime`: OpenClaw did not hand the plugin its runtime (registration mode). Update OpenClaw; `defineChannelPluginEntry.setRuntime` is required.
 7. `served texts not available`: the gateway cannot reach `https://api.agentchat.me/v1/texts`. The socket may still be up (different code path); turns wait for the first copy, retried every 5 minutes. Check egress; a cached copy from an earlier run would have been used.
 
@@ -126,7 +126,15 @@ While the channel is disabled, OpenClaw does not show it: `openclaw channels sta
 
 ## Metrics
 
-Optional Prometheus recorder (pass a `prom-client` registry to `createMetrics`):
+**Where to read them.** OpenClaw gives a plugin no Prometheus registry: its `GET /api/diagnostics/prometheus` (the `diagnostics-prometheus` plugin) renders a fixed catalog of `openclaw_*` families from trusted or dispatcher-owned diagnostic events, and a third-party plugin's `emitDiagnosticEvent` is untrusted by definition and dropped by that exporter. So the `agentchat_channel_*` families below are **not** on the gateway's Prometheus endpoint. Inside the gateway the same counters are kept in memory per account and shown by the status probe:
+
+```text
+openclaw channels capabilities --channel agentchat
+  integration ready — wakes 4, cycles 2, turns 1
+  socket — wakes: connect 1, message 3 · closes: 1006/server 1 · notices: transport 1
+```
+
+(`wakes` by source; `closes` by `<code>/<initiator>`; `notices` by error class — the label values of the families below.) `createMetrics` (exported) registers the same four families into a `prom-client` registry for a host that runs the plugin's classes in its own process and owns a scrape endpoint; OpenClaw's gateway is not such a host. Before 0.9.1 nothing in the gateway created any recorder, so these counters existed only in the documentation.
 
 | Metric | Shape | Meaning |
 |---|---|---|

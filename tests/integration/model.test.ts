@@ -10,6 +10,9 @@ import {
   LLM_AGENT_OVERRIDE_PATH,
   RuntimeUnavailableError,
   DEFAULT_GATE_MAX_TOKENS,
+  turnReadiness,
+  withTurnReadiness,
+  type TurnRequest,
 } from '../../src/integration/model.js'
 import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 
@@ -126,6 +129,58 @@ describe('createRuntimeTurnStarter — admission first, completion later', () =>
     expect(admission.ran).toBe(false)
     if (admission.ran) throw new Error('unreachable')
     expect(admission.error).toMatch(/setRuntime/)
+  })
+})
+
+describe('turnReadiness / withTurnReadiness — a turn only when it can have the hosted tools', () => {
+  const apiBase = 'https://api.agentchat.me'
+  const apiKey = 'ac_live_' + 'k'.repeat(24)
+  const ours = { mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}' } } } } }
+
+  it('not ready without the mcp.servers.agentchat entry, or with it disabled', () => {
+    expect(turnReadiness({ cfg: {}, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey } })).toEqual({
+      ready: false,
+      reason: expect.stringMatching(/mcp\.servers\.agentchat is not in the gateway config/),
+    })
+    const disabled = { mcp: { servers: { agentchat: { ...ours.mcp.servers.agentchat, enabled: false } } } }
+    expect(turnReadiness({ cfg: disabled, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey } })).toEqual({
+      ready: false,
+      reason: expect.stringMatching(/mcp\.servers\.agentchat is disabled/),
+    })
+  })
+
+  it('our entry is ready only when the key its bearer template names is in this process (a cold gateway holds the unresolved template)', () => {
+    expect(turnReadiness({ cfg: ours, apiBase, apiKey, env: {} })).toEqual({
+      ready: false,
+      reason: expect.stringMatching(/AGENTCHAT_API_KEY is not set in the gateway process/),
+    })
+    expect(turnReadiness({ cfg: ours, apiBase, apiKey, env: { AGENTCHAT_API_KEY: '   ' } }).ready).toBe(false)
+    expect(turnReadiness({ cfg: ours, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey } })).toEqual({ ready: true })
+    // OpenClaw hands the plugin the env-substituted config: the bearer then carries the key itself.
+    const substituted = { mcp: { servers: { agentchat: { ...ours.mcp.servers.agentchat, headers: { Authorization: `Bearer ${apiKey}` } } } } }
+    expect(turnReadiness({ cfg: substituted, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey } })).toEqual({ ready: true })
+  })
+
+  it("a hand-written entry is the operator's and counts as ready", () => {
+    const theirs = { mcp: { servers: { agentchat: { url: 'https://proxy.example/mcp', transport: 'streamable-http' } } } }
+    expect(turnReadiness({ cfg: theirs, apiBase, apiKey, env: {} })).toEqual({ ready: true })
+  })
+
+  it('withTurnReadiness refuses with the reason and never calls OpenClaw while not ready; passes the request through once ready', async () => {
+    let ready = false
+    const requests: TurnRequest[] = []
+    const start = withTurnReadiness(
+      async (req) => {
+        requests.push(req)
+        return { ran: true, runId: 'r', done: Promise.resolve({ ran: true, runId: 'r', status: 'ok' }) }
+      },
+      () => (ready ? { ready: true } : { ready: false, reason: 'no entry' }),
+    )
+    expect(await start({ sessionKey: 's', prompt: 'P', lane: 'l' })).toEqual({ ran: false, error: 'AgentChat tools not available to this turn: no entry' })
+    expect(requests).toEqual([])
+    ready = true
+    expect((await start({ sessionKey: 's', prompt: 'P', lane: 'l' })).ran).toBe(true)
+    expect(requests).toHaveLength(1)
   })
 })
 

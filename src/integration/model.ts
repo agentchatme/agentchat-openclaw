@@ -40,7 +40,10 @@ import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 import type { GateModelCall } from 'agentchatme'
 
 import { getPluginRuntime } from './runtime-holder.js'
+import { describeMcpEntry } from './mcp.js'
+import { MCP_SERVER_NAME } from './turn.js'
 import { AGENTCHAT_CHANNEL_ID } from '../channel-account.js'
+import { API_KEY_ENV } from '../credentials/read-env.js'
 
 export type { GateModelCall }
 
@@ -200,6 +203,60 @@ export type TurnAdmission =
 
 /** Starts one agent turn. Injectable so the invoker is testable without OpenClaw. */
 export type TurnStarter = (request: TurnRequest) => Promise<TurnAdmission>
+
+/** Whether a turn started now can look at AgentChat at all; `reason` is the operator line when it cannot. */
+export type TurnReadiness = { readonly ready: true } | { readonly ready: false; readonly reason: string }
+
+/**
+ * What can be known from inside the gateway about the hosted tools a turn
+ * will have. OpenClaw discovers MCP servers per turn and the plugin runtime
+ * exposes no tool catalog, so the plugin cannot ask which tools a run gets;
+ * it can check the two things that decide it: the `mcp.servers.agentchat`
+ * entry is in the gateway config (enabled), and the credential its bearer
+ * template names is in this process's environment (OpenClaw resolves
+ * `${AGENTCHAT_API_KEY}` from the gateway env; a gateway started before the
+ * wizard wrote `.env` holds the unresolved template until it restarts or
+ * reloads). A hand-written entry is the operator's and counts as ready.
+ *
+ * A turn that cannot have the tools is not started — nothing is recorded, the
+ * conversation stays unread, and the ladder re-wakes — instead of running
+ * blind and then marking the conversation read.
+ */
+export function turnReadiness(params: { cfg: unknown; apiBase: string; apiKey: string; env?: NodeJS.ProcessEnv }): TurnReadiness {
+  const env = params.env ?? process.env
+  switch (describeMcpEntry(params.cfg, params.apiBase, params.apiKey)) {
+    case 'missing':
+      return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is not in the gateway config — \`openclaw doctor --fix\` adds it` }
+    case 'disabled':
+      return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is disabled in the gateway config` }
+    case 'user_managed':
+      return { ready: true }
+    case 'ours': {
+      const value = env[API_KEY_ENV]
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        return {
+          ready: false,
+          reason: `${API_KEY_ENV} is not set in the gateway process, so the hosted tools' bearer template cannot resolve — restart the gateway (or reload its config) once ~/.openclaw/.env carries it`,
+        }
+      }
+      return { ready: true }
+    }
+  }
+}
+
+/**
+ * A turn starter that refuses — `{ ran: false }` with the reason — while
+ * `readiness()` says the tools cannot be there. The invoker's refusal path
+ * (no verdict recorded, the conversation stays unread, the ladder re-wakes
+ * at 1 m, 5 m, 30 m) is the bounded wait.
+ */
+export function withTurnReadiness(start: TurnStarter, readiness: () => TurnReadiness): TurnStarter {
+  return async (request) => {
+    const check = readiness()
+    if (!check.ready) return { ran: false, error: `AgentChat tools not available to this turn: ${check.reason}` }
+    return start(request)
+  }
+}
 
 /**
  * The turn starter for production. `deliver: false` — the final text is

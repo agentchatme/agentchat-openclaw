@@ -40,6 +40,8 @@ export {
 } from './integration/turn.js'
 export { hostedMcpUrl, hostedMcpServerEntry, hostedMcpSnippet, probeHostedMcp } from './integration/mcp.js'
 
+export { createMetrics, createInMemoryMetrics, createNoopMetrics } from './metrics.js'
+export type { MetricsRecorder, MetricsSnapshot, CreateMetricsOptions, PromFactory, PromRegistryLike } from './metrics.js'
 export { AgentChatChannelError } from './errors.js'
 export type { ErrorClass } from './errors.js'
 

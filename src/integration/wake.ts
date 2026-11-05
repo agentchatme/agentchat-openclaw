@@ -15,7 +15,7 @@
  * `wakeAfter` serves the local retry ladder: when a gate cycle could not
  * complete (model unreachable, server error, turn refused) the invoker
  * schedules another wake later instead of dropping the tray. The server's
- * own ladder only rings webhooks; a connected socket gets no re-ring, so the
+ * own ladder only rings webhooks; a connected socket gets no re-wake, so the
  * integration carries that duty itself. When a delayed wake is already
  * pending the SOONER deadline wins — a later retry never pushes an earlier
  * one back.

@@ -18,6 +18,7 @@ import { agentchatStatusAdapter } from '../../src/binding/status.js'
 import { placeIntegration } from '../../src/integration/placement.js'
 import { probeHostedMcp } from '../../src/integration/mcp.js'
 import { registerIntegration, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
+import { createInMemoryMetrics } from '../../src/metrics.js'
 import type { IntegrationSocket, SocketState } from '../../src/integration/socket.js'
 import type { TextsStore } from '../../src/integration/texts.js'
 import { IDENTITY_LINE } from '../helpers/texts.js'
@@ -122,6 +123,31 @@ describe('status adapter — the doctor-style probe', () => {
     const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
     expect(lines.find((l) => l.text.startsWith('integration ready'))).toEqual({ text: 'integration ready — wakes 3, cycles 2, turns 1', tone: 'success' })
     expect(lines.find((l) => l.text.startsWith('served texts from the cached copy'))?.tone).toBe('warn')
+  })
+
+  it('a running integration with the gateway recorder shows the socket counters: wakes by source, closes by code/initiator, notices by class', async () => {
+    const metrics = createInMemoryMetrics()
+    metrics.setConnectionState('ready')
+    metrics.incWake({ source: 'connect' })
+    metrics.incWake({ source: 'message' })
+    metrics.incWake({ source: 'message' })
+    metrics.incDisconnect({ code: '4000', initiator: 'client' })
+    metrics.incError({ errorClass: 'transport' })
+    await registerIntegration({
+      accountId: 'default',
+      config: account({}).config as never,
+      logger: silent,
+      createSocket: () => stubSocket('ready'),
+      socketOptions: { metrics },
+      build: () => ({ invoker: { counters: () => ({ wakes: 3, cycles: 1, turns: 0 }), stop() {} } as never, texts: { source: 'server', stop() {} } as unknown as TextsStore, handlers: {} }),
+    })
+    const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
+    expect(probe.integration?.socket).toEqual({ state: 'ready', wakes: { connect: 1, message: 2 }, disconnects: { '4000/client': 1 }, errors: { transport: 1 } })
+    const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+    expect(lines.find((l) => l.text.startsWith('socket — '))).toEqual({
+      text: 'socket — wakes: connect 1, message 2 · closes: 4000/client 1 · notices: transport 1',
+      tone: 'muted',
+    })
   })
 
   it('a blocked integration without texts is a warn line and an error line', async () => {

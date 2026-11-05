@@ -59,11 +59,11 @@ export function spellToolsForOpenClaw(text: string): string {
 /**
  * The prompt a wake turn starts with: the served wake instruction and, when
  * the gate decided a specific conversation, one factual line naming it. The
- * `reply` verdict is recorded as the turn is admitted, which marks the
- * conversation read and takes it off the tray — so the turn is told which
- * conversation to open, and that the verdict is already taken care of.
- * Whether the tray still shows the card when the turn looks depends on the
- * race between the record and the turn's first call, so the line says so.
+ * `reply` verdict is recorded when the turn has completed — never at its
+ * start — so while the turn runs the conversation is still unread and its
+ * card still on the tray; the line says so, names the conversation to open,
+ * and says the verdict is taken care of (recording it in the turn as well is
+ * idempotent).
  */
 export function wakeTurnPrompt(texts: Pick<Texts, 'wake_instruction'>, conversationId?: string): string {
   const instruction = texts.wake_instruction.trim()
@@ -74,8 +74,9 @@ export function wakeTurnPrompt(texts: Pick<Texts, 'wake_instruction'>, conversat
 /** The one line of ours in a wake turn: facts about this turn, with OpenClaw's tool name. */
 export function conversationLine(conversationId: string): string {
   return (
-    `Conversation to answer in this turn: ${conversationId}. The gate decided reply and your reply verdict for it is being recorded; ` +
-    `if this conversation still shows on the tray, do not record another verdict for it — open it with ${GET_CONVERSATION_TOOL} and reply.`
+    `Conversation to answer in this turn: ${conversationId}. The gate decided reply; its card is still on the tray while you work, ` +
+    `and the reply verdict for it is recorded for you when this turn completes (recording it yourself with ${DECIDE_TOOL} is idempotent) — ` +
+    `open it with ${GET_CONVERSATION_TOOL} and reply.`
   )
 }
 
