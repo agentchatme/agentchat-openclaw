@@ -42,8 +42,8 @@ import {
   resolveIntegrationAgentId,
   resolveGateAgent,
   readLlmAgentOverrideOptIn,
+  readLiveConfig,
   turnReadiness,
-  withTurnReadiness,
   LLM_AGENT_OVERRIDE_PATH,
   type ChannelRuntimeLike,
 } from '../integration/model.js'
@@ -220,10 +220,15 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           agentId,
           client,
           callModel: createRuntimeModelCall({ agentIdOverride, ...(gateTimeoutMs !== undefined ? { timeoutMs: gateTimeoutMs } : {}) }),
-          // A turn is started only when it can have the hosted tools (the
-          // MCP entry in this config, its key in this process): a connect
-          // wake on a cold gateway otherwise runs a turn that cannot look.
-          startTurn: withTurnReadiness(createRuntimeTurnStarter(), () => turnReadiness({ cfg: ctx.cfg, apiBase: config.apiBase, apiKey: config.apiKey })),
+          startTurn: createRuntimeTurnStarter(),
+          // Gating waits until a turn can have the hosted tools (the MCP
+          // entry in the LIVE config — OpenClaw hot-applies `mcp.*` — and
+          // its key in this process): a connect wake on a cold gateway
+          // otherwise spends a gate call and runs a turn that cannot look.
+          readiness: () => {
+            const live = readLiveConfig(ctx.cfg)
+            return turnReadiness({ cfg: live.cfg, apiBase: config.apiBase, apiKey: config.apiKey, live: live.live })
+          },
           texts,
           invites,
           logger,

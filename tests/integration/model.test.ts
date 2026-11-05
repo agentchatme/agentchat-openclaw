@@ -11,8 +11,7 @@ import {
   RuntimeUnavailableError,
   DEFAULT_GATE_MAX_TOKENS,
   turnReadiness,
-  withTurnReadiness,
-  type TurnRequest,
+  readLiveConfig,
 } from '../../src/integration/model.js'
 import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 
@@ -166,21 +165,26 @@ describe('turnReadiness / withTurnReadiness — a turn only when it can have the
     expect(turnReadiness({ cfg: theirs, apiBase, apiKey, env: {} })).toEqual({ ready: true })
   })
 
-  it('withTurnReadiness refuses with the reason and never calls OpenClaw while not ready; passes the request through once ready', async () => {
-    let ready = false
-    const requests: TurnRequest[] = []
-    const start = withTurnReadiness(
-      async (req) => {
-        requests.push(req)
-        return { ran: true, runId: 'r', done: Promise.resolve({ ran: true, runId: 'r', status: 'ok' }) }
-      },
-      () => (ready ? { ready: true } : { ready: false, reason: 'no entry' }),
-    )
-    expect(await start({ sessionKey: 's', prompt: 'P', lane: 'l' })).toEqual({ ran: false, error: 'AgentChat tools not available to this turn: no entry' })
-    expect(requests).toEqual([])
-    ready = true
-    expect((await start({ sessionKey: 's', prompt: 'P', lane: 'l' })).ran).toBe(true)
-    expect(requests).toHaveLength(1)
+  it('the restart hint appears only when the config could not be read live', () => {
+    const live = turnReadiness({ cfg: {}, apiBase, apiKey, env: {}, live: true })
+    const snapshot = turnReadiness({ cfg: {}, apiBase, apiKey, env: {}, live: false })
+    if (live.ready || snapshot.ready) throw new Error('unreachable')
+    expect(live.reason).not.toMatch(/restart the gateway/)
+    expect(snapshot.reason).toMatch(/run `openclaw doctor --fix`, then restart the gateway/)
+    expect(turnReadiness({ cfg: {}, apiBase, apiKey, env: {} })).toEqual(live) // omitted = live
+  })
+
+  it('readLiveConfig reads the gateway config through the runtime (OpenClaw hot-applies mcp.*) and falls back to the snapshot without one', () => {
+    const snapshot = { mcp: { servers: {} } }
+    const liveCfg = { mcp: { servers: { agentchat: ours.mcp.servers.agentchat } } }
+    const runtime = { config: { loadConfig: () => liveCfg } } as unknown as PluginRuntime
+    expect(readLiveConfig(snapshot, () => runtime)).toEqual({ cfg: liveCfg, live: true })
+    expect(readLiveConfig(snapshot, () => null)).toEqual({ cfg: snapshot, live: false })
+    const throwing = { config: { loadConfig: () => { throw new Error('not in this registration mode') } } } as unknown as PluginRuntime
+    expect(readLiveConfig(snapshot, () => throwing)).toEqual({ cfg: snapshot, live: false })
+    // The two together: doctor --fix wrote the entry after start → ready without a restart.
+    const read = readLiveConfig(snapshot, () => runtime)
+    expect(turnReadiness({ cfg: read.cfg, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey }, live: read.live })).toEqual({ ready: true })
   })
 })
 

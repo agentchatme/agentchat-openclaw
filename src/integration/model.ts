@@ -208,6 +208,24 @@ export type TurnStarter = (request: TurnRequest) => Promise<TurnAdmission>
 export type TurnReadiness = { readonly ready: true } | { readonly ready: false; readonly reason: string }
 
 /**
+ * The gateway config as it is NOW. OpenClaw hot-applies `mcp.*` changes (a
+ * running gateway's turns have the tools right after `openclaw doctor --fix`
+ * wrote the entry), so a readiness check must not read the snapshot the
+ * account started with. `runtime.config.loadConfig()` is that live read;
+ * without a usable runtime, or if it throws, the snapshot is what there is
+ * (`live: false`) — and then a config fix needs a restart to be seen.
+ */
+export function readLiveConfig(fallback: unknown, runtime: () => PluginRuntime | null = getPluginRuntime): { cfg: unknown; live: boolean } {
+  try {
+    const loaded: unknown = runtime()?.config?.loadConfig?.()
+    if (loaded && typeof loaded === 'object') return { cfg: loaded, live: true }
+  } catch {
+    // fall through to the snapshot
+  }
+  return { cfg: fallback, live: false }
+}
+
+/**
  * What can be known from inside the gateway about the hosted tools a turn
  * will have. OpenClaw discovers MCP servers per turn and the plugin runtime
  * exposes no tool catalog, so the plugin cannot ask which tools a run gets;
@@ -218,17 +236,20 @@ export type TurnReadiness = { readonly ready: true } | { readonly ready: false; 
  * wizard wrote `.env` holds the unresolved template until it restarts or
  * reloads). A hand-written entry is the operator's and counts as ready.
  *
- * A turn that cannot have the tools is not started — nothing is recorded, the
- * conversation stays unread, and the ladder re-wakes — instead of running
- * blind and then marking the conversation read.
+ * The invoker checks this before the gate: while unready nothing is asked,
+ * nothing recorded, the cards wait on the tray and the ladder re-wakes —
+ * instead of a turn running blind and then marking the conversation read.
+ * `live: false` means `cfg` is the start-time snapshot (see `readLiveConfig`),
+ * so a config fix is only seen after a restart; the reason says so then.
  */
-export function turnReadiness(params: { cfg: unknown; apiBase: string; apiKey: string; env?: NodeJS.ProcessEnv }): TurnReadiness {
+export function turnReadiness(params: { cfg: unknown; apiBase: string; apiKey: string; env?: NodeJS.ProcessEnv; live?: boolean }): TurnReadiness {
   const env = params.env ?? process.env
+  const restart = params.live === false ? ', then restart the gateway (this gateway cannot re-read its config while running)' : ''
   switch (describeMcpEntry(params.cfg, params.apiBase, params.apiKey)) {
     case 'missing':
-      return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is not in the gateway config — \`openclaw doctor --fix\` adds it` }
+      return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is not in the gateway config — run \`openclaw doctor --fix\`${restart}` }
     case 'disabled':
-      return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is disabled in the gateway config` }
+      return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is disabled in the gateway config — enable it${restart}` }
     case 'user_managed':
       return { ready: true }
     case 'ours': {
@@ -241,20 +262,6 @@ export function turnReadiness(params: { cfg: unknown; apiBase: string; apiKey: s
       }
       return { ready: true }
     }
-  }
-}
-
-/**
- * A turn starter that refuses — `{ ran: false }` with the reason — while
- * `readiness()` says the tools cannot be there. The invoker's refusal path
- * (no verdict recorded, the conversation stays unread, the ladder re-wakes
- * at 1 m, 5 m, 30 m) is the bounded wait.
- */
-export function withTurnReadiness(start: TurnStarter, readiness: () => TurnReadiness): TurnStarter {
-  return async (request) => {
-    const check = readiness()
-    if (!check.ready) return { ran: false, error: `AgentChat tools not available to this turn: ${check.reason}` }
-    return start(request)
   }
 }
 

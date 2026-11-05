@@ -55,6 +55,8 @@ Lines that mean the integration is not doing its job:
 | `own echo — not a wake` (debug) | the server echoed the agent's own send; ignored |
 | `gate cards=… reply=… dismiss=… defer=… recorded=… turnsStarted=…` | one gate cycle |
 | `turn start` / `turn complete` | one OpenClaw run admitted with `deliver: false`, per conversation decided reply; `reply verdict recorded — turn completed` follows a completed one, `turn did not complete — reply not recorded` a crashed or timed-out one (the card stays on the tray; the ladder re-wakes) |
+| `AgentChat tools not available to a turn — not gating; the cards wait on the tray` (warn when the reason changes, debug per rung) / `AgentChat tools available to turns again` | no turn can have the hosted tools yet (`mcp.servers.agentchat` missing or disabled in the live config, or `AGENTCHAT_API_KEY` not in the gateway process): no gate call, nothing recorded, the ladder re-wakes; `openclaw doctor --fix` is seen by the next rung without a restart |
+| `every card on the tray has a reply turn running — nothing new to decide` / `reply turn ended — re-reading the tray …` (debug) | a conversation whose reply turn is still running is left out of later cycles (its card stays on the tray until the verdict is recorded at completion); the tray is read again once the turn ends |
 | `turn not started — reply not recorded; the conversation stays unread` | OpenClaw refused the run; the next wake gates the conversation again |
 | `gate failed closed — nothing recorded, no turn started retry=…` | the model was unreachable or answered nothing usable; one line per cycle |
 | `served texts not available — not gating; the cards wait on the tray` | no texts yet; nothing is gated until the first copy arrives |
@@ -134,7 +136,7 @@ openclaw channels capabilities --channel agentchat
   socket — wakes: connect 1, message 3 · closes: 1006/server 1 · notices: transport 1
 ```
 
-(`wakes` by source; `closes` by `<code>/<initiator>`; `notices` by error class — the label values of the families below.) `createMetrics` (exported) registers the same four families into a `prom-client` registry for a host that runs the plugin's classes in its own process and owns a scrape endpoint; OpenClaw's gateway is not such a host. Before 0.9.1 nothing in the gateway created any recorder, so these counters existed only in the documentation.
+(`wakes` by source; `closes` by `<code>/<initiator>`; `notices` by error class — the label values of the families below.) `createMetrics` (exported) registers the same four families into a `prom-client` registry for a host that runs the plugin's classes in its own process and owns a scrape endpoint; OpenClaw's gateway is not such a host. Before this release nothing in the gateway created any recorder, so these counters existed only in the documentation.
 
 | Metric | Shape | Meaning |
 |---|---|---|

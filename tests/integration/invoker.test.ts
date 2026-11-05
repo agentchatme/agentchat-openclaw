@@ -16,7 +16,7 @@ import * as path from 'node:path'
 
 import { AgentInvoker } from '../../src/integration/invoker.js'
 import { InviteLedger } from '../../src/integration/invites.js'
-import type { TurnRequest, TurnStarter } from '../../src/integration/model.js'
+import type { TurnReadiness, TurnRequest, TurnStarter } from '../../src/integration/model.js'
 import type { MetricsRecorder } from '../../src/metrics.js'
 import { Clock } from '../helpers/clock.js'
 import { capturingLogger } from '../helpers/logger.js'
@@ -32,9 +32,11 @@ function decisions(...entries: Array<[string, string, string?]>): string {
 }
 
 interface MakeOptions extends Omit<FakeClientOptions, 'texts'> {
-  answer?: string | (() => Promise<string>)
+  /** The gate model's answer; a function receives the rendered prompt (the cards it was shown). */
+  answer?: string | ((prompt: string) => Promise<string>)
   texts?: ReturnType<typeof staticTexts>
   startTurn?: TurnStarter
+  readiness?: () => TurnReadiness
   gateEnabled?: boolean
   stateDir?: string
 }
@@ -53,10 +55,10 @@ function make(opts: MakeOptions) {
   const invites = new InviteLedger({ accountId: 'default', stateDir })
   const turns: TurnRequest[] = []
   let modelCalls = 0
-  const callModel = async (): Promise<string> => {
+  const callModel = async (prompt: string): Promise<string> => {
     modelCalls += 1
     const answer = opts.answer ?? decisions()
-    return typeof answer === 'string' ? answer : answer()
+    return typeof answer === 'string' ? answer : answer(prompt)
   }
   const startTurn: TurnStarter =
     opts.startTurn ??
@@ -83,6 +85,7 @@ function make(opts: MakeOptions) {
     invites,
     logger,
     metrics,
+    ...(opts.readiness ? { readiness: opts.readiness } : {}),
     gateEnabled: opts.gateEnabled,
     debounceMs: 2000,
     now: () => clock.now,
@@ -401,6 +404,132 @@ describe('AgentInvoker — failure policy and the ladder', () => {
     expect(t.trayCalls()).toBe(2)
     expect(t.modelCalls()).toBe(2)
     expect(t.posts).toEqual([{ conversationId: 'conv_a', body: { decision: 'reply', through_message_id: 'msg_a' } }])
+    expect(t.invoker.counters().retryRung).toBe(0)
+  })
+
+  it('a conversation whose reply turn is still running is left out of later cycles: one turn, one record; a newer message after the turn ends gets a new turn', async () => {
+    let finish!: () => void
+    const firstDone = new Promise<{ ran: true; runId: string; status: string }>((resolve) => {
+      finish = () => resolve({ ran: true, runId: 'run_1', status: 'ok' })
+    })
+    const started: string[] = []
+    const t = make({
+      // The same unread card while the turn runs (its verdict is not recorded yet), then a newer message once it ended.
+      trays: [tray([card('conv_a', 'msg_a')]), tray([card('conv_a', 'msg_a'), card('conv_b', 'msg_b')]), tray([card('conv_a', 'msg_2')])],
+      // Like a real model, answers only for the cards it was shown.
+      answer: async (prompt) =>
+        decisions(...([['conv_a', 'reply'], ['conv_b', 'dismiss']] as Array<[string, string]>).filter(([id]) => prompt.includes(`"conversation_id": "${id}"`) || prompt.includes(`"conversation_id":"${id}"`))),
+      startTurn: async (req) => {
+        const id = CONVERSATION_IN_PROMPT.exec(req.prompt)?.[1] ?? 'none'
+        started.push(id)
+        return started.length === 1
+          ? { ran: true, runId: 'run_1', done: firstDone }
+          : { ran: true, runId: `run_${started.length}`, done: Promise.resolve({ ran: true, runId: `run_${started.length}`, status: 'ok' }) }
+      },
+    })
+    tmpDirs.push(t.stateDir)
+    t.invoker.wake('message')
+    t.clock.advance(2000)
+    await t.settle()
+    expect(started).toEqual(['conv_a'])
+    expect(t.posts).toEqual([])
+
+    // Another conversation's message lands mid-turn: its card is gated, conv_a's is not — no second turn, no second gate question about it.
+    t.invoker.wake('message')
+    t.clock.advance(2000)
+    await t.settle()
+    expect(t.invoker.cycles).toBe(2)
+    expect(started).toEqual(['conv_a'])
+    expect(t.posts.map((p) => `${p.conversationId}:${p.body.decision}`)).toEqual(['conv_b:dismiss'])
+    expect(t.logger.at('info').filter((l) => l.msg === 'gate').at(-1)?.obj).toMatchObject({ cards: 1, reply: 0, dismiss: 1, skippedInFlight: 1 })
+
+    // The turn ends: its verdict is recorded once, and the tray is read again for what was left out — a newer message for conv_a gets a new turn.
+    finish()
+    await t.settle()
+    expect(t.posts.map((p) => `${p.conversationId}:${p.body.decision}:${p.body.through_message_id}`)).toEqual(['conv_b:dismiss:msg_b', 'conv_a:reply:msg_a'])
+    t.clock.advance(2000)
+    await t.settle()
+    expect(t.invoker.cycles).toBe(3)
+    expect(started).toEqual(['conv_a', 'conv_a'])
+    expect(t.posts.map((p) => `${p.conversationId}:${p.body.decision}:${p.body.through_message_id}`)).toEqual(['conv_b:dismiss:msg_b', 'conv_a:reply:msg_a', 'conv_a:reply:msg_2'])
+    expect(t.invoker.counters().turnsInFlight).toBe(0)
+  })
+
+  it('a tray holding only in-flight cards is nothing to decide: no gate call, no turn, and no re-read until the turn ends', async () => {
+    let finish!: () => void
+    const done = new Promise<{ ran: true; runId: string; status: string }>((resolve) => {
+      finish = () => resolve({ ran: true, runId: 'run_1', status: 'ok' })
+    })
+    const t = make({
+      trays: [tray([card('conv_a', 'msg_a')]), tray([card('conv_a', 'msg_a')]), tray([])],
+      answer: async () => decisions(['conv_a', 'reply']),
+      startTurn: async () => ({ ran: true, runId: 'run_1', done }),
+    })
+    tmpDirs.push(t.stateDir)
+    t.invoker.wake('message')
+    t.clock.advance(2000)
+    await t.settle()
+    expect(t.modelCalls()).toBe(1)
+
+    t.invoker.wake('connect') // a reconnect mid-turn
+    t.clock.advance(2000)
+    await t.settle()
+    expect(t.invoker.cycles).toBe(2)
+    expect(t.modelCalls()).toBe(1)
+    expect(t.invoker.turns).toBe(1)
+    expect(t.logger.at('info').some((l) => l.msg === 'every card on the tray has a reply turn running — nothing new to decide')).toBe(true)
+    expect(t.clock.pending).toHaveLength(0) // nothing re-armed while the turn runs
+
+    finish()
+    await t.settle()
+    expect(t.posts.map((p) => `${p.conversationId}:${p.body.decision}`)).toEqual(['conv_a:reply'])
+    t.clock.advance(2000)
+    await t.settle()
+    expect(t.invoker.cycles).toBe(3) // the re-read: the tray is empty now
+    expect(t.trayCalls()).toBe(3)
+  })
+
+  it('nothing is gated while a turn cannot have the hosted tools: no model call, no turn, the cards wait, the ladder re-wakes, the reason is logged once until it changes', async () => {
+    let reason: string | null = 'mcp.servers.agentchat is not in the gateway config'
+    const t = make({
+      trays: [tray([card('conv_a', 'msg_a')])],
+      answer: decisions(['conv_a', 'reply']),
+      readiness: () => (reason ? { ready: false, reason } : { ready: true }),
+    })
+    tmpDirs.push(t.stateDir)
+    t.invoker.wake('connect')
+    t.clock.advance(2000)
+    await t.settle()
+    expect(t.modelCalls()).toBe(0)
+    expect(t.turns).toHaveLength(0)
+    expect(t.posts).toEqual([])
+    const unready = () => t.logger.at('warn').filter((l) => l.msg === 'AgentChat tools not available to a turn — not gating; the cards wait on the tray')
+    expect(unready()).toHaveLength(1)
+    expect(unready()[0]!.obj).toMatchObject({ cards: 1, reason, retry: { kind: 'armed', rung: 1, delayMs: 60_000 } })
+
+    // The ladder's rung, same reason: a debug line, still no gate call, the next rung armed.
+    t.clock.advance(60_000 + 2000)
+    await t.settle()
+    expect(t.trayCalls()).toBe(2)
+    expect(t.modelCalls()).toBe(0)
+    expect(unready()).toHaveLength(1)
+    expect(t.logger.at('debug').some((l) => l.msg === 'AgentChat tools not available to a turn — not gating; the cards wait on the tray')).toBe(true)
+    expect(t.invoker.counters().retryRung).toBe(2)
+
+    // A different reason is a new line.
+    reason = 'AGENTCHAT_API_KEY is not set in the gateway process'
+    t.clock.advance(300_000 + 2000)
+    await t.settle()
+    expect(unready()).toHaveLength(2)
+
+    // doctor --fix landed (live config): the next rung gates and runs the turn; the verdict is recorded on completion.
+    reason = null
+    t.clock.advance(1_800_000 + 2000)
+    await t.settle()
+    expect(t.modelCalls()).toBe(1)
+    expect(t.turns).toHaveLength(1)
+    expect(t.posts).toEqual([{ conversationId: 'conv_a', body: { decision: 'reply', through_message_id: 'msg_a' } }])
+    expect(t.logger.at('info').some((l) => l.msg === 'AgentChat tools available to turns again')).toBe(true)
     expect(t.invoker.counters().retryRung).toBe(0)
   })
 
