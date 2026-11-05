@@ -183,6 +183,37 @@ if (configSchema.uiHints) {
   delete manifest.uiHints
 }
 
+// The env-var metadata OpenClaw reads before loading the plugin lives in
+// `setup.providers[].envVars` (a string array per the manifest reference,
+// docs.openclaw.ai/plugins/manifest). The older top-level `channelEnvVars`
+// is deprecated (OpenClaw's own `channel-env-vars` descriptor: replaced by
+// `channelConfigs.<id>.schema` and setup descriptors, warned since
+// 2026-04-24, removed after 2026-07-24) and ClawHub's inspector flags it as
+// an unknown top-level field. Every OpenClaw this package supports
+// (`peerDependencies.openclaw` >= 2026.6.10) reads the setup descriptor, so
+// the legacy field is not emitted; a stray copy is dropped here so the
+// manifest can never drift back.
+const SETUP_ENV_VARS = ['AGENTCHAT_API_KEY', 'AGENTCHAT_API_BASE']
+delete manifest.channelEnvVars
+const providers = Array.isArray(manifest.setup?.providers) ? manifest.setup.providers : []
+const ours = providers.find((p) => p && p.id === CHANNEL_ID) ?? { id: CHANNEL_ID }
+manifest.setup = {
+  ...(manifest.setup ?? {}),
+  providers: [{ ...ours, envVars: SETUP_ENV_VARS }, ...providers.filter((p) => p !== ours)],
+}
+
+// Only fields the manifest reference knows may sit at the top level
+// (`manifest-unknown-fields`); package and install metadata belongs in
+// `package.json#openclaw`.
+const KNOWN_TOP_LEVEL = new Set([
+  'id', 'name', 'description', 'version', 'kind', 'channels', 'skills', 'setup',
+  'configSchema', 'uiHints', 'contracts', 'mcpServers', 'channelConfigs', 'channelAccountKeyPolicies',
+])
+const unknown = Object.keys(manifest).filter((key) => !KNOWN_TOP_LEVEL.has(key))
+if (unknown.length > 0) {
+  fail(`openclaw.plugin.json carries top-level fields the manifest reference does not know: ${unknown.join(', ')} — move them to package.json#openclaw or drop them`)
+}
+
 const nextRaw = `${JSON.stringify(manifest, null, 2)}\n`
 
 if (nextRaw === manifestRaw) {
