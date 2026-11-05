@@ -9,7 +9,7 @@ import {
   withoutHostedMcpEntry,
   probeHostedMcp,
   AUTH_HEADER_TEMPLATE,
-} from '../../src/doorbell/mcp.js'
+} from '../../src/integration/mcp.js'
 
 describe('hosted MCP entry', () => {
   it('is the hosted endpoint over streamable-http with a bearer TEMPLATE, never a key', () => {

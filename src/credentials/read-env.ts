@@ -47,9 +47,10 @@ export function readOpenClawProfileFromEnv(): string | undefined {
 
 /**
  * Reads `OPENCLAW_STATE_DIR` — OpenClaw's override for its state directory
- * (`~/.openclaw` by default; `resolveStateDir` in OpenClaw). The doorbell
+ * (`~/.openclaw` by default; `resolveStateDir` in OpenClaw). The plugin
  * places the key in `<state dir>/.env`, which OpenClaw loads at start
- * (docs.openclaw.ai/gateway/configuration/environment-variables).
+ * (docs.openclaw.ai/gateway/configuration/environment-variables), and keeps
+ * its own small state under `<state dir>/agentchat/`.
  */
 export function readOpenClawStateDirFromEnv(): string | undefined {
   const raw = process.env.OPENCLAW_STATE_DIR?.trim()
@@ -66,16 +67,31 @@ export function readOpenClawWorkspaceDirFromEnv(): string | undefined {
   return raw ? raw : undefined
 }
 
-export type DoorbellMode = 'v3' | 'off'
+/** `AGENTCHAT_WAKE=on|off` — the switch for the live receive path. */
+export const WAKE_MODE_ENV = 'AGENTCHAT_WAKE'
+/** The old spelling (`AGENTCHAT_DOORBELL=v3|off`), still honoured. */
+export const LEGACY_WAKE_MODE_ENV = 'AGENTCHAT_DOORBELL'
+
+export type WakeMode = 'on' | 'off'
+
+export interface WakeModeReading {
+  readonly mode: WakeMode
+  /** Which variable decided it (the new one wins when both are set). */
+  readonly variable: typeof WAKE_MODE_ENV | typeof LEGACY_WAKE_MODE_ENV
+}
 
 /**
- * `AGENTCHAT_DOORBELL=v3|off`. `off` keeps the hosted tools and the manual
- * but opens no socket, takes no knocks and starts no turns. Anything else
- * (including unset) is `v3`.
+ * `AGENTCHAT_WAKE=off` keeps the hosted tools and the manual but opens no
+ * socket, takes no wakes and starts no turns. Anything else (including
+ * unset) is `on`. The old spelling `AGENTCHAT_DOORBELL=off` is accepted when
+ * the new variable is unset; its old `v3` value reads as `on`.
  */
-export function readDoorbellModeFromEnv(): DoorbellMode {
-  const raw = (process.env.AGENTCHAT_DOORBELL ?? '').trim().toLowerCase()
-  return raw === 'off' ? 'off' : 'v3'
+export function readWakeModeFromEnv(): WakeModeReading {
+  const current = (process.env[WAKE_MODE_ENV] ?? '').trim().toLowerCase()
+  if (current.length > 0) return { mode: current === 'off' ? 'off' : 'on', variable: WAKE_MODE_ENV }
+  const legacy = (process.env[LEGACY_WAKE_MODE_ENV] ?? '').trim().toLowerCase()
+  if (legacy.length > 0) return { mode: legacy === 'off' ? 'off' : 'on', variable: LEGACY_WAKE_MODE_ENV }
+  return { mode: 'on', variable: WAKE_MODE_ENV }
 }
 
 const OFF_TOKENS = new Set(['0', 'false', 'off', 'no'])
@@ -86,9 +102,15 @@ export function readReplyGateEnabledFromEnv(): boolean {
   return !OFF_TOKENS.has((process.env.AGENTCHAT_REPLY_GATE_ENABLED ?? '').trim().toLowerCase())
 }
 
-/** `AGENTCHAT_REPLY_GATE_FAIL_OPEN=1` starts the turn when the gate cannot run; the default is fail-closed (silence, re-knock). */
-export function readReplyGateFailOpenFromEnv(): boolean {
-  return ON_TOKENS.has((process.env.AGENTCHAT_REPLY_GATE_FAIL_OPEN ?? '').trim().toLowerCase())
+/**
+ * `AGENTCHAT_REPLY_GATE_FAIL_OPEN` used to start the turn when the gate could
+ * not run. The SDK's gate fails closed and the integration follows it; the
+ * variable is read only to warn once that it is ignored.
+ */
+export const LEGACY_REPLY_GATE_FAIL_OPEN_ENV = 'AGENTCHAT_REPLY_GATE_FAIL_OPEN'
+
+export function readLegacyReplyGateFailOpenFromEnv(): boolean {
+  return ON_TOKENS.has((process.env[LEGACY_REPLY_GATE_FAIL_OPEN_ENV] ?? '').trim().toLowerCase())
 }
 
 /** `AGENTCHAT_REPLY_GATE_TIMEOUT_MS` — decision-call timeout override; `undefined` lets the gate apply its default. */

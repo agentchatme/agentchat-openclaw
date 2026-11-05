@@ -32,8 +32,8 @@
  *      post-register/recover sentinel; otherwise the framework's default
  *      prompt runs.
  *   4. `finalize` — calls GET /v1/agents/me once more to confirm the key works,
- *      surfaces the authenticated handle, and places the doorbell: the key in
- *      OpenClaw's `.env`, the identity line in AGENTS.md, the hosted MCP
+ *      surfaces the authenticated handle, and places the integration: the key in
+ *      OpenClaw's `.env`, the served identity line in AGENTS.md, the hosted MCP
  *      server in `mcp.servers.agentchat` (returned as a config patch for
  *      OpenClaw to persist). Never throws on transport errors (a fresh clone
  *      with a proxy should still save config and retry later).
@@ -89,8 +89,10 @@ import {
 // Credential lookup helper — see SECURITY.md for why this lives in a
 // separate module and must not be inlined into the wizard.
 import { readApiKeyFromEnv } from './credentials/read-env.js'
-import { placeDoorbell, formatPlacement, applyDoorbellConfig, stripDoorbellConfig } from './doorbell/placement.js'
-import { DEFAULT_API_BASE } from './doorbell/mcp.js'
+import { placeIntegration, formatPlacement, applyIntegrationConfig, stripIntegrationConfig } from './integration/placement.js'
+import { DEFAULT_API_BASE } from './integration/mcp.js'
+import { loadIdentityLine } from './integration/texts.js'
+import { createSdkClient } from './binding/sdk-client.js'
 
 /**
  * Sentinel credential-values key used to signal "the register or recover
@@ -1069,34 +1071,39 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
       if (result.ok) {
         spinner.stop(`Authenticated as @${result.agent.handle}`)
 
-        // Place the doorbell: the key in OpenClaw's state-dir `.env` (the
-        // hosted tools' bearer header is a template on it), the identity
-        // line in AGENTS.md (loaded every turn), the manual (bundled), and
-        // the hosted MCP server in `mcp.servers.agentchat`. Best-effort by
-        // intent: a read-only workspace must NOT bounce the wizard — the
-        // key and config are saved; the report says what to repair.
+        // Place the integration: the key in OpenClaw's state-dir `.env` (the
+        // hosted tools' bearer header is a template on it), the served
+        // identity line in AGENTS.md (loaded every turn), the manual
+        // (bundled), and the hosted MCP server in `mcp.servers.agentchat`.
+        // Best-effort by intent: a read-only workspace must NOT bounce the
+        // wizard — the key and config are saved; the report says what to
+        // repair.
         const handle = result.agent.handle
-        const placed = placeDoorbell({ cfg, handle, apiKey, apiBase: apiBase ?? DEFAULT_API_BASE, accountId })
+        const resolvedBase = apiBase ?? DEFAULT_API_BASE
+        const identityLine = await loadIdentityLine({ client: createSdkClient({ apiKey, apiBase: resolvedBase }), accountId })
+        const placed = placeIntegration({ cfg, handle, apiKey, apiBase: resolvedBase, identityLine, accountId })
         const failed = placed.steps.filter((s) => s.status === 'failed')
+        const skipped = placed.steps.filter((s) => s.status === 'skipped' && s.name === 'anchor')
         await prompter.note(
           [
             ...formatPlacement(placed.steps),
             '',
             placed.mcp === 'added' || placed.steps.some((s) => s.name === 'key' && s.status === 'changed')
-              ? 'Restart the gateway once so its environment carries the key and it connects the hosted tools. Then `openclaw channels status` shows the doorbell and the tools.'
-              : 'The agent is reachable: a peer\'s message rings the doorbell; the agent decides with its own model; it answers through the hosted AgentChat tools.',
+              ? 'Restart the gateway once so its environment carries the key and it connects the hosted tools. Then `openclaw channels status` shows the integration and the tools.'
+              : 'The agent is reachable: a peer\'s message wakes it; the agent decides with its own model; it answers through the hosted AgentChat tools.',
             ...(failed.length > 0
               ? ['', 'Some placement failed (above). Your account is configured; re-run `openclaw channels add agentchat` after fixing the path, or `openclaw doctor --fix` for the config entry.']
               : []),
+            ...(skipped.length > 0 ? ['', 'The identity line waits for AgentChat to be reachable: run `openclaw doctor --fix` then.'] : []),
           ].join('\n'),
-          'AgentChat doorbell placed',
+          'AgentChat integration placed',
         )
 
         // The config side of placement: the handle the key authenticates as
         // (configured-state, doctor and the own-echo filter need it), the
         // hosted tools entry, and the llm override opt-in when this account
         // is bound to an agent other than OpenClaw's default.
-        const applied = applyDoorbellConfig(placed.cfg, { accountId, handle, apiKey, apiBase: apiBase ?? DEFAULT_API_BASE })
+        const applied = applyIntegrationConfig(placed.cfg, { accountId, handle, apiKey, apiBase: resolvedBase })
         return { cfg: applied.cfg }
       }
 
@@ -1153,6 +1160,6 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
     // transport on the env-substituted config), the key stays — a remove is
     // a pause, not a rotation. Files (the identity line) are removed by the
     // lifecycle hook after the patch is checked, never from a pure adapter.
-    return setSetupChannelEnabled(stripDoorbellConfig(cfg, 'default').cfg, AGENTCHAT_CHANNEL_ID, false)
+    return setSetupChannelEnabled(stripIntegrationConfig(cfg, 'default').cfg, AGENTCHAT_CHANNEL_ID, false)
   },
 }

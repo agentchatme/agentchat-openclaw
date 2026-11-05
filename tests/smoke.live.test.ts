@@ -1,17 +1,18 @@
 /**
- * Live smoke tests against a deployed AgentChat API — the doorbell legs.
+ * Live smoke tests against a deployed AgentChat API — the integration's legs.
  *
- * What this exercises end-to-end (server, socket, main line; no OpenClaw):
+ * What this exercises end-to-end (server, the SDK socket, the main line; no
+ * OpenClaw):
  *   - `validateApiKey` against `GET /v1/agents/me` for two fixture agents.
  *   - `registerAgentStart` HANDLE_TAKEN path (the seeded handles are bound).
- *   - Bob's `AgentchatChannelRuntime` reaches READY, negotiates `ack`, and
- *     knocks on connect.
+ *   - Bob's `IntegrationSocket` connects and wakes on connect.
  *   - Alice DMs bob over REST (`POST /v1/messages`, plain fetch — the
- *     doorbell has no send path of its own); bob's socket delivers a
- *     `message.new` that becomes a message knock; nothing is acknowledged.
- *   - `GET /v1/inbox` for bob shows the tray with a card for that
- *     conversation and the gate question; a `dismiss` verdict with
- *     `through_message_id` is accepted (201).
+ *     integration has no send path of its own); bob's socket delivers a
+ *     `message.new` that becomes a message wake and is acknowledged on
+ *     receipt by the SDK.
+ *   - `client.inbox.tray()` for bob shows the card for that conversation and
+ *     the gate question; a `dismiss` verdict with the card's anchor is
+ *     accepted; `client.texts.get({ runtime: 'openclaw' })` serves the texts.
  *
  * How it stays out of CI's way: gated on `TEST_ALICE_API_KEY` and
  * `TEST_BOB_API_KEY` from `.env.test-agents` at the repo root (or the
@@ -23,12 +24,14 @@ import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
+import { gate } from 'agentchatme'
 
-import { AgentchatChannelRuntime } from '../src/runtime.js'
+import { IntegrationSocket } from '../src/integration/socket.js'
+import { createSdkClient } from '../src/binding/sdk-client.js'
 import { parseChannelConfig } from '../src/config-schema.js'
 import { validateApiKey, registerAgentStart } from '../src/setup-client.js'
-import { MainLineClient } from '../src/doorbell/main-line.js'
-import { cardsOf } from '../src/doorbell/gate.js'
+import { fetchTexts } from '../src/integration/texts.js'
+import { silentLogger } from './helpers/logger.js'
 
 function loadFixtureEnv(): Record<string, string> {
   const out: Record<string, string> = {}
@@ -56,10 +59,10 @@ const API_BASE = process.env.AGENTCHAT_SMOKE_API_BASE ?? process.env.API_BASE ??
 const enabled = Boolean(ALICE_KEY && BOB_KEY)
 const live = enabled ? describe : describe.skip
 
-live('live smoke — doorbell legs against the real API', () => {
-  const runtimes: AgentchatChannelRuntime[] = []
+live('live smoke — integration legs against the real API', () => {
+  const sockets: IntegrationSocket[] = []
   afterAll(async () => {
-    await Promise.all(runtimes.map((r) => r.stop(Date.now() + 5_000)))
+    await Promise.all(sockets.map((s) => s.stop()))
   })
 
   it('validateApiKey authenticates both fixture agents', async () => {
@@ -77,30 +80,40 @@ live('live smoke — doorbell legs against the real API', () => {
     if (!r.ok) expect(['handle-taken', 'rate-limited', 'email-limit-reached', 'email-exhausted']).toContain(r.reason)
   }, 30_000)
 
-  it('bob reaches READY with ack negotiated, knocks on connect and on a DM, and the tray shows the card', async () => {
-    const knocks: string[] = []
-    let authenticated: (() => void) | null = null
-    let knocked: (() => void) | null = null
-    const bob = new AgentchatChannelRuntime({
+  it('the served texts for openclaw carry the wake instruction, the invite prompt and the identity line', async () => {
+    const client = createSdkClient({ apiKey: BOB_KEY!, apiBase: API_BASE })
+    const texts = await fetchTexts(client)
+    expect(texts.wake_instruction.length).toBeGreaterThan(50)
+    expect(texts.invite_prompt.length).toBeGreaterThan(20)
+    expect(texts.identity_line).toContain(`@${BOB_HANDLE}`)
+  }, 30_000)
+
+  it('bob connects, wakes on connect and on a DM, the SDK acks the message, and the tray shows the card', async () => {
+    const wakes: string[] = []
+    let connected: (() => void) | null = null
+    let woken: (() => void) | null = null
+    const client = createSdkClient({ apiKey: BOB_KEY!, apiBase: API_BASE })
+    const bob = new IntegrationSocket({
       config: parseChannelConfig({ apiKey: BOB_KEY, apiBase: API_BASE, agentHandle: BOB_HANDLE, observability: { logLevel: 'error' } }),
+      logger: silentLogger,
+      client,
       handlers: {
-        onAuthenticated: () => authenticated?.(),
-        onKnock: (source) => {
-          knocks.push(source)
-          if (source === 'message') knocked?.()
+        onConnected: () => connected?.(),
+        onWake: (source) => {
+          wakes.push(source)
+          if (source === 'message') woken?.()
         },
       },
     })
-    runtimes.push(bob)
-    const ready = new Promise<void>((res) => (authenticated = res))
-    bob.start()
-    await Promise.race([ready, new Promise((_, rej) => setTimeout(() => rej(new Error('READY timeout')), 25_000))])
-    expect(bob.getHealth().state.kind).toBe('READY')
-    expect(bob.getHealth().ackNegotiated).toBe(true)
-    expect(knocks).toContain('connect')
+    sockets.push(bob)
+    const ready = new Promise<void>((res) => (connected = res))
+    await bob.start()
+    await Promise.race([ready, new Promise((_, rej) => setTimeout(() => rej(new Error('connect timeout')), 25_000))])
+    expect(bob.getHealth().state).toBe('ready')
+    expect(wakes).toContain('connect')
 
-    const probe = `doorbell smoke ${randomBytes(6).toString('hex')}`
-    const knock = new Promise<void>((res) => (knocked = res))
+    const probe = `integration smoke ${randomBytes(6).toString('hex')}`
+    const wake = new Promise<void>((res) => (woken = res))
     const sent = await fetch(`${API_BASE}/v1/messages`, {
       method: 'POST',
       headers: { authorization: `Bearer ${ALICE_KEY}`, 'content-type': 'application/json' },
@@ -108,16 +121,14 @@ live('live smoke — doorbell legs against the real API', () => {
     })
     expect(sent.status).toBeLessThan(300)
     const message = (await sent.json()) as { id: string; conversation_id: string }
-    await Promise.race([knock, new Promise((_, rej) => setTimeout(() => rej(new Error('knock timeout')), 25_000))])
-    expect(knocks).toContain('message')
+    await Promise.race([wake, new Promise((_, rej) => setTimeout(() => rej(new Error('wake timeout')), 25_000))])
+    expect(wakes).toContain('message')
 
-    const mainLine = new MainLineClient({ apiKey: BOB_KEY!, apiBase: API_BASE })
-    const tray = await mainLine.inbox({ waitMs: 0 })
+    const tray = await client.inbox.tray({ waitMs: 0 })
     expect(typeof tray.question).toBe('string')
-    const card = cardsOf(tray).find((c) => c.conversation_id === message.conversation_id)
+    const card = gate.cardsOf(tray).find((c) => c.conversation_id === message.conversation_id)
     expect(card).toBeDefined()
-    const preview = card?.preview as { message_id?: string } | undefined
-    const recorded = await mainLine.recordDecision(message.conversation_id, { decision: 'dismiss', throughMessageId: preview?.message_id ?? message.id })
-    expect(recorded).toBeTypeOf('object')
+    const recorded = await client.decisions.record(message.conversation_id, { decision: 'dismiss', throughMessageId: card?.preview?.message_id ?? message.id })
+    expect(recorded.decision).toBe('dismiss')
   }, 90_000)
 })

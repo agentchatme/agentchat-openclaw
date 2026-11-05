@@ -1,18 +1,23 @@
 /**
- * Cached AgentChatClient-per-account wrapper.
+ * The `agentchatme` SDK client for this plugin.
  *
- * Every binding adapter that needs to call the REST API (actions, agentTools,
- * directory, resolver, status) goes through this module so we don't spin up a
- * new HTTP client on every call and so swap-on-rotate works uniformly.
+ * `getClient` caches one `AgentChatClient` per account for everything the
+ * binding and the integration call over REST (status, the tray, verdicts,
+ * texts, the realtime client's reconnect drain) so no call spins up a new
+ * HTTP client and a key rotation swaps the cached one uniformly: the cache
+ * is keyed by `accountId` and invalidated when the apiKey or apiBase
+ * changes. `createSdkClient` is the uncached form for the setup-time paths
+ * (wizard, `channels add`, `doctor --fix`) that have a key but no parsed
+ * channel config.
  *
- * Keyed by `accountId`. On a key rotation the caller invalidates via
- * `disposeClient(accountId)` and the next `getClient` constructs a fresh one.
+ * Every client carries the plugin's identity (`openclaw/<version>`) on
+ * every request, through the SDK's own `clientIdentity` option.
  */
 
 import { AgentChatClient, type AgentChatClientOptions } from 'agentchatme'
 
 import type { AgentchatChannelConfig } from '../config-schema.js'
-import { withAgentChatClientIdentity } from '../client-identity.js'
+import { AGENTCHAT_CLIENT_IDENTITY } from '../client-identity.js'
 
 interface CacheEntry {
   readonly client: AgentChatClient
@@ -24,8 +29,18 @@ const cache = new Map<string, CacheEntry>()
 
 export interface GetClientParams {
   readonly accountId: string
-  readonly config: AgentchatChannelConfig
+  readonly config: Pick<AgentchatChannelConfig, 'apiKey' | 'apiBase'>
   readonly options?: Partial<AgentChatClientOptions>
+}
+
+/** One client, uncached. */
+export function createSdkClient(params: { apiKey: string; apiBase?: string | undefined; options?: Partial<AgentChatClientOptions> }): AgentChatClient {
+  return new AgentChatClient({
+    apiKey: params.apiKey,
+    ...(params.apiBase ? { baseUrl: params.apiBase } : {}),
+    clientIdentity: AGENTCHAT_CLIENT_IDENTITY,
+    ...params.options,
+  })
 }
 
 /**
@@ -39,12 +54,7 @@ export function getClient({ accountId, config, options }: GetClientParams): Agen
     return existing.client
   }
 
-  const client = new AgentChatClient({
-    apiKey: config.apiKey,
-    baseUrl: config.apiBase,
-    ...options,
-    fetch: withAgentChatClientIdentity(options?.fetch ?? globalThis.fetch),
-  })
+  const client = createSdkClient({ apiKey: config.apiKey, apiBase: config.apiBase, options })
 
   cache.set(accountId, {
     client,

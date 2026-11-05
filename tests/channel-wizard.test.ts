@@ -49,6 +49,15 @@ vi.mock('../src/setup-client.js', async (importOriginal) => {
     recoverAgentVerify: vi.fn(),
   }
 })
+// The identity line is served by AgentChat; the wizard's placement is tested
+// with a canned copy so no test reaches the network.
+vi.mock('../src/integration/texts.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/integration/texts.js')>()
+  return {
+    ...actual,
+    loadIdentityLine: vi.fn(async () => 'I am @alice on AgentChat (api.agentchat.me). On any AgentChat wake I call agentchat__agentchat_inbox first.'),
+  }
+})
 
 import {
   recoverAgentStart,
@@ -948,7 +957,7 @@ describe('agentchatSetupWizard.finalize', () => {
 
     const s = scripted([
       { kind: 'progress' },
-      { kind: 'note', contains: 'AgentChat doorbell placed' },
+      { kind: 'note', contains: 'AgentChat integration placed' },
     ])
 
     const result = await agentchatSetupWizard.finalize!({
@@ -970,7 +979,7 @@ describe('agentchatSetupWizard.finalize', () => {
     expect(entry.transport).toBe('streamable-http')
     expect(entry.headers.Authorization).toBe('Bearer ${AGENTCHAT_API_KEY}')
     expect(JSON.stringify(entry)).not.toContain('ac_live_abcdef0123456789abcd')
-    // Placement: the identity line landed in the workspace AGENTS.md with the manual's text.
+    // Placement: the served identity line landed in the workspace AGENTS.md.
     const agents = fs.readFileSync(path.join(wizardWorkspace, 'AGENTS.md'), 'utf8')
     expect(agents).toContain('I am @alice on AgentChat (api.agentchat.me).')
     // Placement: the key landed in the (test-redirected) OpenClaw state-dir .env.

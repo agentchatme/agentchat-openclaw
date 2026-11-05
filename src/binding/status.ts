@@ -8,19 +8,22 @@
  *   2. the hosted MCP server is reachable with that key (one MCP
  *      `initialize`), because that is where every AgentChat tool lives;
  *   3. placement: the key in the gateway environment, the identity line in
- *      AGENTS.md, the manual, the `mcp.servers.agentchat` entry.
+ *      AGENTS.md (checked against the last served copy when one is cached),
+ *      the manual, the `mcp.servers.agentchat` entry.
  *
- * Plus the socket's live state when the doorbell is running.
+ * Plus the socket's live state when the integration is running.
  */
 
 import type { ChannelStatusAdapter, ChannelCapabilitiesDisplayLine } from './openclaw-types.js'
 
 import type { AgentchatResolvedAccount } from '../channel.js'
 import { getClient } from './sdk-client.js'
-import { probeHostedMcp } from '../doorbell/mcp.js'
-import { checkPlacement, resolvePlacementAgentId, type PlacementCheck } from '../doorbell/placement.js'
-import { getDoorbell } from './runtime-registry.js'
-import { readDoorbellModeFromEnv } from '../credentials/read-env.js'
+import { probeHostedMcp } from '../integration/mcp.js'
+import { checkPlacement, resolvePlacementAgentId, type PlacementCheck } from '../integration/placement.js'
+import { cachedIdentityLine } from '../integration/texts.js'
+import type { SocketState } from '../integration/socket.js'
+import { getIntegration } from './runtime-registry.js'
+import { LEGACY_WAKE_MODE_ENV, WAKE_MODE_ENV, readWakeModeFromEnv } from '../credentials/read-env.js'
 import { agentchatReenableHint, isAgentchatAccountEnabled, multiAccountRefusal } from '../channel-account.js'
 
 export type AgentchatProbeResult = {
@@ -31,8 +34,16 @@ export type AgentchatProbeResult = {
   readonly error?: string
   readonly mcp?: { readonly ok: boolean; readonly detail: string }
   readonly placement?: readonly PlacementCheck[]
-  readonly doorbell?: { readonly mode: 'v3' | 'off'; readonly state?: string; readonly ackNegotiated?: boolean; readonly knocks?: number; readonly cycles?: number; readonly turns?: number }
-  /** Set when the doorbell refuses to start (more than one account configured). */
+  readonly integration?: {
+    readonly mode: 'on' | 'off'
+    readonly state?: SocketState
+    readonly wakes?: number
+    readonly cycles?: number
+    readonly turns?: number
+    /** Where the served texts came from: the server, the cached copy, or nowhere yet. */
+    readonly texts?: 'server' | 'cache' | 'missing'
+  }
+  /** Set when the integration refuses to start (more than one account configured). */
   readonly refusal?: string
   /** Set when the account is disabled: the re-enable route (never `channels add`, which would fetch the npm build while the plugin is not loaded). */
   readonly disabled?: string
@@ -74,32 +85,32 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
       handle: config.agentHandle ?? me.handle,
       apiKey: config.apiKey,
       apiBase: config.apiBase,
+      identityLine: cachedIdentityLine(account.accountId),
       agentId: resolvePlacementAgentId(cfg as object | undefined, account.accountId),
       accountId: account.accountId,
     })
     const enabled = account.enabled && isAgentchatAccountEnabled(cfg as never, account.accountId)
 
-    const live = getDoorbell(account.accountId)
-    const health = live?.runtime.getHealth()
+    const live = getIntegration(account.accountId)
+    const health = live?.socket.getHealth()
     const counters = live?.invoker?.counters()
-    const doorbell = {
-      mode: readDoorbellModeFromEnv(),
-      ...(health ? { state: health.state.kind, ackNegotiated: health.ackNegotiated } : {}),
-      ...(counters ? { knocks: counters.knocks, cycles: counters.cycles, turns: counters.turns } : {}),
+    const textsSource: 'server' | 'cache' | 'missing' | undefined = live ? (live.texts?.source ?? 'missing') : undefined
+    const integration: NonNullable<AgentchatProbeResult['integration']> = {
+      mode: readWakeModeFromEnv().mode,
+      ...(health ? { state: health.state } : {}),
+      ...(counters ? { wakes: counters.wakes, cycles: counters.cycles, turns: counters.turns } : {}),
+      ...(textsSource ? { texts: textsSource } : {}),
     }
     const refusal = multiAccountRefusal(cfg as never)
-    // A legacy server (no `ack` echoed) marks envelopes delivered on push,
-    // before any verdict — rule 1 is off. That is an error, not a footnote.
-    const legacyServer = health !== undefined && health.authenticated && !health.ackNegotiated
 
     return {
-      ok: enabled && me.status === 'active' && mcp.ok && placement.every((c) => c.ok) && !refusal && !legacyServer,
+      ok: enabled && me.status === 'active' && mcp.ok && placement.every((c) => c.ok) && !refusal,
       handle: me.handle,
       status: me.status,
       pausedByOwner: me.paused_by_owner ?? 'none',
       mcp,
       placement,
-      doorbell,
+      integration,
       ...(refusal ? { refusal } : {}),
       ...(enabled ? {} : { disabled: agentchatReenableHint(cfg as never, account.accountId) }),
     }
@@ -123,22 +134,21 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
     for (const check of probe.placement ?? []) {
       lines.push({ text: `${check.name}: ${check.detail}`, tone: check.ok ? 'muted' : 'warn' })
     }
-    if (probe.refusal) lines.push({ text: `doorbell not started — ${probe.refusal}`, tone: 'error' })
-    if (probe.doorbell) {
-      const d = probe.doorbell
-      if (d.mode === 'off') lines.push({ text: 'doorbell off (AGENTCHAT_DOORBELL=off): no socket, no knocks, no turns', tone: 'warn' })
+    if (probe.refusal) lines.push({ text: `integration not started — ${probe.refusal}`, tone: 'error' })
+    if (probe.integration) {
+      const d = probe.integration
+      if (d.mode === 'off') lines.push({ text: `integration off (${WAKE_MODE_ENV}=off or ${LEGACY_WAKE_MODE_ENV}=off): no socket, no wakes, no turns`, tone: 'warn' })
       else if (d.state) {
         lines.push({
-          text: `doorbell ${d.state} — knocks ${d.knocks ?? 0}, cycles ${d.cycles ?? 0}, turns ${d.turns ?? 0}`,
-          tone: d.state === 'READY' ? 'success' : 'warn',
+          text: `integration ${d.state} — wakes ${d.wakes ?? 0}, cycles ${d.cycles ?? 0}, turns ${d.turns ?? 0}`,
+          tone: d.state === 'ready' ? 'success' : 'warn',
         })
-        if (d.ackNegotiated === false && (d.state === 'READY' || d.state === 'DEGRADED')) {
-          lines.push({
-            text: 'server did not negotiate the ack capability — envelopes are marked delivered on push, before any verdict; this server predates the main line',
-            tone: 'error',
-          })
+        if (d.texts === 'missing') {
+          lines.push({ text: 'served texts not available yet (AgentChat unreachable, nothing cached) — turns wait for the first copy', tone: 'error' })
+        } else if (d.texts === 'cache') {
+          lines.push({ text: 'served texts from the cached copy — AgentChat was unreachable at start; refreshed when it is back', tone: 'warn' })
         }
-      } else if (!probe.refusal) lines.push({ text: 'doorbell not running in this process', tone: 'muted' })
+      } else if (!probe.refusal) lines.push({ text: 'integration not running in this process', tone: 'muted' })
     }
     return lines
   },

@@ -50,7 +50,7 @@ describe('plugin — shape', () => {
     expect(agentchatPlugin.capabilities.reactions).toBe(false)
   })
 
-  it('is a doorbell: gateway + status + doctor, and no tool layer or send path of its own', () => {
+  it('is an integration: gateway + status + doctor, and no tool layer or send path of its own', () => {
     expect(agentchatPlugin.gateway).toBeDefined()
     expect(agentchatPlugin.status).toBeDefined()
     expect(agentchatPlugin.doctor).toBeDefined()
@@ -210,7 +210,7 @@ describe('channel entry — shape expected by OpenClaw loader', () => {
   })
 
   it('captures OpenClaw\'s PluginRuntime through setRuntime (the gate call and the turn need it)', async () => {
-    const { getPluginRuntime, resetPluginRuntimeForTest } = await import('../src/doorbell/runtime-holder.js')
+    const { getPluginRuntime, resetPluginRuntimeForTest } = await import('../src/integration/runtime-holder.js')
     resetPluginRuntimeForTest()
     expect(typeof agentchatChannelEntry.setChannelRuntime).toBe('function')
     const fake = { llm: { complete: async () => ({ text: '' }) }, subagent: { run: async () => ({ runId: 'r' }), waitForRun: async () => ({ status: 'ok' }) } }
@@ -302,6 +302,19 @@ describe('manifest sync', () => {
     expect(block.uiHints).toBeDefined()
     expect(block.uiHints.apiKey?.label).toBe('AgentChat API key')
     expect(block.uiHints.apiKey?.sensitive).toBe(true)
+  })
+
+  it('openclaw.plugin.json carries no legacy or unknown top-level fields; env-var metadata lives in setup.providers[].envVars as an array', () => {
+    // ClawHub's inspector on 0.8.1: `channel-env-vars` (the deprecated
+    // top-level `channelEnvVars`, replaced by `channelConfigs.<id>.schema`
+    // and the setup descriptors) and `manifest-unknown-fields`. Every
+    // OpenClaw this package supports reads `setup.providers[].envVars`.
+    const manifestPath = resolve(__dirname, '..', 'openclaw.plugin.json')
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    expect(manifest.channelEnvVars).toBeUndefined()
+    expect(manifest.setup.providers).toEqual([{ id: 'agentchat', envVars: ['AGENTCHAT_API_KEY', 'AGENTCHAT_API_BASE'] }])
+    const known = new Set(['id', 'name', 'description', 'version', 'kind', 'channels', 'skills', 'setup', 'configSchema', 'uiHints', 'contracts', 'mcpServers', 'channelConfigs', 'channelAccountKeyPolicies'])
+    expect(Object.keys(manifest).filter((k) => !known.has(k))).toEqual([])
   })
 
   it('openclaw.plugin.json#uiHints matches the plugin uiHints', () => {

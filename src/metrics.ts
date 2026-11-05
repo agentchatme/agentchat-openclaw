@@ -6,20 +6,28 @@
  * our counters/gauges into it. Otherwise, we return a no-op recorder — zero
  * overhead, zero config.
  *
- * Names are prefixed with `agentchat_channel_` for easy scraping. The
- * doorbell sends nothing, so there are no outbound metrics: what it reports
- * is the socket's state and its knocks.
+ * Names are prefixed with `agentchat_channel_`. The integration sends
+ * nothing, so there are no outbound metrics: what it reports is the
+ * socket's state, its closes and errors, and the wakes it hands on.
+ *
+ * Renamed with the move to the SDK socket (dashboards: see CHANGELOG):
+ *   agentchat_channel_knock_total{source}     → agentchat_channel_wake_total{source}
+ *   agentchat_channel_reconnect_total{reason} → agentchat_channel_disconnect_total{code,initiator}
+ *   agentchat_channel_connection_state{kind}  — kept; `kind` is now the SDK's own
+ *     state (idle | connecting | ready | backoff | blocked | stopped), lower-case
+ *   agentchat_channel_error_total{errorClass} — kept; values are now
+ *     auth | transport | handler | protocol | other
  */
 
 export interface MetricsRecorder {
-  /** Incremented on every reconnect attempt. */
-  incReconnect(labels: { reason: string }): void
-  /** Incremented on every transport/channel error, labeled by error class. */
+  /** Incremented on every socket close the SDK reports; `initiator` is `server` (the wire) or `client` (the SDK's own watchdog). */
+  incDisconnect(labels: { code: string; initiator: string }): void
+  /** Incremented on every rejected HELLO (`auth`) and every other notice the SDK surfaces, labeled by class. */
   incError(labels: { errorClass: string }): void
   /** Set the current connection state (cardinality bounded by state kinds). */
   setConnectionState(kind: string): void
-  /** Incremented on every knock handed to the invoker. */
-  incKnock(labels: { source: string }): void
+  /** Incremented on every wake handed to the invoker (message frames, connects, server wake frames). */
+  incWake(labels: { source: string }): void
 }
 
 /** Minimal contract for a prom-client-compatible registry. */
@@ -52,16 +60,16 @@ export interface CreateMetricsOptions {
 export function createMetrics(options: CreateMetricsOptions): MetricsRecorder {
   const { registry, factory } = options
 
-  const reconnects = new factory.Counter({
-    name: 'agentchat_channel_reconnect_total',
-    help: 'WebSocket reconnect attempts.',
-    labelNames: ['reason'],
+  const disconnects = new factory.Counter({
+    name: 'agentchat_channel_disconnect_total',
+    help: 'WebSocket closes reported by the SDK, by close code and initiator (server | client).',
+    labelNames: ['code', 'initiator'],
     registers: [registry],
   })
 
   const errors = new factory.Counter({
     name: 'agentchat_channel_error_total',
-    help: 'Transport and channel errors, labeled by error class.',
+    help: 'Rejected HELLOs (auth) and the other notices the SDK surfaced, labeled by error class.',
     labelNames: ['errorClass'],
     registers: [registry],
   })
@@ -73,27 +81,27 @@ export function createMetrics(options: CreateMetricsOptions): MetricsRecorder {
     registers: [registry],
   })
 
-  const knocks = new factory.Counter({
-    name: 'agentchat_channel_knock_total',
-    help: 'Knocks handed to the doorbell (message frames and connects).',
+  const wakes = new factory.Counter({
+    name: 'agentchat_channel_wake_total',
+    help: 'Wakes handed to the integration (message frames, connects, server wake frames).',
     labelNames: ['source'],
     registers: [registry],
   })
 
   return {
-    incReconnect: ({ reason }) => reconnects.inc({ reason }),
+    incDisconnect: ({ code, initiator }) => disconnects.inc({ code, initiator }),
     incError: ({ errorClass }) => errors.inc({ errorClass }),
     setConnectionState: (kind) => connectionState.set({ kind }, 1),
-    incKnock: ({ source }) => knocks.inc({ source }),
+    incWake: ({ source }) => wakes.inc({ source }),
   }
 }
 
 /** No-op recorder — used when the user does not provide a Prometheus registry. */
 export function createNoopMetrics(): MetricsRecorder {
   return {
-    incReconnect: () => undefined,
+    incDisconnect: () => undefined,
     incError: () => undefined,
     setConnectionState: () => undefined,
-    incKnock: () => undefined,
+    incWake: () => undefined,
   }
 }

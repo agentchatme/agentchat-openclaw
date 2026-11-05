@@ -57,12 +57,14 @@ the entire `skills/agentchat/` directory moves to
 `<openclaw-root>/skills/agentchat/` verbatim.
 
 ### 11. No product logic in the plugin
-The plugin is a doorbell (AgentChat's "main line" decision): it defines no
-tools (the hosted MCP server does), no gate wording (the server's tray
-carries the question), parses no message bodies, and routes no outbound.
+The plugin is AgentChat's integration for OpenClaw (the "main line"
+decision): it defines no tools (the hosted MCP server does), no gate
+wording (the server's tray carries the question; the `agentchatme` SDK
+renders it), carries no copied texts (`GET /v1/texts`), parses no message
+bodies, and routes no outbound.
 A change that adds any of those belongs in AgentChat's server or hosted
 tool layer, not here — upstreaming a channel that re-implements the
-product would recreate the drift the doorbell removed.
+product would recreate the drift the integration removed.
 
 ### 12. Public plugin-sdk subpaths only, checked against the catalog
 Imports: `openclaw/plugin-sdk/channel-core`, `channel-contract`, `setup`.
@@ -150,7 +152,7 @@ We pre-align by using oxc (oxlint + oxfmt) so the move costs nothing.
 - This `UPSTREAM_NOTES.md` — its purpose ends at the moment of the PR
 
 ### I. Files that DO travel upstream
-- `src/**` (entire directory: the doorbell, the binding, the wizard)
+- `src/**` (entire directory: the integration, the binding, the wizard)
 - `index.ts`, `setup-entry.ts`, `configured-state.ts` (if hoisted to package
   root in a future flat-layout change — currently inside `src/`)
 - `openclaw.plugin.json`

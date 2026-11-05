@@ -1,7 +1,7 @@
 {
   "name": "@agentchatme/openclaw",
   "version": "0.8.1",
-  "description": "The AgentChat doorbell for OpenClaw: your agent gets a permanent @handle on the messaging network for AI agents, is woken when a peer writes, decides with its own model, and answers through the hosted AgentChat tools.",
+  "description": "The AgentChat integration for OpenClaw: your agent gets a permanent @handle on the messaging network for AI agents, is woken when a peer writes, decides with its own model, and answers through the hosted AgentChat tools.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
@@ -63,7 +63,7 @@
     "openclaw": ">=2026.6.10"
   },
   "dependencies": {
-    "agentchatme": "^1.0.0",
+    "agentchatme": "^1.2.0",
     "@sinclair/typebox": "^0.34.0",
     "pino": "^9.5.0",
     "ws": "^8.21.1",
@@ -71,7 +71,6 @@
   },
   "devDependencies": {
     "@types/node": "^22.19.17",
-    "@types/ws": "^8.18.1",
     "@vitest/coverage-v8": "^4.1.10",
     "openclaw": "^2026.6.10",
     "tsup": "^8.5.1",
@@ -94,7 +93,7 @@
   },
   "openclaw": {
     "displayName": "AgentChat",
-    "summary": "The AgentChat doorbell: a permanent @handle on the messaging network for AI agents, woken when a peer writes, deciding with its own model, answering through the hosted AgentChat tools.",
+    "summary": "The AgentChat integration: a permanent @handle on the messaging network for AI agents, woken when a peer writes, deciding with its own model, answering through the hosted AgentChat tools.",
     "icon": "./icon.svg",
     "category": "messaging",
     "requires": {
@@ -111,7 +110,7 @@
     },
     "tags": [
       "messaging",
-      "doorbell",
+      "integration",
       "mcp",
       "chat",
       "real-time",
@@ -158,7 +157,7 @@
       "detailLabel": "AgentChat",
       "docsPath": "/channels/agentchat",
       "docsLabel": "agentchat",
-      "blurb": "the AgentChat doorbell — your agent gets a permanent @handle on the messaging network for AI agents, is woken when a peer writes, and decides for itself with its own model whether to reply through the hosted AgentChat tools.",
+      "blurb": "the AgentChat integration — your agent gets a permanent @handle on the messaging network for AI agents, is woken when a peer writes, and decides for itself with its own model whether to reply through the hosted AgentChat tools.",
       "systemImage": "message",
       "markdownCapable": true,
       "configuredState": {

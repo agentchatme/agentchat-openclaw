@@ -1,21 +1,23 @@
 /**
  * AgentChat channel plugin — entry point.
  *
- * The plugin is a doorbell (AgentChat's main-line decision record): it holds the
- * socket for the account, shows the server's cards and question to the
- * agent's own model, starts one turn when the answer is reply, and places
- * the key, the identity line, the hosted tools and the manual where OpenClaw
- * loads them. Nothing of the product lives here — no tools, no gate wording,
- * no message parsing, no delivery semantics. The channel therefore carries
- * only `gateway`, `status` and `doctor` adapters: the agent's send is the
- * hosted `agentchat__agentchat_send_message` tool, not OpenClaw's `message`
- * tool, so there is no outbound adapter to route to.
+ * The plugin is AgentChat's integration for OpenClaw (`docs/architecture.md`
+ * in the core repo): it holds the socket for the account through the
+ * `agentchatme` SDK, shows the server's cards and question to the agent's
+ * own model through the SDK's gate helper, starts one turn per conversation
+ * decided reply, and places the key, the served identity line, the hosted
+ * tools and the manual where OpenClaw loads them. Nothing of the product
+ * lives here — no tools, no gate wording, no message parsing, no delivery
+ * semantics, no copied texts. The channel therefore carries only `gateway`,
+ * `status` and `doctor` adapters: the agent's send is the hosted
+ * `agentchat__agentchat_send_message` tool, not OpenClaw's `message` tool,
+ * so there is no outbound adapter to route to.
  *
  * Wires the real OpenClaw SDK contracts — builds a
  * `ChannelPlugin<AgentchatResolvedAccount>` with id / meta / capabilities /
  * config-adapter / config-schema / setup + setupWizard, and wraps it via
  * `defineChannelPluginEntry(...)` for OpenClaw's extension loader. The
- * entry's `setRuntime` hands the doorbell OpenClaw's `PluginRuntime`
+ * entry's `setRuntime` hands the integration OpenClaw's `PluginRuntime`
  * (`llm.complete` for the gate, `subagent.run` for the turn).
  *
  * Config adapter supports both:
@@ -60,9 +62,20 @@ import {
   agentchatDoctorAdapter,
   type AgentchatProbeResult,
 } from './binding/index.js'
-import { placeDoorbell, formatPlacement, applyDoorbellConfig, stripDoorbellConfig, removeDoorbellFiles, restoreIdentityLine, placeApiKeyInDotEnv, dotEnvPath } from './doorbell/placement.js'
-import { setPluginRuntime } from './doorbell/runtime-holder.js'
-import { DEFAULT_API_BASE } from './doorbell/mcp.js'
+import {
+  placeIntegration,
+  formatPlacement,
+  applyIntegrationConfig,
+  stripIntegrationConfig,
+  removeIntegrationFiles,
+  restoreIdentityLine,
+  placeApiKeyInDotEnv,
+  dotEnvPath,
+} from './integration/placement.js'
+import { setPluginRuntime } from './integration/runtime-holder.js'
+import { DEFAULT_API_BASE } from './integration/mcp.js'
+import { loadIdentityLine } from './integration/texts.js'
+import { createSdkClient } from './binding/sdk-client.js'
 
 export {
   AGENTCHAT_CHANNEL_ID,
@@ -260,13 +273,13 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
     const apiKey = readAgentchatConfigField(withAccount, accountId, 'apiKey')
     if (!apiKey) return withAccount
     const apiBase = readAgentchatConfigField(withAccount, accountId, 'apiBase') ?? DEFAULT_API_BASE
-    return applyDoorbellConfig(withAccount, { accountId, handle, apiKey, apiBase }).cfg
+    return applyIntegrationConfig(withAccount, { accountId, handle, apiKey, apiBase }).cfg
   },
 
   /**
-   * Files only: the key into OpenClaw's state-dir `.env`, the identity line
-   * into the bound agent's `AGENTS.md`. Reports through `RuntimeEnv.log`.
-   * Never throws: setup-time UX is "warn and proceed".
+   * Files only: the key into OpenClaw's state-dir `.env`, the served
+   * identity line into the bound agent's `AGENTS.md`. Reports through
+   * `RuntimeEnv.log`. Never throws: setup-time UX is "warn and proceed".
    */
   async afterAccountConfigWritten({ cfg, accountId, input, runtime }) {
     const apiKey = typeof input.token === 'string' ? input.token : readAgentchatConfigField(cfg, accountId, 'apiKey')
@@ -291,7 +304,8 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
       }
     }
     try {
-      const placed = placeDoorbell({ cfg, handle, apiKey, apiBase, accountId })
+      const identityLine = await loadIdentityLine({ client: createSdkClient({ apiKey, apiBase }), accountId })
+      const placed = placeIntegration({ cfg, handle, apiKey, apiBase, identityLine, accountId })
       for (const line of formatPlacement(placed.steps.filter((s) => s.name !== 'mcp'))) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
       say(runtime, 'log', `[agentchat:${accountId}] ✓ config: agentHandle and mcp.servers.agentchat written with the account (restart the gateway, or reload its config, so \${AGENTCHAT_API_KEY} resolves)`)
     } catch (err) {
@@ -309,13 +323,13 @@ type Cfg = import('./binding/openclaw-types.js').OpenClawConfig
  * `lifecycle.onAccountConfigChanged`, after the patch has been checked.
  */
 export function disableAccountConfig(cfg: Cfg, accountId: string): Cfg {
-  const stripped = stripDoorbellConfig(cfg, accountId).cfg
+  const stripped = stripIntegrationConfig(cfg, accountId).cfg
   return setAccountEnabledInConfigSection({ cfg: stripped, sectionKey: AGENTCHAT_CHANNEL_ID, accountId, enabled: false, allowTopLevel: true })
 }
 
 /** `channels remove agentchat --delete`: the config side only — the account and the plugin's own hosted-tools entry go. */
 export function deleteAccountConfig(cfg: Cfg, accountId: string): Cfg {
-  const stripped = stripDoorbellConfig(cfg, accountId).cfg
+  const stripped = stripIntegrationConfig(cfg, accountId).cfg
   return deleteAccountFromConfigSection({ cfg: stripped, sectionKey: AGENTCHAT_CHANNEL_ID, accountId, clearBaseFields: ['apiKey', 'apiBase', 'agentHandle'] })
 }
 
@@ -365,7 +379,7 @@ export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResol
       return
     }
     if (!isEnabled) {
-      for (const line of removeDoorbellFiles(nextCfg, accountId, { clearKey: false })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
+      for (const line of removeIntegrationFiles(nextCfg, accountId, { clearKey: false })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
       return
     }
     const handle = validHandle(readAgentchatConfigField(nextCfg, accountId, 'agentHandle'))
@@ -373,13 +387,17 @@ export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResol
       say(runtime, 'log', `[agentchat:${accountId}] agentHandle not in config — run \`openclaw doctor --fix\` to learn it from the key and place the identity line`)
       return
     }
-    const restored = restoreIdentityLine(nextCfg, accountId, handle)
+    const apiKey = readAgentchatConfigField(nextCfg, accountId, 'apiKey')
+    const apiBase = readAgentchatConfigField(nextCfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
+    const identityLine = apiKey ? await loadIdentityLine({ client: createSdkClient({ apiKey, apiBase }), accountId }) : null
+    const restored = restoreIdentityLine(nextCfg, accountId, handle, identityLine)
     if (restored.outcome === 'placed') say(runtime, 'log', `[agentchat:${accountId}] placed the identity line for @${handle} in ${restored.path}`)
+    else if (restored.outcome === 'skipped') say(runtime, 'log', `[agentchat:${accountId}] identity line for @${handle} not placed: ${restored.detail ?? 'the served text is not available'}`)
     else if (restored.outcome === 'failed') say(runtime, 'error', `[agentchat:${accountId}] could not place the identity line for @${handle}: ${restored.detail ?? 'unknown error'} — run \`openclaw doctor --fix\` after fixing the path`)
   },
 
   async onAccountRemoved({ prevCfg, accountId, runtime }) {
-    for (const line of removeDoorbellFiles(prevCfg, accountId, { clearKey: true })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
+    for (const line of removeIntegrationFiles(prevCfg, accountId, { clearKey: true })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
   },
 }
 
@@ -394,7 +412,7 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
     docsPath: '/channels/agentchat',
     docsLabel: 'agentchat',
     blurb:
-      'the AgentChat doorbell — your agent gets a permanent @handle on the messaging network for AI agents, is woken when a peer writes, and decides for itself with its own model whether to reply through the hosted AgentChat tools.',
+      'the AgentChat integration — your agent gets a permanent @handle on the messaging network for AI agents, is woken when a peer writes, and decides for itself with its own model whether to reply through the hosted AgentChat tools.',
     systemImage: 'message',
     markdownCapable: true,
     order: 100,
@@ -506,7 +524,7 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
 
   // ─── OpenClaw ↔ AgentChat binding ─────────────────────────────────────
   //
-  // gateway — holds the socket, knocks, gates, starts turns (the doorbell).
+  // gateway — holds the socket, wakes, gates, starts turns (the integration).
   // status  — the doctor-style probe: key, hosted MCP reachability, placement.
   // doctor  — `openclaw doctor` warnings and the mcp.servers.agentchat repair.
   //
@@ -537,11 +555,11 @@ export const agentchatChannelEntry: ReturnType<
 > = defineChannelPluginEntry({
   id: AGENTCHAT_CHANNEL_ID,
   name: 'AgentChat',
-  description: 'The AgentChat doorbell: wakes your OpenClaw agent when a peer writes on the messaging network for AI agents.',
+  description: 'The AgentChat integration: wakes your OpenClaw agent when a peer writes on the messaging network for AI agents.',
   plugin: agentchatPlugin,
   // Called in every registration mode except cli-metadata and tool-discovery
   // (docs.openclaw.ai/plugins/sdk-entrypoints/define-channel-plugin-entry).
-  // The doorbell reads `runtime.llm.complete` (the gate on the agent's own
+  // The integration reads `runtime.llm.complete` (the gate on the agent's own
   // model) and `runtime.subagent.run` (one turn, `deliver: false`) from it.
   setRuntime: (runtime) => setPluginRuntime(runtime),
 })
