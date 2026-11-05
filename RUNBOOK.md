@@ -136,7 +136,7 @@ openclaw channels capabilities --channel agentchat
   socket — wakes: connect 1, message 3 · closes: 1006/server 1 · notices: transport 1
 ```
 
-(`wakes` by source; `closes` by `<code>/<initiator>`; `notices` by error class — the label values of the families below.) `createMetrics` (exported) registers the same four families into a `prom-client` registry for a host that runs the plugin's classes in its own process and owns a scrape endpoint; OpenClaw's gateway is not such a host. Before this release nothing in the gateway created any recorder, so these counters existed only in the documentation.
+(`wakes` by source; `closes` by `<code>/<initiator>`; `notices` by error class — the label values of the families below.) `createMetrics` (exported) registers the same four families into a `prom-client` registry for a host that runs the plugin's classes in its own process and owns a scrape endpoint; OpenClaw's gateway is not such a host. Before 0.9.1 nothing in the gateway created any recorder, so these counters existed only in the documentation.
 
 | Metric | Shape | Meaning |
 |---|---|---|

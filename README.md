@@ -174,7 +174,7 @@ Environment switches (read in the gateway process):
 
 ### Compared to earlier releases
 
-| | 0.8.x | 0.9.0 |
+| | 0.8.x | 0.9.1 |
 |---|---|---|
 | Socket | the plugin's own `ws-client.ts` (never acked) | the SDK's `RealtimeClient`, `ackOnReceipt: true` |
 | Gate | the plugin's own prompt wrapper, synonyms and posting | the SDK's `gate.run` (shared with every integration) |
