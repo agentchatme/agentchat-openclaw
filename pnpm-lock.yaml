@@ -24,14 +24,11 @@ importers:
         specifier: ^0.34.0
         version: 0.34.49
       agentchatme:
-        specifier: ^1.0.0
-        version: 1.0.0(ws@8.21.1)
+        specifier: ^1.2.0
+        version: 1.2.0(ws@8.21.0)
       pino:
         specifier: ^9.5.0
         version: 9.14.0
-      ws:
-        specifier: ^8.21.1
-        version: 8.21.1
       zod:
         specifier: 4.6.6
         version: 4.6.6
@@ -39,9 +36,6 @@ importers:
       '@types/node':
         specifier: ^22.19.17
         version: 22.19.17
-      '@types/ws':
-        specifier: ^8.18.1
-        version: 8.18.1
       '@vitest/coverage-v8':
         specifier: ^4.1.10
         version: 4.1.10(vitest@4.1.10)
@@ -583,9 +577,6 @@ packages:
   '@types/retry@0.12.0':
     resolution: {integrity: sha512-wWKOClTTiizcZhXnPY4wikVAwmdYHp8q6DmC+EJUzAMsycb7HB32Kh9RN4+0gExjmPmZSAQjgURXIGATPegAvA==}
 
-  '@types/ws@8.18.1':
-    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
-
   '@vitest/coverage-v8@4.1.10':
     resolution: {integrity: sha512-IM49HmthevbgAO4anp1hwtoT9wYe59w0LR00gr+eagHE+ZJ5lK4sLPeO0ubgoJcwLk6dehU3R24N+FbEEKDc8g==}
     peerDependencies:
@@ -641,11 +632,11 @@ packages:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
 
-  agentchatme@1.0.0:
-    resolution: {integrity: sha512-dr8GH+cjySMS2Kk6We5akUn6V4nHgSA+7j/H1DR40vHHfCq5/6bthpoKhwTVaWfWwDPOcCXA9tlJUCSQ9Uyc9Q==}
+  agentchatme@1.2.0:
+    resolution: {integrity: sha512-5O6Q5WVUDCaI6YA/XbS9XRW8vGK0ezlSfpS/pSPaSYSkxeogt85bZDqy/TGoazDaPUCpFm8yowwFvCJsuPTcHQ==}
     engines: {node: '>=20.0.0'}
     peerDependencies:
-      ws: '>=8.0.0'
+      ws: '>=8.21.1'
     peerDependenciesMeta:
       ws:
         optional: true
@@ -2464,10 +2455,6 @@ snapshots:
 
   '@types/retry@0.12.0': {}
 
-  '@types/ws@8.18.1':
-    dependencies:
-      '@types/node': 22.19.17
-
   '@vitest/coverage-v8@4.1.10(vitest@4.1.10)':
     dependencies:
       '@bcoe/v8-coverage': 1.0.2
@@ -2536,9 +2523,9 @@ snapshots:
 
   agent-base@7.1.4: {}
 
-  agentchatme@1.0.0(ws@8.21.1):
+  agentchatme@1.2.0(ws@8.21.0):
     optionalDependencies:
-      ws: 8.21.1
+      ws: 8.21.0
 
   ajv-formats@3.0.1(ajv@8.20.0):
     optionalDependencies:
