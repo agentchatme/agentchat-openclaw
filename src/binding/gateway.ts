@@ -83,7 +83,7 @@ type StatusState = 'linked' | 'configured' | 'unstable' | 'not-linked' | 'disabl
 
 export function statusStateFor(state: SocketState): StatusState {
   switch (state) {
-    case 'connected':
+    case 'ready':
       return 'linked'
     case 'blocked':
       return 'not-linked'
@@ -91,7 +91,7 @@ export function statusStateFor(state: SocketState): StatusState {
     case 'idle':
       return 'configured'
     default:
-      // connecting, reconnecting
+      // connecting, backoff
       return 'unstable'
   }
 }
@@ -218,26 +218,14 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           gateEnabled: readReplyGateEnabledFromEnv(),
         })
         // True from the first rejected key until a HELLO is accepted again
-        // (or the account stops). The SDK reports a rejection as a close and
-        // then as the error that ends its reconnect loop; a later retry of
-        // ours would walk the same states. For the operator that is one
-        // situation, so it is one error line and one steady `blocked`
-        // status, not a health flap and an error per signal.
+        // (or the account stops). The SDK retries a rejected key with a fresh
+        // HELLO every 10–15 min and reports each rejection as `blocked`; a
+        // network failure in between takes it through `backoff`. For the
+        // operator that is one situation, so it is one error line and one
+        // steady `blocked` status at the first `blocked`, cleared at the next
+        // accepted HELLO; every signal in between is a debug line, never a
+        // health flap.
         let blocked = false
-        const block = (reason: string, line: string): void => {
-          if (blocked) {
-            ctx.log?.debug?.(`[agentchat:${ctx.accountId}] still blocked (${reason})`)
-            return
-          }
-          blocked = true
-          ctx.log?.error?.(`[agentchat:${ctx.accountId}] ${line}`)
-          ctx.setStatus(
-            withLifecycle(
-              { ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastDisconnect: { at: Date.now(), error: reason } },
-              'blocked',
-            ),
-          )
-        }
         return {
           invoker,
           texts,
@@ -257,31 +245,47 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
               // against the ledger.
               void catchUpInvites(ctx.accountId, client, invoker, logger)
             },
-            onDisconnected: (info) => {
-              if (info.keyRejected) {
-                block(
-                  `key rejected: close ${info.code}${info.reason ? ` ${info.reason}` : ''}`,
-                  `key rejected (close ${info.code}${info.reason ? ` ${info.reason}` : ''}) — the server refused the key; rotate it or re-run openclaw channels add agentchat, then restart the gateway`,
-                )
-                return
-              }
+            onBlocked: (info) => {
+              const close = `close ${info.code}${info.reason ? ` ${info.reason}` : ''}`
+              const next = info.retryInMs === null ? 'no retry scheduled' : `next HELLO in about ${Math.max(1, Math.round(info.retryInMs / 60_000))} min`
               if (blocked) {
-                ctx.log?.debug?.(`[agentchat:${ctx.accountId}] socket closed while blocked: ${info.code} ${info.reason}`)
+                ctx.log?.debug?.(`[agentchat:${ctx.accountId}] still blocked (${close}; ${next})`)
                 return
               }
-              ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: false, statusState: 'unstable' }, 'recovering'))
-            },
-            onStopped: (reason) => {
-              // The SDK ended its reconnect loop (a terminal close code). Only
-              // a new socket recovers: a gateway restart or a config reload.
-              block(`socket stopped: ${reason}`, `socket stopped — ${reason}; restart the gateway (or reload the channel config) once the key is right`)
+              blocked = true
+              ctx.log?.error?.(
+                `[agentchat:${ctx.accountId}] key rejected (${close}) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted (${next}); rotate the key with openclaw channels add agentchat or openclaw config set channels.agentchat.apiKey …`,
+              )
+              ctx.setStatus(
+                withLifecycle(
+                  { ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastDisconnect: { at: Date.now(), error: `key rejected: ${close}` } },
+                  'blocked',
+                ),
+              )
             },
             onError: (err) => {
               // While blocked the one error line already said it.
               ctx.log?.[blocked ? 'debug' : 'warn']?.(`[agentchat:${ctx.accountId}] socket error: ${err.message}`)
             },
-            onStateChanged: (next) => {
-              if (next === 'stopped') ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'configured' }, 'stopped'))
+            onStateChanged: (next, prev) => {
+              // The status follows the SDK's state. `ready` is reported by
+              // onConnected (it has the time); `connecting` keeps whatever
+              // came before (`starting` on the first attempt, `recovering`
+              // after a backoff, `blocked` during a blocked retry).
+              switch (next) {
+                case 'backoff':
+                  if (blocked) {
+                    ctx.log?.debug?.(`[agentchat:${ctx.accountId}] socket in backoff while blocked (from ${prev})`)
+                    return
+                  }
+                  ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: false, statusState: 'unstable' }, 'recovering'))
+                  return
+                case 'stopped':
+                  ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'configured' }, 'stopped'))
+                  return
+                default:
+                  return
+              }
             },
           },
         }

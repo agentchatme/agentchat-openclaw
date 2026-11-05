@@ -48,7 +48,7 @@ class StubSocket {
     this.stopped += 1
   }
   getHealth() {
-    return { state: 'connected' as const, connectedAt: null, counters: { frames: 0, selfFiltered: 0, wakes: 0, invites: 0, disconnects: 0 } }
+    return { state: 'ready' as const, connectedAt: null, counters: { frames: 0, selfFiltered: 0, wakes: 0, invites: 0, disconnects: 0 } }
   }
 }
 

@@ -6,12 +6,14 @@
  *   - the delivery ack is on the wire before any wake handler — and before
  *     the gate's model call when a real invoker is wired in;
  *   - `group.invite.received` is handed on; malformed ones are dropped;
- *   - the SDK's connection events map onto connected / reconnecting /
- *     blocked / stopped, a rejected key is told apart from a plain close;
+ *   - the SDK's lifecycle is reported as it is: `ready` / `backoff` /
+ *     `blocked` / `stopped` from its state, a rejected key from its
+ *     `blocked` event (the SDK, not the plugin, tells it from a plain close
+ *     and retries it 10–15 min later);
  *   - handler errors never escape; `stop()` is final.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -22,11 +24,9 @@ import { InviteLedger } from '../../src/integration/invites.js'
 import {
   IntegrationSocket,
   classifyRealtimeError,
-  isKeyRejection,
-  isRealtimeStopped,
   realtimeOptionsFor,
-  terminalCloseOf,
   wakeSourceOf,
+  type SocketBlocked,
   type SocketHandlers,
 } from '../../src/integration/socket.js'
 import type { MetricsRecorder } from '../../src/metrics.js'
@@ -46,7 +46,7 @@ function recordingMetrics(): MetricsRecorder & { states: string[]; wakes: string
     errors: [] as string[],
     setConnectionState: (kind: string) => void m.states.push(kind),
     incWake: ({ source }: { source: string }) => void m.wakes.push(source),
-    incDisconnect: ({ code }: { code: string }) => void m.disconnects.push(code),
+    incDisconnect: ({ code, initiator }: { code: string; initiator: string }) => void m.disconnects.push(`${code}:${initiator}`),
     incError: ({ errorClass }: { errorClass: string }) => void m.errors.push(errorClass),
   }
   return m
@@ -72,7 +72,7 @@ afterEach(async () => {
 })
 
 describe('IntegrationSocket — wakes', () => {
-  it('starts the SDK socket with an OpenClaw HELLO; an accepted HELLO is a connect wake and `connected`', async () => {
+  it('starts the SDK socket with an OpenClaw HELLO; an accepted HELLO is a connect wake and `ready`', async () => {
     const wakes: string[] = []
     const connected: number[] = []
     const { socket, metrics } = makeSocket({ onWake: (s) => wakes.push(s), onConnected: (at) => connected.push(at) })
@@ -87,8 +87,8 @@ describe('IntegrationSocket — wakes', () => {
     ws.simulateMessage({ type: 'hello.ok', capabilities: ['ack'] })
     expect(connected).toHaveLength(1)
     expect(wakes).toEqual(['connect'])
-    expect(socket.getHealth().state).toBe('connected')
-    expect(metrics.states).toEqual(['idle', 'connecting', 'connected'])
+    expect(socket.getHealth().state).toBe('ready')
+    expect(metrics.states).toEqual(['idle', 'connecting', 'ready'])
     expect(metrics.wakes).toEqual(['connect'])
   })
 
@@ -199,68 +199,117 @@ describe('IntegrationSocket — wakes', () => {
     ws.simulateMessage(messageNew('conv_1', 2))
     await settle()
     expect(seen).toEqual(['connect', 'message', 'message'])
-    expect(socket.getHealth().state).toBe('connected')
+    expect(socket.getHealth().state).toBe('ready')
   })
 })
 
-describe('IntegrationSocket — the SDK connection events, mapped', () => {
-  it('a plain close is `reconnecting` and the SDK reconnects on its own; the next accepted HELLO is `connected` again', async () => {
+describe('IntegrationSocket — the SDK lifecycle, reported as it is', () => {
+  it('a plain close is `backoff`; the SDK reconnects on its own and the next accepted HELLO is `ready` again', async () => {
     const events: string[] = []
     const { socket, metrics } = makeSocket({
-      onDisconnected: (info) => events.push(`disconnected:${info.code}:${info.keyRejected}`),
+      onDisconnected: (info) => events.push(`disconnected:${info.code}:${info.initiator}`),
       onConnected: () => events.push('connected'),
+      onBlocked: () => events.push('blocked'),
       onStateChanged: (next) => events.push(`state:${next}`),
     })
     sockets.push(socket)
     await socket.start()
     MockWebSocket.latest().simulateReady()
     MockWebSocket.latest().simulateClose(1006, 'abnormal')
-    expect(socket.getHealth().state).toBe('reconnecting')
+    expect(socket.getHealth().state).toBe('backoff')
     await new Promise((r) => setTimeout(r, 300)) // > initialBackoffMs with jitter
     expect(MockWebSocket.instances).toHaveLength(2)
     MockWebSocket.latest().simulateReady()
-    expect(events).toEqual(['state:connecting', 'state:connected', 'connected', 'state:reconnecting', 'disconnected:1006:false', 'state:connected', 'connected'])
-    expect(metrics.disconnects).toEqual(['1006'])
+    expect(events).toEqual([
+      'state:connecting',
+      'state:ready',
+      'connected',
+      'disconnected:1006:server',
+      'state:backoff',
+      'state:connecting',
+      'state:ready',
+      'connected',
+    ])
+    expect(metrics.disconnects).toEqual(['1006:server'])
+    expect(metrics.states).toEqual(['idle', 'connecting', 'ready', 'backoff', 'connecting', 'ready'])
+    expect(metrics.errors).toEqual([])
     expect(socket.getHealth().counters.disconnects).toBe(1)
   })
 
-  it('a rejected key (close 1008 Invalid token) is `blocked`, then the SDK stops reconnecting and says so once; no new socket is opened', async () => {
-    const events: string[] = []
-    const { socket, metrics } = makeSocket({
-      onDisconnected: (info) => events.push(`disconnected:${info.code}:${info.keyRejected}`),
-      onStopped: (reason) => events.push(`stopped:${/terminal code 1008/.test(reason)}`),
-      onError: (err) => events.push(`error:${err.message}`),
-    })
-    sockets.push(socket)
-    await socket.start()
-    MockWebSocket.latest().simulateOpen()
-    MockWebSocket.latest().simulateClose(1008, 'Invalid token')
-    await new Promise((r) => setTimeout(r, 300))
-    expect(events).toEqual(['disconnected:1008:true', 'stopped:true'])
-    expect(socket.getHealth().state).toBe('blocked')
-    expect(MockWebSocket.instances).toHaveLength(1)
-    expect(metrics.errors).toEqual(['auth'])
-  })
-
-  it('a terminal close with another reason is not a key rejection (error class `transport`), but the SDK still stops: `onStopped` is the signal', async () => {
-    const events: string[] = []
-    const { socket, metrics } = makeSocket({
-      onDisconnected: (info) => events.push(`disconnected:${info.code}:${info.keyRejected}`),
-      onStopped: () => events.push('stopped'),
-    })
+  it("a 1008 without the server's auth reason (its own HELLO timer) is a plain close: `backoff`, never `blocked`", async () => {
+    const blocked: SocketBlocked[] = []
+    const { socket, metrics } = makeSocket({ onBlocked: (info) => blocked.push(info) })
     sockets.push(socket)
     await socket.start()
     MockWebSocket.latest().simulateOpen()
     MockWebSocket.latest().simulateClose(1008, 'HELLO frame required')
-    await settle()
-    expect(events).toEqual(['disconnected:1008:false', 'stopped'])
-    expect(socket.getHealth().state).toBe('blocked')
-    expect(metrics.errors).toEqual(['transport'])
+    expect(socket.getHealth().state).toBe('backoff')
+    expect(blocked).toEqual([])
+    expect(metrics.errors).toEqual([])
+    expect(metrics.disconnects).toEqual(['1008:server'])
   })
 
-  it('stop() is final: `stopped`, the SDK socket is closed, and nothing fires afterwards', async () => {
+  it('a rejected key (close 1008 Invalid token before hello.ok) is `blocked`: one `auth` per rejected HELLO, the SDK notice is no second signal, a fresh HELLO 10–15 min later, cleared by the next hello.ok', async () => {
+    vi.useFakeTimers()
+    try {
+      const events: string[] = []
+      const blocked: SocketBlocked[] = []
+      const { socket, metrics } = makeSocket({
+        onDisconnected: (info) => events.push(`disconnected:${info.code}:${info.initiator}`),
+        onBlocked: (info) => {
+          blocked.push(info)
+          events.push('blocked')
+        },
+        onConnected: () => events.push('connected'),
+        onError: (err) => events.push(`error:${err.message}`),
+        onStateChanged: (next) => events.push(`state:${next}`),
+      })
+      sockets.push(socket)
+      await socket.start()
+      MockWebSocket.latest().simulateOpen()
+      MockWebSocket.latest().simulateClose(1008, 'Invalid token')
+      expect(socket.getHealth().state).toBe('blocked')
+      // The SDK's order: the close, the state, then the typed event with the code and reason.
+      expect(events).toEqual(['state:connecting', 'disconnected:1008:server', 'state:blocked', 'blocked'])
+      expect(blocked[0]).toMatchObject({ code: 1008, reason: 'Invalid token' })
+      expect(blocked[0]!.retryInMs).toBeGreaterThanOrEqual(600_000)
+      expect(blocked[0]!.retryInMs).toBeLessThanOrEqual(900_000)
+      expect(metrics.errors).toEqual(['auth'])
+      expect(metrics.disconnects).toEqual(['1008:server'])
+
+      // No new socket before the retry is due; one when it is.
+      vi.advanceTimersByTime(blocked[0]!.retryInMs! - 1)
+      expect(MockWebSocket.instances).toHaveLength(1)
+      vi.advanceTimersByTime(1)
+      expect(MockWebSocket.instances).toHaveLength(2)
+      expect(socket.getHealth().state).toBe('connecting')
+
+      // Rejected again: `blocked` again, one more `auth`, still nothing through onError.
+      MockWebSocket.latest().simulateOpen()
+      MockWebSocket.latest().simulateClose(1008, 'Invalid token')
+      expect(blocked).toHaveLength(2)
+      expect(metrics.errors).toEqual(['auth', 'auth'])
+      expect(events.filter((e) => e.startsWith('error:'))).toEqual([])
+
+      // Accepted on the next try (the key rotated back, the account reinstated): `ready`, the connect wake.
+      vi.advanceTimersByTime(blocked[1]!.retryInMs!)
+      expect(MockWebSocket.instances).toHaveLength(3)
+      MockWebSocket.latest().simulateReady()
+      expect(socket.getHealth().state).toBe('ready')
+      expect(events.at(-1)).toBe('connected')
+      expect(metrics.states).toEqual(['idle', 'connecting', 'blocked', 'connecting', 'blocked', 'connecting', 'ready'])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stop() is final: `stopped` through the SDK state, the socket is closed, and nothing fires afterwards', async () => {
     const events: string[] = []
-    const { socket, metrics } = makeSocket({ onDisconnected: () => events.push('disconnected'), onWake: () => events.push('wake') })
+    const { socket, metrics } = makeSocket({
+      onDisconnected: () => events.push('disconnected'),
+      onWake: () => events.push('wake'),
+      onStateChanged: (next) => events.push(`state:${next}`),
+    })
     sockets.push(socket)
     await socket.start()
     const ws = MockWebSocket.latest()
@@ -271,39 +320,30 @@ describe('IntegrationSocket — the SDK connection events, mapped', () => {
     ws.simulateMessage(messageNew('conv_1', 1))
     ws.simulateClose(1000, 'bye')
     await settle()
-    expect(events).toEqual(['wake']) // the connect wake only
+    expect(events).toEqual(['state:connecting', 'state:ready', 'wake', 'state:stopped'])
     expect(metrics.states.at(-1)).toBe('stopped')
+    await socket.stop() // idempotent
     await socket.start() // a stopped socket stays stopped
     expect(MockWebSocket.instances).toHaveLength(1)
+    expect(metrics.states.filter((s) => s === 'stopped')).toHaveLength(1)
+  })
+
+  it('stop() before any start() is `stopped` too, and a later start() opens nothing', async () => {
+    const { socket, metrics } = makeSocket()
+    await socket.stop()
+    expect(socket.getHealth().state).toBe('stopped')
+    expect(metrics.states).toEqual(['idle', 'stopped'])
+    await socket.start()
+    expect(MockWebSocket.instances).toHaveLength(0)
   })
 })
 
-describe('isKeyRejection / isRealtimeStopped / realtimeOptionsFor', () => {
-  it("4401 and 4403 always; 1008 only with the server's own auth reason", () => {
-    expect(isKeyRejection(4401, '')).toBe(true)
-    expect(isKeyRejection(4403, 'forbidden')).toBe(true)
-    expect(isKeyRejection(1008, 'Invalid token')).toBe(true)
-    expect(isKeyRejection(1008, 'invalid token: revoked')).toBe(true)
-    expect(isKeyRejection(1008, 'HELLO frame required')).toBe(false)
-    expect(isKeyRejection(1008, 'HELLO ack timeout')).toBe(false) // the SDK's own self-close reuses 1008
-    expect(isKeyRejection(1006, 'Invalid token')).toBe(false)
-    expect(isKeyRejection(1000, '')).toBe(false)
-  })
-
-  it("recognises the SDK's terminal-close error and nothing else, and reads the code and reason out of it", () => {
-    const rejected = new Error('WebSocket closed with terminal code 1008 (Invalid token); the server rejected the session and auto-reconnect has stopped.')
-    expect(isRealtimeStopped(rejected)).toBe(true)
-    expect(terminalCloseOf(rejected)).toEqual({ code: 1008, reason: 'Invalid token' })
-    expect(terminalCloseOf(new Error('WebSocket closed with terminal code 4401; the server rejected the session and auto-reconnect has stopped.'))).toEqual({ code: 4401, reason: '' })
-    expect(isRealtimeStopped(new Error('HELLO ack timeout'))).toBe(false)
-    expect(isRealtimeStopped(new Error('WebSocket error'))).toBe(false)
-  })
-
-  it('classifies errors for the metric with a bounded label: auth only for a rejected key, transport for other terminal closes', () => {
-    expect(classifyRealtimeError(new Error('WebSocket closed with terminal code 1008 (Invalid token); the server rejected the session and auto-reconnect has stopped.'))).toBe('auth')
-    expect(classifyRealtimeError(new Error('WebSocket closed with terminal code 4403 (forbidden); the server rejected the session and auto-reconnect has stopped.'))).toBe('auth')
-    expect(classifyRealtimeError(new Error('WebSocket closed with terminal code 1008 (HELLO frame required); the server rejected the session and auto-reconnect has stopped.'))).toBe('transport')
-    expect(classifyRealtimeError(new Error('HELLO ack timeout'))).toBe('transport')
+describe('classifyRealtimeError / wakeSourceOf / realtimeOptionsFor', () => {
+  it('classifies the SDK notices for the metric with a bounded label; a rejected key is the `blocked` event, not an error class here', () => {
+    expect(classifyRealtimeError(new Error('handshake timeout: no hello.ok within 15000ms'))).toBe('transport')
+    expect(classifyRealtimeError(new Error('liveness timeout: nothing received for 100000ms'))).toBe('transport')
+    expect(classifyRealtimeError(new Error('still reconnecting after 60 consecutive failed attempts; backing off to at most 300s between attempts and not giving up'))).toBe('transport')
+    expect(classifyRealtimeError(new Error('WebSocket error'))).toBe('transport')
     expect(classifyRealtimeError(new Error('message.new handler failed: boom'))).toBe('handler')
     expect(classifyRealtimeError(new Error('wake frame failed validation: step is not an integer'))).toBe('protocol')
     expect(classifyRealtimeError(new Error('something else'))).toBe('other')

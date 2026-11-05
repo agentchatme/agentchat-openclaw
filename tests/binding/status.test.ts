@@ -113,14 +113,14 @@ describe('status adapter — the doctor-style probe', () => {
       accountId: 'default',
       config: account({}).config as never,
       logger: silent,
-      createSocket: () => stubSocket('connected'),
+      createSocket: () => stubSocket('ready'),
       build: () => ({ invoker: { counters: () => ({ wakes: 3, cycles: 2, turns: 1 }), stop() {} } as never, texts: { source: 'cache', stop() {} } as unknown as TextsStore, handlers: {} }),
     })
     const cfg = { agents: { defaults: { workspace } } }
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account(cfg) as never, timeoutMs: 2000, cfg: cfg as never } as never)
-    expect(probe.integration).toEqual({ mode: 'on', state: 'connected', wakes: 3, cycles: 2, turns: 1, texts: 'cache' })
+    expect(probe.integration).toEqual({ mode: 'on', state: 'ready', wakes: 3, cycles: 2, turns: 1, texts: 'cache' })
     const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
-    expect(lines.find((l) => l.text.startsWith('integration connected'))).toEqual({ text: 'integration connected — wakes 3, cycles 2, turns 1', tone: 'success' })
+    expect(lines.find((l) => l.text.startsWith('integration ready'))).toEqual({ text: 'integration ready — wakes 3, cycles 2, turns 1', tone: 'success' })
     expect(lines.find((l) => l.text.startsWith('served texts from the cached copy'))?.tone).toBe('warn')
   })
 

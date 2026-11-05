@@ -141,7 +141,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
       else if (d.state) {
         lines.push({
           text: `integration ${d.state} — wakes ${d.wakes ?? 0}, cycles ${d.cycles ?? 0}, turns ${d.turns ?? 0}`,
-          tone: d.state === 'connected' ? 'success' : 'warn',
+          tone: d.state === 'ready' ? 'success' : 'warn',
         })
         if (d.texts === 'missing') {
           lines.push({ text: 'served texts not available yet (AgentChat unreachable, nothing cached) — turns wait for the first copy', tone: 'error' })

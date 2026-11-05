@@ -109,7 +109,7 @@ live('live smoke — integration legs against the real API', () => {
     const ready = new Promise<void>((res) => (connected = res))
     await bob.start()
     await Promise.race([ready, new Promise((_, rej) => setTimeout(() => rej(new Error('connect timeout')), 25_000))])
-    expect(bob.getHealth().state).toBe('connected')
+    expect(bob.getHealth().state).toBe('ready')
     expect(wakes).toContain('connect')
 
     const probe = `integration smoke ${randomBytes(6).toString('hex')}`

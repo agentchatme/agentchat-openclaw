@@ -12,17 +12,17 @@
  *
  * Renamed with the move to the SDK socket (dashboards: see CHANGELOG):
  *   agentchat_channel_knock_total{source}     → agentchat_channel_wake_total{source}
- *   agentchat_channel_reconnect_total{reason} → agentchat_channel_disconnect_total{code}
- *   agentchat_channel_connection_state{kind}  — kept; `kind` is now the SDK-derived
- *     state (connecting | connected | reconnecting | blocked | stopped), lower-case
+ *   agentchat_channel_reconnect_total{reason} → agentchat_channel_disconnect_total{code,initiator}
+ *   agentchat_channel_connection_state{kind}  — kept; `kind` is now the SDK's own
+ *     state (idle | connecting | ready | backoff | blocked | stopped), lower-case
  *   agentchat_channel_error_total{errorClass} — kept; values are now
  *     auth | transport | handler | protocol | other
  */
 
 export interface MetricsRecorder {
-  /** Incremented on every socket close the SDK reports (it reconnects on its own unless the code was terminal). */
-  incDisconnect(labels: { code: string }): void
-  /** Incremented on every error the SDK surfaces, labeled by class. */
+  /** Incremented on every socket close the SDK reports; `initiator` is `server` (the wire) or `client` (the SDK's own watchdog). */
+  incDisconnect(labels: { code: string; initiator: string }): void
+  /** Incremented on every rejected HELLO (`auth`) and every other notice the SDK surfaces, labeled by class. */
   incError(labels: { errorClass: string }): void
   /** Set the current connection state (cardinality bounded by state kinds). */
   setConnectionState(kind: string): void
@@ -62,14 +62,14 @@ export function createMetrics(options: CreateMetricsOptions): MetricsRecorder {
 
   const disconnects = new factory.Counter({
     name: 'agentchat_channel_disconnect_total',
-    help: 'WebSocket closes reported by the SDK, by close code.',
-    labelNames: ['code'],
+    help: 'WebSocket closes reported by the SDK, by close code and initiator (server | client).',
+    labelNames: ['code', 'initiator'],
     registers: [registry],
   })
 
   const errors = new factory.Counter({
     name: 'agentchat_channel_error_total',
-    help: 'Socket errors surfaced by the SDK, labeled by error class.',
+    help: 'Rejected HELLOs (auth) and the other notices the SDK surfaced, labeled by error class.',
     labelNames: ['errorClass'],
     registers: [registry],
   })
@@ -89,7 +89,7 @@ export function createMetrics(options: CreateMetricsOptions): MetricsRecorder {
   })
 
   return {
-    incDisconnect: ({ code }) => disconnects.inc({ code }),
+    incDisconnect: ({ code, initiator }) => disconnects.inc({ code, initiator }),
     incError: ({ errorClass }) => errors.inc({ errorClass }),
     setConnectionState: (kind) => connectionState.set({ kind }, 1),
     incWake: ({ source }) => wakes.inc({ source }),

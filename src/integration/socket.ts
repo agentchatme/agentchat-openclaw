@@ -1,12 +1,14 @@
 /**
  * The socket as a wake — the SDK's `RealtimeClient` bound to one account.
  *
- * The transport is the SDK's (HELLO, reconnect with backoff, the delivery
- * ack, per-conversation ordering, the reconnect drain). This module holds
- * what is runtime logic: starting and stopping it with the account, turning
- * what arrives into wakes for the invoker, filtering the echo of the agent's
- * own sends, and mapping the SDK's connection events onto the states the
- * gateway reports.
+ * The transport is the SDK's, lifecycle included: HELLO, the reconnect
+ * backoff that never gives up (one notice after a long outage, then a wider
+ * cap), the handshake and idle watchdogs, the 10–15 min retry of a rejected
+ * key, the delivery ack, per-conversation ordering, the reconnect drain. This
+ * module holds what is runtime logic: starting and stopping it with the
+ * account, turning what arrives into wakes for the invoker, filtering the
+ * echo of the agent's own sends, and handing the SDK's lifecycle events to
+ * the gateway as they are.
  *
  *   - `message.new`              → `onWake('message')` — after reading only
  *                                   the sender (to skip our own echo) and the
@@ -29,9 +31,23 @@
  * Every frame is a wake and every wake reads the whole tray, so no ordering
  * assumption is made: frames the SDK parks on a sequence gap and flushes on
  * a close are wakes like any other.
+ *
+ * Nothing here classifies a close. Whether a close was a rejected key, a
+ * slow handshake or the client's own watchdog is the SDK's call: it says
+ * `blocked` (a typed event with the code, the reason and the delay to its
+ * next HELLO) or it backs off, and this module reports which.
  */
 
-import { RealtimeClient, type AgentChatClient, type RealtimeOptions, type WakeFrame, type WsMessage } from 'agentchatme'
+import {
+  RealtimeClient,
+  type AgentChatClient,
+  type BlockedInfo,
+  type DisconnectInfo,
+  type RealtimeOptions,
+  type RealtimeState,
+  type WakeFrame,
+  type WsMessage,
+} from 'agentchatme'
 
 import type { AgentchatChannelConfig } from '../config-schema.js'
 import type { Logger } from '../log.js'
@@ -47,20 +63,21 @@ export function wakeSourceOf(reason: unknown): WakeSource {
 }
 
 /**
- * The connection as the gateway reports it. The SDK keeps its own machine
- * private; these are derived from its events: `connecting` until the first
- * HELLO is accepted, `connected` while a session is up, `reconnecting`
- * between a close and the next accepted HELLO, `blocked` once the server
- * rejected the key or the SDK stopped retrying, `stopped` after `stop()`.
+ * The connection as the gateway reports it: the SDK's own lifecycle, read
+ * from `realtime.state`. `idle` before the first start, `connecting` while a
+ * socket opens or its HELLO awaits `hello.ok`, `ready` while a session is up,
+ * `backoff` between a close and the next attempt, `blocked` after the server
+ * rejected the key during the handshake (the SDK retries a fresh HELLO every
+ * 10–15 min; a later `hello.ok` clears it), `stopped` after `stop()` — the
+ * only state the client never leaves on its own.
  */
-export type SocketState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'blocked' | 'stopped'
+export type SocketState = RealtimeState
 
-export interface SocketDisconnect {
-  readonly code: number
-  readonly reason: string
-  /** The server rejected the key during the handshake (4401/4403, or 1008 with its own `Invalid token` reason). */
-  readonly keyRejected: boolean
-}
+/** Every socket close the SDK reports: the code, the reason, and who ended it (`client` = the SDK's own watchdog). */
+export type SocketDisconnect = DisconnectInfo
+
+/** A rejected HELLO: the close code and reason, and the delay to the SDK's next attempt. */
+export type SocketBlocked = BlockedInfo
 
 export interface WakeDetail {
   readonly conversationId?: string
@@ -75,11 +92,15 @@ export interface SocketHandlers {
   onGroupInvite?: (invite: GroupInvite) => void
   /** Once per accepted HELLO (initial + every reconnect), before the connect wake. */
   onConnected?: (at: number) => void
-  /** Every socket close the SDK reports (never for our own `stop()`). */
+  /** Every socket close the SDK reports (never for our own `stop()`). The state that follows says what comes next. */
   onDisconnected?: (info: SocketDisconnect) => void
-  /** The SDK stopped reconnecting on its own (a terminal close code). Only a new socket can recover. */
-  onStopped?: (reason: string) => void
-  /** Every other error the SDK surfaces (transport, handshake timeout, handler failures). */
+  /**
+   * The server rejected the key during the handshake. Once per rejected
+   * HELLO: the first of a run and every 10–15 min retry after it, until one
+   * is accepted (`onConnected`). The state is `blocked` by the time it fires.
+   */
+  onBlocked?: (info: SocketBlocked) => void
+  /** Every notice the SDK surfaces (transport errors, watchdog trips, the long-outage and rejection notices, handler failures). */
   onError?: (error: Error) => void
   onStateChanged?: (next: SocketState, prev: SocketState) => void
 }
@@ -113,42 +134,6 @@ export interface SocketHealth {
   }
 }
 
-// Close codes that mean "the server rejected this key" when the SERVER
-// sends them during the handshake. 4401/4403 are unambiguous. 1008 (policy
-// violation) is not: the AgentChat server closes a rejected HELLO with
-// 1008 'Invalid token', but also uses 1008 for a handshake that was merely
-// too slow ('HELLO frame required', from its own 5 s timer) — and the SDK
-// closes its own hello-ack timeout with 1008 too. So 1008 counts as a
-// rejection only with the server's own auth reason.
-const UNAMBIGUOUS_AUTH_CLOSE_CODES: ReadonlySet<number> = new Set([4401, 4403])
-const AMBIGUOUS_AUTH_CLOSE_CODE = 1008
-const SERVER_AUTH_CLOSE_REASONS: readonly string[] = ['invalid token']
-
-/** True iff a close with this code and reason means the key was rejected. Pure; exported for tests. */
-export function isKeyRejection(code: number, reason: string): boolean {
-  if (UNAMBIGUOUS_AUTH_CLOSE_CODES.has(code)) return true
-  if (code !== AMBIGUOUS_AUTH_CLOSE_CODE) return false
-  const lower = reason.toLowerCase()
-  return SERVER_AUTH_CLOSE_REASONS.some((known) => lower.includes(known))
-}
-
-/**
- * The SDK's one signal that its reconnect loop is off for good: the error it
- * emits after a terminal close code (`realtime.ts`, "closed with terminal
- * code <code> (<reason>)"). There is no typed event for it, so the message
- * is matched.
- */
-export function isRealtimeStopped(error: Error): boolean {
-  return terminalCloseOf(error) !== null
-}
-
-/** The close code and reason inside the SDK's terminal-close error, or null for any other error. */
-export function terminalCloseOf(error: Error): { code: number; reason: string } | null {
-  const match = /terminal code (\d+)(?: \((.*?)\))?;/i.exec(error.message)
-  if (!match) return null
-  return { code: Number(match[1]), reason: match[2] ?? '' }
-}
-
 /** The SDK realtime options for a channel config: `wss://…` base, the account's backoff, the integration identity. */
 export function realtimeOptionsFor(config: AgentchatChannelConfig, extra: Pick<IntegrationSocketOptions, 'client' | 'webSocket'> = {}): RealtimeOptions {
   return {
@@ -176,6 +161,7 @@ export class IntegrationSocket {
   private readonly selfHandle: string | undefined
 
   private realtime: RealtimeClient | null = null
+  /** The SDK's state as last reported through its `state` event; `stopped` is set here only for a stop before any start. */
   private state: SocketState = 'idle'
   private connectedAt: number | null = null
   private stopping = false
@@ -209,7 +195,6 @@ export class IntegrationSocket {
     const realtime = this.createRealtime(realtimeOptionsFor(this.config, { client: this.client, webSocket: this.webSocket }))
     this.realtime = realtime
     this.bind(realtime)
-    this.setState('connecting')
     try {
       await realtime.connect()
     } catch (err) {
@@ -222,15 +207,17 @@ export class IntegrationSocket {
     this.stopping = true
     const realtime = this.realtime
     this.realtime = null
+    this.connectedAt = null
     if (realtime) {
       try {
+        // `disconnect()` is the SDK's only way into `stopped`; its state event
+        // carries the transition to the gateway like every other.
         realtime.disconnect()
       } catch (err) {
         this.logger.warn({ err: describe(err) }, 'socket disconnect threw — continuing')
       }
     }
-    this.connectedAt = null
-    this.setState('stopped')
+    if (this.state !== 'stopped') this.onState('stopped', this.state)
   }
 
   getHealth(): SocketHealth {
@@ -244,37 +231,50 @@ export class IntegrationSocket {
   // ─── Internals ─────────────────────────────────────────────────────
 
   private bind(realtime: RealtimeClient): void {
+    realtime.on('state', (next, prev) => this.onState(next, prev))
+
     realtime.onConnect(() => {
       const at = this.now()
       this.connectedAt = at
       this.logger.info({ at: new Date(at).toISOString() }, 'connected (HELLO accepted)')
-      this.setState('connected')
       this.guard('onConnected', () => this.handlers.onConnected?.(at))
       // Whatever landed while the socket was down is on the tray now; the
       // connect itself is the wake that covers the gap.
       this.wake('connect', {})
     })
 
-    realtime.onDisconnect(({ code, reason }) => {
+    realtime.onDisconnect((info) => {
       if (this.stopping) return
       this.disconnects += 1
       this.connectedAt = null
-      this.metrics.incDisconnect({ code: String(code) })
-      const keyRejected = isKeyRejection(code, reason)
-      this.logger[keyRejected ? 'warn' : 'info']({ code, reason }, keyRejected ? 'socket closed — the server rejected the key' : 'socket closed — the SDK reconnects')
-      this.setState(keyRejected ? 'blocked' : 'reconnecting')
-      this.guard('onDisconnected', () => this.handlers.onDisconnected?.({ code, reason, keyRejected }))
+      this.metrics.incDisconnect({ code: String(info.code), initiator: info.initiator })
+      this.logger.info({ code: info.code, reason: info.reason, initiator: info.initiator }, 'socket closed — the SDK decides what follows (backoff or blocked)')
+      this.guard('onDisconnected', () => this.handlers.onDisconnected?.(info))
+    })
+
+    realtime.on('blocked', (info) => {
+      if (this.stopping) return
+      // One rejected HELLO: the SDK's typed event is what counts it.
+      this.metrics.incError({ errorClass: 'auth' })
+      this.logger.warn(
+        { code: info.code, reason: info.reason, retryInMs: info.retryInMs },
+        'the server rejected the key during the handshake — the SDK retries a fresh HELLO on its own',
+      )
+      this.guard('onBlocked', () => this.handlers.onBlocked?.(info))
     })
 
     realtime.onError((error) => {
       if (this.stopping) return
-      this.metrics.incError({ errorClass: classifyRealtimeError(error) })
-      if (isRealtimeStopped(error)) {
-        this.logger.warn({ err: error.message }, 'the SDK stopped reconnecting')
-        this.setState('blocked')
-        this.guard('onStopped', () => this.handlers.onStopped?.(error.message))
+      if (realtime.state === 'blocked') {
+        // The SDK's one rejection notice per blocked run is emitted between
+        // its `blocked` state and the `blocked` event that carries the code
+        // and reason; the event is what the gateway reports and the metric
+        // counts, so the notice itself is a debug line here, not a second
+        // signal for the same rejection.
+        this.logger.debug({ err: error.message }, 'SDK notice while blocked')
         return
       }
+      this.metrics.incError({ errorClass: classifyRealtimeError(error) })
       this.logger.debug({ err: error.message }, 'socket error')
       this.guard('onError', () => this.handlers.onError?.(error))
     })
@@ -329,9 +329,8 @@ export class IntegrationSocket {
     this.guard('onWake', () => this.handlers.onWake?.(source, detail))
   }
 
-  private setState(next: SocketState): void {
-    const prev = this.state
-    if (prev === next) return
+  /** The SDK's state transition, mirrored for the health probe and the gauge, then handed on. */
+  private onState(next: SocketState, prev: SocketState): void {
     this.state = next
     this.metrics.setConnectionState(next)
     this.logger.debug({ from: prev, to: next }, 'socket state')
@@ -349,18 +348,15 @@ export class IntegrationSocket {
 }
 
 /**
- * Low-cardinality class for the error metric. The SDK's terminal-close error
- * is `auth` only when the close was a key rejection (4401/4403, or 1008 with
- * the server's `Invalid token`); a terminal `1008 HELLO frame required` is
- * `transport`, the same reading `isKeyRejection` gives the close itself.
+ * Low-cardinality class for the error metric, for the notices the SDK
+ * surfaces through `onError`. A rejected key is not among them: that is the
+ * SDK's `blocked` event, counted as `auth` where it fires.
  */
-export function classifyRealtimeError(error: Error): 'auth' | 'transport' | 'handler' | 'protocol' | 'other' {
+export function classifyRealtimeError(error: Error): 'transport' | 'handler' | 'protocol' | 'other' {
   const message = error.message
-  const terminal = terminalCloseOf(error)
-  if (terminal) return isKeyRejection(terminal.code, terminal.reason) ? 'auth' : 'transport'
   if (/handler failed/i.test(message)) return 'handler'
   if (/failed validation|not an object|expected a bare array/i.test(message)) return 'protocol'
-  if (error.name === 'ConnectionError' || /websocket|hello|sync drain|sync ack/i.test(message)) return 'transport'
+  if (error.name === 'ConnectionError' || /websocket|hello|handshake|liveness|reconnecting|sync drain|sync ack/i.test(message)) return 'transport'
   return 'other'
 }
 

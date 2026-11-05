@@ -49,7 +49,7 @@ The wizard registers a new agent (email → handle → 6-digit code → key), ac
 A gateway that was already running when the wizard placed the key needs **a restart (or a config reload)** to resolve `${AGENTCHAT_API_KEY}` and connect the hosted tools; status and doctor say so. From then on:
 
 ```bash
-openclaw channels capabilities --channel agentchat   # authenticated as @handle · hosted MCP server reachable · placement · integration connected
+openclaw channels capabilities --channel agentchat   # authenticated as @handle · hosted MCP server reachable · placement · integration ready
 openclaw channels status --deep                      # account state and lifecycle (starting → ready; recovering / blocked / stopped)
 openclaw doctor                                      # placement warnings; `openclaw doctor --fix` adds mcp.servers.agentchat and a missing identity line (and the llm opt-in below)
 ```

@@ -203,12 +203,13 @@ describe('gateway.startAccount', () => {
     expect(order).toEqual(['cleanup', 'resolved'])
   })
 
-  it('statusStateFor maps the socket states onto OpenClaw\'s vocabulary', () => {
-    expect(statusStateFor('connected')).toBe('linked')
+  it("statusStateFor maps the SDK's states onto OpenClaw's vocabulary", () => {
+    expect(statusStateFor('ready')).toBe('linked')
     expect(statusStateFor('blocked')).toBe('not-linked')
     expect(statusStateFor('stopped')).toBe('configured')
+    expect(statusStateFor('idle')).toBe('configured')
     expect(statusStateFor('connecting')).toBe('unstable')
-    expect(statusStateFor('reconnecting')).toBe('unstable')
+    expect(statusStateFor('backoff')).toBe('unstable')
   })
 })
 
@@ -227,56 +228,80 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
     return { ...harness, h: result.handlers, invoker: result.invoker, texts: result.texts, setStatusCalls: () => setStatusCalls }
   }
 
-  it('reports lifecycle starting → ready → recovering → ready → stopped through the status snapshot', async () => {
+  it("reports lifecycle starting → ready → recovering → ready → stopped from the SDK's states", async () => {
     const { h, status, invoker, texts } = await built()
     expect(status().lifecycle).toBe('starting')
+    h.onStateChanged!('connecting', 'idle')
+    expect(status().lifecycle).toBe('starting')
+    h.onStateChanged!('ready', 'connecting')
     h.onConnected!(123)
     expect(status()).toMatchObject({ running: true, connected: true, linked: true, statusState: 'linked', lifecycle: 'ready', lastConnectedAt: 123 })
-    h.onDisconnected!({ code: 1006, reason: 'abnormal', keyRejected: false })
+    // The gateway does not read closes; the state the SDK moves to after one is what it reports.
+    expect(h.onDisconnected).toBeUndefined()
+    h.onStateChanged!('backoff', 'ready')
     expect(status()).toMatchObject({ running: true, connected: false, statusState: 'unstable', lifecycle: 'recovering' })
+    h.onStateChanged!('connecting', 'backoff')
+    expect(status().lifecycle).toBe('recovering')
+    h.onStateChanged!('ready', 'connecting')
     h.onConnected!(456)
     expect(status().lifecycle).toBe('ready')
-    h.onStateChanged!('stopped', 'connected')
+    h.onStateChanged!('stopped', 'ready')
     expect(status()).toMatchObject({ running: false, connected: false, lifecycle: 'stopped' })
     invoker?.stop()
     texts?.stop()
   })
 
-  it('a rejected key is one error line and one steady blocked status, whatever the SDK reports meanwhile; an accepted HELLO clears it', async () => {
+  it("a rejected key is one error line and one steady blocked status across the SDK's 10–15 min retries; an accepted HELLO clears it", async () => {
     const { h, log, status, invoker, texts, setStatusCalls } = await built()
     const errorLines = () => log.error.mock.calls.map((c) => String(c[0]))
     const warnLines = () => log.warn.mock.calls.map((c) => String(c[0]))
     const debugLines = () => log.debug.mock.calls.map((c) => String(c[0]))
 
-    // The SDK's order for a rejected key: the close, then the error that ends its loop.
-    h.onDisconnected!({ code: 1008, reason: 'Invalid token', keyRejected: true })
+    // The SDK's order for a rejected key: the close (not read here), the state `blocked`, then `blocked` with the code, the reason and the delay.
+    h.onStateChanged!('blocked', 'connecting')
+    h.onBlocked!({ code: 1008, reason: 'Invalid token', retryInMs: 720_000 })
     expect(errorLines()).toHaveLength(1)
-    expect(errorLines()[0]).toMatch(/key rejected \(close 1008 Invalid token\) — the server refused the key; rotate it or re-run openclaw channels add agentchat/)
+    expect(errorLines()[0]).toMatch(
+      /key rejected \(close 1008 Invalid token\) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted \(next HELLO in about 12 min\); rotate the key with openclaw channels add agentchat/,
+    )
     expect(status()).toMatchObject({ running: false, connected: false, statusState: 'not-linked', lifecycle: 'blocked' })
     expect((status().lastDisconnect as { error: string }).error).toBe('key rejected: close 1008 Invalid token')
     const after = setStatusCalls()
 
-    h.onStopped!('WebSocket closed with terminal code 1008 (Invalid token); the server rejected the session and auto-reconnect has stopped.')
+    // Two retries rejected again, then one that fails on the network instead: debug lines only, the status does not move.
+    for (const retry of [1, 2]) {
+      h.onStateChanged!('connecting', 'blocked')
+      h.onStateChanged!('blocked', 'connecting')
+      h.onBlocked!({ code: 1008, reason: 'Invalid token', retryInMs: 600_000 + retry })
+    }
+    h.onStateChanged!('connecting', 'blocked')
+    h.onStateChanged!('backoff', 'connecting')
     h.onError!(new Error('WebSocket error'))
-    h.onDisconnected!({ code: 1006, reason: 'abnormal', keyRejected: false })
     expect(errorLines()).toHaveLength(1)
     expect(warnLines()).toHaveLength(0)
     expect(setStatusCalls()).toBe(after)
     expect(status().lifecycle).toBe('blocked')
-    expect(debugLines().some((l) => /still blocked/.test(l))).toBe(true)
+    expect(debugLines().filter((l) => /still blocked \(close 1008 Invalid token; next HELLO in about 10 min\)/.test(l))).toHaveLength(2)
+    expect(debugLines().some((l) => /socket in backoff while blocked/.test(l))).toBe(true)
     expect(debugLines().some((l) => /socket error: WebSocket error/.test(l))).toBe(true)
 
-    // The key is accepted again (a new socket after a reload): ready, one info line, latch cleared.
+    // The key is accepted again (rotated back, or the account reinstated): ready, one info line, latch cleared.
+    h.onStateChanged!('connecting', 'backoff')
+    h.onStateChanged!('ready', 'connecting')
     h.onConnected!(5)
     expect(status()).toMatchObject({ running: true, connected: true, statusState: 'linked', lifecycle: 'ready' })
     expect(log.info.mock.calls.some((c) => /key accepted again — blocked cleared/.test(String(c[0])))).toBe(true)
-    h.onError!(new Error('HELLO ack timeout'))
-    expect(warnLines()).toEqual([expect.stringMatching(/socket error: HELLO ack timeout/)])
+    h.onError!(new Error('handshake timeout: no hello.ok within 15000ms'))
+    expect(warnLines()).toEqual([expect.stringMatching(/socket error: handshake timeout/)])
 
-    // The SDK stopping for another reason is a new situation: one more error line.
-    h.onStopped!('WebSocket closed with terminal code 1008 (HELLO frame required); the server rejected the session and auto-reconnect has stopped.')
+    // A rejection after that is a new situation: one more error line, one more blocked status.
+    h.onStateChanged!('backoff', 'ready')
+    expect(status().lifecycle).toBe('recovering')
+    h.onStateChanged!('connecting', 'backoff')
+    h.onStateChanged!('blocked', 'connecting')
+    h.onBlocked!({ code: 4401, reason: '', retryInMs: 900_000 })
     expect(errorLines()).toHaveLength(2)
-    expect(errorLines()[1]).toMatch(/socket stopped — .*restart the gateway/)
+    expect(errorLines()[1]).toMatch(/key rejected \(close 4401\) — /)
     expect(status().lifecycle).toBe('blocked')
 
     h.onStateChanged!('stopped', 'blocked')

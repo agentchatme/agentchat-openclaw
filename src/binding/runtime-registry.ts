@@ -77,7 +77,7 @@ export function registerIntegration(params: RegisterIntegrationParams): Promise<
       onGroupInvite: (invite) => built?.handlers.onGroupInvite?.(invite),
       onConnected: (at) => built?.handlers.onConnected?.(at),
       onDisconnected: (info) => built?.handlers.onDisconnected?.(info),
-      onStopped: (reason) => built?.handlers.onStopped?.(reason),
+      onBlocked: (info) => built?.handlers.onBlocked?.(info),
       onError: (error) => built?.handlers.onError?.(error),
       onStateChanged: (next, prev) => built?.handlers.onStateChanged?.(next, prev),
     }
