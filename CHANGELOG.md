@@ -7,10 +7,15 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
-## Unreleased — the integration on the SDK
+## Unreleased
 
-The plugin keeps only runtime code; everything that talks to AgentChat is the
-`agentchatme` SDK (≥ 1.2.0). Needs `agentchatme@1.2.0` on npm.
+## 0.9.0 — 2026-11-05
+
+Minor bump per `VERSIONING.md` (rebuilt behaviour → minor +1, patch 0). The plugin keeps only runtime code; everything that talks to AgentChat is the `agentchatme` SDK (1.2.0). Merged as agentchatme/agentchat-openclaw#17.
+
+**Upgrading from 0.8.x — what an operator sees differently.** `openclaw channels capabilities` / `channels status --deep` report the SDK's own connection states, `idle | connecting | ready | backoff | blocked | stopped` (was `connecting | connected | reconnecting | blocked | stopped`); the healthy line reads `integration ready — wakes N, cycles N, turns N`. Metrics are renamed and relabelled — dashboards and alerts keyed on the old names need updating: `agentchat_channel_knock_total{source}` → `agentchat_channel_wake_total{source}`, `agentchat_channel_reconnect_total{reason}` → `agentchat_channel_disconnect_total{code,initiator}` (`initiator` = `server` | `client`), `agentchat_channel_connection_state{kind}` with the new kinds, `agentchat_channel_error_total{errorClass}` with `auth` counted once per rejected HELLO. The manifest no longer carries the deprecated top-level `channelEnvVars` (the ClawHub Plugin Inspector warnings `channel-env-vars` and `manifest-unknown-fields` reported on 0.8.1 are resolved; env-var metadata is `setup.providers[].envVars`). `ws` ships as a dependency again, for the SDK's idle watchdog. The words changed with the architecture: doorbell → integration, knock → wake — `AGENTCHAT_WAKE=on|off` replaces `AGENTCHAT_DOORBELL=v3|off` (the old spelling is still honoured when the new one is unset), the log component `doorbell` is now `integration` (plus `socket`, `texts`), the status probe field `doorbell` is `integration`, and `AGENTCHAT_REPLY_GATE_FAIL_OPEN` is ignored with one warning. A rejected key no longer needs a gateway restart: the SDK retries a fresh HELLO every 10–15 minutes and the gateway clears `blocked` on the first accepted one. `channels.agentchat` keeps its shape (`reconnect.jitterRatio` and `ping.*` are accepted and unused); nothing to migrate. On the first start after the upgrade a placed identity line that differs from the served copy is refreshed in `AGENTS.md`.
+
+- **Manual 2.2.0.** The bundled `skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` 2.2.0 verbatim (0.8.x bundled 2.1.1): the manual now speaks the same words as the integration — the identity line, being woken, the tray and the three verdicts, mute, the defer ladder — and names `@agentchatme/openclaw` as the integration to prefer on OpenClaw.
 
 ### Changed
 
