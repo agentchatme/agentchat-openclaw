@@ -23,36 +23,39 @@ function extractFrontmatter(md: string): string {
 describe('bundled agentchat manual', () => {
   const text = readFileSync(skillPath, 'utf8')
 
-  it('starts with the published frontmatter: name, version, description, homepage', () => {
+  it('starts with the published frontmatter: name, version 2.2.0, description, homepage', () => {
     const fm = extractFrontmatter(text)
     expect(fm).toMatch(/^name:\s*agentchat\s*$/m)
-    expect(fm).toMatch(/^version:\s*\d+\.\d+\.\d+\s*$/m)
+    // The bundled copy is re-fetched at release time; bump this with it.
+    expect(fm).toMatch(/^version:\s*2\.2\.0\s*$/m)
     expect(fm).toMatch(/^description:\s+.{30,}/m)
     expect(fm).toMatch(/^homepage:\s*https:\/\/agentchat\.me\s*$/m)
   })
 
-  it('carries the sections the integration points the agent at (manual 2.1.1 wording)', () => {
-    expect(text).toMatch(/^## Be reachable: identity, doorbell, live conversations/m)
-    expect(text).toMatch(/^### 1\. The anchor line \(identity\)/m)
-    expect(text).toMatch(/^### 2\. The doorbell \(being woken\)/m)
-    expect(text).toMatch(/^### 3\. The tray, the gate, and live conversations/m)
+  it('carries the sections the integration points the agent at (manual 2.2.0 wording)', () => {
+    expect(text).toMatch(/^## Be reachable: identity, wake, live conversations/m)
+    expect(text).toMatch(/^### 1\. The identity line/m)
+    expect(text).toMatch(/^### 2\. Being woken/m)
+    expect(text).toMatch(/^### 3\. The tray, your verdicts, and live conversations/m)
     expect(text).toMatch(/^## Security — read once, never violate/m)
     expect(text).toMatch(/^## Send a message/m)
     expect(text).toMatch(/^## Groups/m)
   })
 
-  it('names the gate verbs the server accepts (dismiss / defer), with the send as the reply verdict', () => {
-    expect(text).toMatch(/`agentchat_decide` `dismiss`/)
-    expect(text).toMatch(/`agentchat_decide` `defer`/)
-    expect(text).toMatch(/The send is your verdict/)
+  it('names the three verdicts the server accepts, recorded with agentchat_decide; a send alone marks nothing', () => {
+    expect(text).toMatch(/\*\*Per card, record `agentchat_decide`\*\* with the card's `preview\.message_id` as `through_message_id`/)
+    expect(text).toMatch(/\*\*`dismiss`\*\* when/)
+    expect(text).toMatch(/\*\*`defer`\*\* when/)
+    expect(text).toMatch(/\*\*`reply`\*\* when/)
+    expect(text).toMatch(/A send marks nothing read: record your `reply` verdict/)
   })
 
-  it('tells OpenClaw users to prefer this plugin', () => {
-    expect(text).toMatch(/Prefer the OpenClaw plugin \(`@agentchatme\/openclaw`\)/)
+  it('tells OpenClaw users to prefer this integration', () => {
+    expect(text).toMatch(/Prefer the OpenClaw integration \(`@agentchatme\/openclaw`\)/)
   })
 
-  it('carries the anchor-line text block with the <handle> placeholder', () => {
-    const heading = text.indexOf('### 1. The anchor line (identity)')
+  it('carries the identity-line text block with the <handle> placeholder', () => {
+    const heading = text.indexOf('### 1. The identity line')
     const fence = text.indexOf('```text', heading)
     const block = text.slice(fence, text.indexOf('```', fence + 7))
     expect(block).toContain('I am @<handle> on AgentChat (api.agentchat.me).')
