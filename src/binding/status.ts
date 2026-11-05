@@ -22,6 +22,7 @@ import { probeHostedMcp } from '../integration/mcp.js'
 import { checkPlacement, resolvePlacementAgentId, type PlacementCheck } from '../integration/placement.js'
 import { cachedIdentityLine } from '../integration/texts.js'
 import type { SocketState } from '../integration/socket.js'
+import type { MetricsSnapshot } from '../metrics.js'
 import { getIntegration } from './runtime-registry.js'
 import { LEGACY_WAKE_MODE_ENV, WAKE_MODE_ENV, readWakeModeFromEnv } from '../credentials/read-env.js'
 import { agentchatReenableHint, isAgentchatAccountEnabled, multiAccountRefusal } from '../channel-account.js'
@@ -42,6 +43,8 @@ export type AgentchatProbeResult = {
     readonly turns?: number
     /** Where the served texts came from: the server, the cached copy, or nowhere yet. */
     readonly texts?: 'server' | 'cache' | 'missing'
+    /** The socket's counters since the account started: wakes by source, closes by code/initiator, SDK notices by class. */
+    readonly socket?: MetricsSnapshot
   }
   /** Set when the integration refuses to start (more than one account configured). */
   readonly refusal?: string
@@ -51,6 +54,12 @@ export type AgentchatProbeResult = {
 
 const PROBE_MIN_MS = 1_000
 const PROBE_MAX_MS = 10_000
+
+/** `{ message: 3, connect: 1 }` → `connect 1, message 3`; empty → `none`. */
+function formatCounts(counts: Readonly<Record<string, number>>): string {
+  const parts = Object.entries(counts).map(([label, n]) => `${label} ${n}`)
+  return parts.length > 0 ? parts.join(', ') : 'none'
+}
 
 export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccount, AgentchatProbeResult> = {
   async probeAccount({ account, timeoutMs, cfg }) {
@@ -95,11 +104,13 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
     const health = live?.socket.getHealth()
     const counters = live?.invoker?.counters()
     const textsSource: 'server' | 'cache' | 'missing' | undefined = live ? (live.texts?.source ?? 'missing') : undefined
+    const socketCounters = live?.metrics?.snapshot?.()
     const integration: NonNullable<AgentchatProbeResult['integration']> = {
       mode: readWakeModeFromEnv().mode,
       ...(health ? { state: health.state } : {}),
       ...(counters ? { wakes: counters.wakes, cycles: counters.cycles, turns: counters.turns } : {}),
       ...(textsSource ? { texts: textsSource } : {}),
+      ...(socketCounters ? { socket: socketCounters } : {}),
     }
     const refusal = multiAccountRefusal(cfg as never)
 
@@ -143,6 +154,12 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
           text: `integration ${d.state} — wakes ${d.wakes ?? 0}, cycles ${d.cycles ?? 0}, turns ${d.turns ?? 0}`,
           tone: d.state === 'ready' ? 'success' : 'warn',
         })
+        if (d.socket) {
+          lines.push({
+            text: `socket — wakes: ${formatCounts(d.socket.wakes)} · closes: ${formatCounts(d.socket.disconnects)} · notices: ${formatCounts(d.socket.errors)}`,
+            tone: 'muted',
+          })
+        }
         if (d.texts === 'missing') {
           lines.push({ text: 'served texts not available yet (AgentChat unreachable, nothing cached) — turns wait for the first copy', tone: 'error' })
         } else if (d.texts === 'cache') {

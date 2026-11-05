@@ -42,10 +42,13 @@ import {
   resolveIntegrationAgentId,
   resolveGateAgent,
   readLlmAgentOverrideOptIn,
+  readLiveConfig,
+  turnReadiness,
   LLM_AGENT_OVERRIDE_PATH,
   type ChannelRuntimeLike,
 } from '../integration/model.js'
 import type { SocketState } from '../integration/socket.js'
+import { createInMemoryMetrics } from '../metrics.js'
 import { resolveOpenClawDefaultAgentId } from '../openclaw-layout.js'
 import { getClient } from './sdk-client.js'
 
@@ -200,11 +203,17 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       onWriteError: (err) => ctx.log?.warn?.(`[agentchat:${ctx.accountId}] invite ledger could not be written: ${err instanceof Error ? err.message : String(err)}`),
     })
 
+    // One recorder per account for the socket's counters and the ladder's
+    // retries. OpenClaw offers a plugin no Prometheus registry (see
+    // `metrics.ts`), so the counters live here and the status probe reads
+    // them: `openclaw channels capabilities --channel agentchat`.
+    const metrics = createInMemoryMetrics()
+
     await registerIntegration({
       accountId: ctx.accountId,
       config,
       logger,
-      socketOptions: { client },
+      socketOptions: { client, metrics },
       build: (socket) => {
         const invoker = new AgentInvoker({
           accountId: ctx.accountId,
@@ -212,9 +221,18 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           client,
           callModel: createRuntimeModelCall({ agentIdOverride, ...(gateTimeoutMs !== undefined ? { timeoutMs: gateTimeoutMs } : {}) }),
           startTurn: createRuntimeTurnStarter(),
+          // Gating waits until a turn can have the hosted tools (the MCP
+          // entry in the LIVE config — OpenClaw hot-applies `mcp.*` — and
+          // its key in this process): a connect wake on a cold gateway
+          // otherwise spends a gate call and runs a turn that cannot look.
+          readiness: () => {
+            const live = readLiveConfig(ctx.cfg)
+            return turnReadiness({ cfg: live.cfg, apiBase: config.apiBase, apiKey: config.apiKey, live: live.live })
+          },
           texts,
           invites,
           logger,
+          metrics,
           gateEnabled: readReplyGateEnabledFromEnv(),
         })
         // True from the first rejected key until a HELLO is accepted again

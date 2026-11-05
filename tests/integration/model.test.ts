@@ -10,6 +10,8 @@ import {
   LLM_AGENT_OVERRIDE_PATH,
   RuntimeUnavailableError,
   DEFAULT_GATE_MAX_TOKENS,
+  turnReadiness,
+  readLiveConfig,
 } from '../../src/integration/model.js'
 import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 
@@ -126,6 +128,63 @@ describe('createRuntimeTurnStarter — admission first, completion later', () =>
     expect(admission.ran).toBe(false)
     if (admission.ran) throw new Error('unreachable')
     expect(admission.error).toMatch(/setRuntime/)
+  })
+})
+
+describe('turnReadiness / withTurnReadiness — a turn only when it can have the hosted tools', () => {
+  const apiBase = 'https://api.agentchat.me'
+  const apiKey = 'ac_live_' + 'k'.repeat(24)
+  const ours = { mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}' } } } } }
+
+  it('not ready without the mcp.servers.agentchat entry, or with it disabled', () => {
+    expect(turnReadiness({ cfg: {}, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey } })).toEqual({
+      ready: false,
+      reason: expect.stringMatching(/mcp\.servers\.agentchat is not in the gateway config/),
+    })
+    const disabled = { mcp: { servers: { agentchat: { ...ours.mcp.servers.agentchat, enabled: false } } } }
+    expect(turnReadiness({ cfg: disabled, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey } })).toEqual({
+      ready: false,
+      reason: expect.stringMatching(/mcp\.servers\.agentchat is disabled/),
+    })
+  })
+
+  it('our entry is ready only when the key its bearer template names is in this process (a cold gateway holds the unresolved template)', () => {
+    expect(turnReadiness({ cfg: ours, apiBase, apiKey, env: {} })).toEqual({
+      ready: false,
+      reason: expect.stringMatching(/AGENTCHAT_API_KEY is not set in the gateway process/),
+    })
+    expect(turnReadiness({ cfg: ours, apiBase, apiKey, env: { AGENTCHAT_API_KEY: '   ' } }).ready).toBe(false)
+    expect(turnReadiness({ cfg: ours, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey } })).toEqual({ ready: true })
+    // OpenClaw hands the plugin the env-substituted config: the bearer then carries the key itself.
+    const substituted = { mcp: { servers: { agentchat: { ...ours.mcp.servers.agentchat, headers: { Authorization: `Bearer ${apiKey}` } } } } }
+    expect(turnReadiness({ cfg: substituted, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey } })).toEqual({ ready: true })
+  })
+
+  it("a hand-written entry is the operator's and counts as ready", () => {
+    const theirs = { mcp: { servers: { agentchat: { url: 'https://proxy.example/mcp', transport: 'streamable-http' } } } }
+    expect(turnReadiness({ cfg: theirs, apiBase, apiKey, env: {} })).toEqual({ ready: true })
+  })
+
+  it('the restart hint appears only when the config could not be read live', () => {
+    const live = turnReadiness({ cfg: {}, apiBase, apiKey, env: {}, live: true })
+    const snapshot = turnReadiness({ cfg: {}, apiBase, apiKey, env: {}, live: false })
+    if (live.ready || snapshot.ready) throw new Error('unreachable')
+    expect(live.reason).not.toMatch(/restart the gateway/)
+    expect(snapshot.reason).toMatch(/run `openclaw doctor --fix`, then restart the gateway/)
+    expect(turnReadiness({ cfg: {}, apiBase, apiKey, env: {} })).toEqual(live) // omitted = live
+  })
+
+  it('readLiveConfig reads the gateway config through the runtime (OpenClaw hot-applies mcp.*) and falls back to the snapshot without one', () => {
+    const snapshot = { mcp: { servers: {} } }
+    const liveCfg = { mcp: { servers: { agentchat: ours.mcp.servers.agentchat } } }
+    const runtime = { config: { loadConfig: () => liveCfg } } as unknown as PluginRuntime
+    expect(readLiveConfig(snapshot, () => runtime)).toEqual({ cfg: liveCfg, live: true })
+    expect(readLiveConfig(snapshot, () => null)).toEqual({ cfg: snapshot, live: false })
+    const throwing = { config: { loadConfig: () => { throw new Error('not in this registration mode') } } } as unknown as PluginRuntime
+    expect(readLiveConfig(snapshot, () => throwing)).toEqual({ cfg: snapshot, live: false })
+    // The two together: doctor --fix wrote the entry after start → ready without a restart.
+    const read = readLiveConfig(snapshot, () => runtime)
+    expect(turnReadiness({ cfg: read.cfg, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey }, live: read.live })).toEqual({ ready: true })
   })
 })
 

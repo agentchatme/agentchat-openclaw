@@ -40,6 +40,10 @@ vi.mock('../../src/binding/sdk-client.js', async () => {
 import { agentchatGatewayAdapter, statusStateFor, waitUntilAbort } from '../../src/binding/gateway.js'
 import { registerIntegration } from '../../src/binding/runtime-registry.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
+import { parseChannelConfig } from '../../src/config-schema.js'
+import { IntegrationSocket } from '../../src/integration/socket.js'
+import { silentLogger } from '../helpers/logger.js'
+import { MockWebSocket, MockWebSocketCtor, messageNew } from '../helpers/mock-websocket.js'
 import { IDENTITY_LINE } from '../helpers/texts.js'
 
 const KEY = 'ac_live_' + 'g'.repeat(24)
@@ -308,6 +312,54 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
     expect(status()).toMatchObject({ running: false, connected: false, lifecycle: 'stopped' })
     invoker?.stop()
     texts?.stop()
+  })
+
+  it('wires one in-memory recorder into the socket: a message.new wake counts wake_total{source=message} and closes count disconnect_total{code,initiator}, readable as the snapshot the status probe shows', async () => {
+    vi.useFakeTimers()
+    try {
+      const { invoker, texts } = await built()
+      const params = vi.mocked(registerIntegration).mock.calls.at(-1)![0]
+      const metrics = params.socketOptions?.metrics
+      expect(metrics).toBeDefined()
+      expect(metrics!.snapshot).toBeTypeOf('function')
+      expect(metrics!.snapshot!()).toEqual({ state: 'idle', wakes: {}, disconnects: {}, errors: {} })
+
+      // The recorder the gateway handed over, driven by the real socket binding over the SDK and a mock wire.
+      MockWebSocket.reset()
+      const socket = new IntegrationSocket({
+        config: parseChannelConfig({ apiKey: KEY, apiBase: 'https://api.agentchat.me', agentHandle: 'alice', reconnect: { initialBackoffMs: 1000, maxBackoffMs: 30000, jitterRatio: 0.2 } }),
+        logger: silentLogger,
+        metrics: metrics!,
+        webSocket: MockWebSocketCtor,
+      })
+      try {
+        await socket.start()
+        MockWebSocket.latest().simulateReady()
+        MockWebSocket.latest().simulateMessage(messageNew('conv_1', 1, { sender: '@bob' }))
+        expect(metrics!.snapshot!()).toMatchObject({ state: 'ready', wakes: { connect: 1, message: 1 } })
+
+        // A close from the wire.
+        MockWebSocket.latest().simulateClose(1006, 'abnormal')
+        expect(metrics!.snapshot!().disconnects).toEqual({ '1006/server': 1 })
+
+        // The SDK's own handshake deadline on the reconnect (the live-fire's forced handshake timeout): 4000/client, one transport notice.
+        vi.advanceTimersByTime(1000) // > the first backoff step
+        expect(MockWebSocket.instances).toHaveLength(2)
+        vi.advanceTimersByTime(15_000)
+        expect(metrics!.snapshot!()).toMatchObject({
+          state: 'backoff',
+          disconnects: { '1006/server': 1, '4000/client': 1 },
+          errors: { transport: 1 },
+        })
+      } finally {
+        await socket.stop()
+      }
+      expect(metrics!.snapshot!().state).toBe('stopped')
+      invoker?.stop()
+      texts?.stop()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('refusal and off report lifecycle blocked / stopped', async () => {

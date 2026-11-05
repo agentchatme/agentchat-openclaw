@@ -40,7 +40,10 @@ import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 import type { GateModelCall } from 'agentchatme'
 
 import { getPluginRuntime } from './runtime-holder.js'
+import { describeMcpEntry } from './mcp.js'
+import { MCP_SERVER_NAME } from './turn.js'
 import { AGENTCHAT_CHANNEL_ID } from '../channel-account.js'
+import { API_KEY_ENV } from '../credentials/read-env.js'
 
 export type { GateModelCall }
 
@@ -200,6 +203,67 @@ export type TurnAdmission =
 
 /** Starts one agent turn. Injectable so the invoker is testable without OpenClaw. */
 export type TurnStarter = (request: TurnRequest) => Promise<TurnAdmission>
+
+/** Whether a turn started now can look at AgentChat at all; `reason` is the operator line when it cannot. */
+export type TurnReadiness = { readonly ready: true } | { readonly ready: false; readonly reason: string }
+
+/**
+ * The gateway config as it is NOW. OpenClaw hot-applies `mcp.*` changes (a
+ * running gateway's turns have the tools right after `openclaw doctor --fix`
+ * wrote the entry), so a readiness check must not read the snapshot the
+ * account started with. `runtime.config.loadConfig()` is that live read;
+ * without a usable runtime, or if it throws, the snapshot is what there is
+ * (`live: false`) — and then a config fix needs a restart to be seen.
+ */
+export function readLiveConfig(fallback: unknown, runtime: () => PluginRuntime | null = getPluginRuntime): { cfg: unknown; live: boolean } {
+  try {
+    const loaded: unknown = runtime()?.config?.loadConfig?.()
+    if (loaded && typeof loaded === 'object') return { cfg: loaded, live: true }
+  } catch {
+    // fall through to the snapshot
+  }
+  return { cfg: fallback, live: false }
+}
+
+/**
+ * What can be known from inside the gateway about the hosted tools a turn
+ * will have. OpenClaw discovers MCP servers per turn and the plugin runtime
+ * exposes no tool catalog, so the plugin cannot ask which tools a run gets;
+ * it can check the two things that decide it: the `mcp.servers.agentchat`
+ * entry is in the gateway config (enabled), and the credential its bearer
+ * template names is in this process's environment (OpenClaw resolves
+ * `${AGENTCHAT_API_KEY}` from the gateway env; a gateway started before the
+ * wizard wrote `.env` holds the unresolved template until it restarts or
+ * reloads). A hand-written entry is the operator's and counts as ready.
+ *
+ * The invoker checks this before the gate: while unready nothing is asked,
+ * nothing recorded, the cards wait on the tray and the ladder re-wakes —
+ * instead of a turn running blind and then marking the conversation read.
+ * `live: false` means `cfg` is the start-time snapshot (see `readLiveConfig`),
+ * so a config fix is only seen after a restart; the reason says so then.
+ */
+export function turnReadiness(params: { cfg: unknown; apiBase: string; apiKey: string; env?: NodeJS.ProcessEnv; live?: boolean }): TurnReadiness {
+  const env = params.env ?? process.env
+  const restart = params.live === false ? ', then restart the gateway (this gateway cannot re-read its config while running)' : ''
+  switch (describeMcpEntry(params.cfg, params.apiBase, params.apiKey)) {
+    case 'missing':
+      return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is not in the gateway config — run \`openclaw doctor --fix\`${restart}` }
+    case 'disabled':
+      return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is disabled in the gateway config — enable it${restart}` }
+    case 'user_managed':
+      return { ready: true }
+    case 'ours': {
+      const value = env[API_KEY_ENV]
+      if (typeof value !== 'string' || value.trim().length === 0) {
+        return {
+          ready: false,
+          reason: `${API_KEY_ENV} is not set in the gateway process, so the hosted tools' bearer template cannot resolve — restart the gateway (or reload its config) once ~/.openclaw/.env carries it`,
+        }
+      }
+      return { ready: true }
+    }
+  }
+}
 
 /**
  * The turn starter for production. `deliver: false` — the final text is
