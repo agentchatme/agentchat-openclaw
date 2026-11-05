@@ -1,15 +1,23 @@
 name: Publish
 
-# Two registries, one trigger. Tag push (`v*`) publishes to BOTH npm and
-# ClawHub in sequence — npm first, then ClawHub. Manual `workflow_dispatch`
-# is for dry-runs and recovery:
+# Two registries, two triggers. Tag push (`v*`) publishes to npm. ClawHub is
+# published by a manual `workflow_dispatch` from `main` right after, because
+# ClawHub mints trusted-publishing tokens only for `workflow_dispatch` runs
+# (openclaw/clawhub docs/cli.md: "Trusted publishing without a secret only
+# works on workflow_dispatch; tag pushes still need clawhub_token"; the
+# server's trusted-publisher policy allows that one event). We hold no
+# ClawHub token, so a tag push does not attempt ClawHub at all — it used to,
+# and failed on every release (0.8.1: the OIDC mint was refused, the CLI fell
+# back to a stored login it does not have, and printed "Not logged in").
 #
 #   target=test         npm `next` dist-tag only (existing dry-run behavior)
-#   target=prod         npm + ClawHub (same as tag push)
-#   target=clawhub-only ClawHub only — used when npm is already current and
-#                       a previous ClawHub publish was held by a security
-#                       scan, the issue is fixed, and we want to retry without
-#                       a fake npm bump.
+#   target=prod         npm + ClawHub (a full release by hand)
+#   target=clawhub-only ClawHub only — the normal second step after a tag
+#                       push, and the retry when a previous ClawHub publish
+#                       was held by a security scan and the issue is fixed.
+#
+# Release, in order: push the tag → approve npm → run this workflow from
+# `main` with target=clawhub-only → approve ClawHub.
 #
 # Auth:
 #   - npm: OIDC trusted publishing (no token) — npm trusts this repo +
@@ -131,18 +139,18 @@ jobs:
     needs:
       - test
       - publish-npm
-    # Run on tag push, on `prod` dispatch, and on `clawhub-only` dispatch.
-    # `always()` is needed because publish-npm is SKIPPED (not failed) on
-    # clawhub-only — without `always()` GitHub won't start this job. The
-    # explicit `result` checks guard against actual failures.
+    # Dispatch only (`prod` or `clawhub-only`): ClawHub refuses to mint a
+    # trusted-publishing token for a tag push, so the job is not started
+    # there (see the header). `always()` is needed because publish-npm is
+    # SKIPPED (not failed) on clawhub-only — without `always()` GitHub won't
+    # start this job. The explicit `result` checks guard against actual
+    # failures.
     if: |
       always()
       && needs.test.result == 'success'
       && (needs.publish-npm.result == 'success' || needs.publish-npm.result == 'skipped')
-      && (
-        github.event_name == 'push'
-        || (github.event_name == 'workflow_dispatch' && (github.event.inputs.target == 'prod' || github.event.inputs.target == 'clawhub-only'))
-      )
+      && github.event_name == 'workflow_dispatch'
+      && (github.event.inputs.target == 'prod' || github.event.inputs.target == 'clawhub-only')
     # Its own approval, same environment as npm: the clawhub-only recovery
     # path used to be the one ungated publish. The environment is also what
     # ClawHub's trusted publisher is bound to.
@@ -188,6 +196,13 @@ jobs:
       # `clawhub package inspect @agentchatme/openclaw` and see exactly
       # which commit produced the listed version.
       #
+      # --source-ref is the FULL ref (`refs/heads/main`), exactly what the
+      # GitHub OIDC claim carries and what ClawHub's own reusable workflow
+      # passes; ClawHub rejects the publish when it differs from the
+      # authorized ref ("Trusted publish source ref must match the
+      # authorized source ref" — the 0.8.1 recovery run, which passed the
+      # short name `main`).
+      #
       # We do NOT pass --changelog. The CHANGELOG.md is large and the CLI
       # accepts a single string; pulling the right slice in YAML is brittle.
       # ClawHub renders a "see CHANGELOG" link to the source-repo at
@@ -203,4 +218,4 @@ jobs:
             --version "${PKG_VERSION}" \
             --source-repo "agentchatme/agentchat-openclaw" \
             --source-commit "${GITHUB_SHA}" \
-            --source-ref "${GITHUB_REF_NAME}"
+            --source-ref "${GITHUB_REF}"
