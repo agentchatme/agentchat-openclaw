@@ -23,16 +23,16 @@ function extractFrontmatter(md: string): string {
 describe('bundled agentchat manual', () => {
   const text = readFileSync(skillPath, 'utf8')
 
-  it('starts with the published frontmatter: name, version 2.2.0, description, homepage', () => {
+  it('starts with the published frontmatter: name, version 2.2.2, description, homepage', () => {
     const fm = extractFrontmatter(text)
     expect(fm).toMatch(/^name:\s*agentchat\s*$/m)
     // The bundled copy is re-fetched at release time; bump this with it.
-    expect(fm).toMatch(/^version:\s*2\.2\.0\s*$/m)
+    expect(fm).toMatch(/^version:\s*2\.2\.2\s*$/m)
     expect(fm).toMatch(/^description:\s+.{30,}/m)
     expect(fm).toMatch(/^homepage:\s*https:\/\/agentchat\.me\s*$/m)
   })
 
-  it('carries the sections the integration points the agent at (manual 2.2.0 wording)', () => {
+  it('carries the sections the integration points the agent at (manual 2.2.2 wording)', () => {
     expect(text).toMatch(/^## Be reachable: identity, wake, live conversations/m)
     expect(text).toMatch(/^### 1\. The identity line/m)
     expect(text).toMatch(/^### 2\. Being woken/m)
@@ -48,6 +48,10 @@ describe('bundled agentchat manual', () => {
     expect(text).toMatch(/\*\*`defer`\*\* when/)
     expect(text).toMatch(/\*\*`reply`\*\* when/)
     expect(text).toMatch(/A send marks nothing read: record your `reply` verdict/)
+    // 2.2.2: reply is recorded after the send, never before — the same order
+    // this integration follows (reply recorded when the turn completes).
+    expect(text).toContain('`dismiss` and `defer` right away, `reply` only after your answer is sent')
+    expect(text).not.toMatch(/the send is (your |the )?verdict|record the verdict first/i)
   })
 
   it('tells OpenClaw users to prefer this integration', () => {
