@@ -39,11 +39,12 @@ interface MakeOptions extends Omit<FakeClientOptions, 'texts'> {
   readiness?: () => TurnReadiness
   gateEnabled?: boolean
   stateDir?: string
+  afterTurn?: FakeClientOptions['afterTurn']
 }
 
 function make(opts: MakeOptions) {
   const clock = new Clock()
-  const { client, posts, trayCalls } = fakeClient({ trays: opts.trays, invites: opts.invites, rejectRecords: opts.rejectRecords })
+  const { client, posts, trayCalls, postTurnReads } = fakeClient({ trays: opts.trays, invites: opts.invites, rejectRecords: opts.rejectRecords, afterTurn: opts.afterTurn })
   const events: string[] = []
   const recordRaw = client.decisions.record
   client.decisions.record = async (conversationId, body) => {
@@ -95,12 +96,57 @@ function make(opts: MakeOptions) {
   const settle = async () => {
     for (let i = 0; i < 20; i++) await invoker.settled()
   }
-  return { clock, client, posts, trayCalls, events, texts, invites, stateDir, turns, invoker, logger, settle, wakeSources, modelCalls: () => modelCalls }
+  return { clock, client, posts, trayCalls, postTurnReads, events, texts, invites, stateDir, turns, invoker, logger, settle, wakeSources, modelCalls: () => modelCalls }
 }
 
 const tmpDirs: string[] = []
 afterEach(() => {
   for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true })
+})
+
+describe('AgentInvoker — a verdict the turn recorded itself stands', () => {
+  // The served texts tell the model to record reply after its send, or
+  // dismiss when it read and chose not to answer. The host's one tray read
+  // after the completed turn sees that and records nothing more.
+  const run = async (opts: MakeOptions) => {
+    const t = make({ trays: [tray([card('conv_a', 'msg_a')])], answer: decisions(['conv_a', 'reply']), ...opts })
+    tmpDirs.push(t.stateDir)
+    t.invoker.wake('message')
+    t.clock.advance(2000)
+    await t.settle()
+    return t
+  }
+
+  it('the card left the tray (the turn recorded reply or dismiss): no second reply', async () => {
+    const t = await run({ afterTurn: tray([]) })
+    expect(t.turns).toHaveLength(1)
+    expect(t.postTurnReads()).toBe(1)
+    expect(t.posts).toEqual([])
+    expect(t.logger.at('info').some((l) => l.msg === 'the turn recorded its own verdict — reply not recorded again')).toBe(true)
+  })
+
+  it('the card is still there but its your_last_decision moved (a newer message kept it): no second reply', async () => {
+    const after = card('conv_a', 'msg_2', { your_last_decision: { decision: 'reply', category: null, at: '2026-11-07T10:00:05.000Z' } })
+    const t = await run({ afterTurn: tray([after]) })
+    expect(t.posts).toEqual([])
+  })
+
+  it('an older verdict on the card is not the turn’s: reply is recorded', async () => {
+    const old = { your_last_decision: { decision: 'defer', category: null, at: '2026-11-06T09:00:00.000Z' } }
+    const t = make({ trays: [tray([card('conv_a', 'msg_a', old)])], answer: decisions(['conv_a', 'reply']), afterTurn: tray([card('conv_a', 'msg_a', old)]) })
+    tmpDirs.push(t.stateDir)
+    t.invoker.wake('message')
+    t.clock.advance(2000)
+    await t.settle()
+    expect(t.posts).toEqual([{ conversationId: 'conv_a', body: { decision: 'reply', through_message_id: 'msg_a' } }])
+  })
+
+  it('a failed re-read, or a card that may sit past a truncated tray, records reply as before', async () => {
+    const failed = await run({ afterTurn: new Error('inbox down') })
+    expect(failed.posts).toEqual([{ conversationId: 'conv_a', body: { decision: 'reply', through_message_id: 'msg_a' } }])
+    const truncated = await run({ afterTurn: tray([card('conv_x', 'msg_x')], { truncated: true }) })
+    expect(truncated.posts).toEqual([{ conversationId: 'conv_a', body: { decision: 'reply', through_message_id: 'msg_a' } }])
+  })
 })
 
 describe('AgentInvoker — wake → tray → gate → one turn per reply', () => {

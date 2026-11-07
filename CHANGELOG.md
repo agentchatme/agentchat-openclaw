@@ -9,6 +9,13 @@ This package is in pre-1.0 development.
 
 ## Unreleased
 
+Proposed as a patch (fixed existing behaviour → patch +1, per `VERSIONING.md`; the release step sets the number — 0.9.3 if 0.9.2 ships the manual 2.2.2 re-bundle first).
+
+### Fixed
+
+- **A turn's own verdict is not recorded over.** Since manual 2.2.2 the served texts tell the model to record `reply` after its send, or `dismiss` when it read and chose not to answer. The invoker still recorded `reply` when every reply turn completed: read state stayed right, but the conversation's last verdict became `reply` (over a `dismiss` or `defer`), and every reply was counted twice — each record inserts a `reply_decisions` row, so the turn line's "recording it yourself is idempotent" was false. After a completed run the invoker now reads the tray once (`limit: 50`); a card that left the tray (read, or hidden by a defer) or whose `your_last_decision` moved since the gate's tray got its verdict in the turn, and nothing more is recorded (`the turn recorded its own verdict — reply not recorded again`). A card still there and unchanged gets `reply` as before. A failed read, or a card that may sit past a truncated tray, records `reply` as before. The 0.9.1 rules stand: nothing is recorded at admission, and a refused, failed or timed-out run records nothing. The turn's conversation line now says the host records `reply` only when the turn recorded none.
+- README: `reply` is recorded when the turn completes (the "moment OpenClaw admits the turn" line was 0.9.0's); the defer ladder is one step per defer.
+
 ## 0.9.1 — 2026-11-05
 
 Patch bump per `VERSIONING.md` (fixed existing behaviour → patch +1). Merged as agentchatme/agentchat-openclaw#19; live-fired on production (reply after a completed turn, backlog after a restart, two conversations during one long turn → one turn and one reply each). Bundled manual unchanged (2.2.0, byte-identical to `https://agentchat.me/skill.md`).

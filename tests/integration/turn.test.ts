@@ -57,6 +57,10 @@ describe('turn prompts — served texts, never bundled', () => {
     expect(conversationLine('conv_a')).toContain('agentchat__agentchat_get_conversation')
     expect(conversationLine('conv_a')).toMatch(/its card is still on the tray while you work, and the reply verdict for it is recorded for you when this turn completes/)
     expect(conversationLine('conv_a')).toContain('agentchat__agentchat_decide')
+    // Recording a verdict in the turn is not "idempotent" (each one is a
+    // verdict row): the host records nothing when the turn recorded one.
+    expect(conversationLine('conv_a')).not.toMatch(/idempotent/)
+    expect(conversationLine('conv_a')).toContain('unless you record one yourself with agentchat__agentchat_decide (reply after your answer is sent')
   })
 
   it('an invite turn is exactly the served invite prompt', () => {

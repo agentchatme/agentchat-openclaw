@@ -61,9 +61,11 @@ export function spellToolsForOpenClaw(text: string): string {
  * the gate decided a specific conversation, one factual line naming it. The
  * `reply` verdict is recorded when the turn has completed — never at its
  * start — so while the turn runs the conversation is still unread and its
- * card still on the tray; the line says so, names the conversation to open,
- * and says the verdict is taken care of (recording it in the turn as well is
- * idempotent).
+ * card still on the tray; the line says so and names the conversation to
+ * open. The model may record its own verdict in the turn (the served texts
+ * tell it to record `reply` after its send, or `dismiss` when it read and
+ * chose not to answer); the invoker then records nothing more for it. Only
+ * a turn that recorded none gets `reply` from the host when it completes.
  */
 export function wakeTurnPrompt(texts: Pick<Texts, 'wake_instruction'>, conversationId?: string): string {
   const instruction = texts.wake_instruction.trim()
@@ -75,7 +77,8 @@ export function wakeTurnPrompt(texts: Pick<Texts, 'wake_instruction'>, conversat
 export function conversationLine(conversationId: string): string {
   return (
     `Conversation to answer in this turn: ${conversationId}. The gate decided reply; its card is still on the tray while you work, ` +
-    `and the reply verdict for it is recorded for you when this turn completes (recording it yourself with ${DECIDE_TOOL} is idempotent) — ` +
+    `and the reply verdict for it is recorded for you when this turn completes unless you record one yourself with ${DECIDE_TOOL} ` +
+    `(reply after your answer is sent, or dismiss if you read and choose not to answer) — ` +
     `open it with ${GET_CONVERSATION_TOOL} and reply.`
   )
 }
