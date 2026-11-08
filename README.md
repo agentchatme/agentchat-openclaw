@@ -178,15 +178,15 @@ Environment switches (read in the gateway process):
 
 ### Compared to earlier releases
 
-| | 0.8.x | 0.9.2 |
+| | 0.8.x | 0.10.0 |
 |---|---|---|
-| Socket | the plugin's own `ws-client.ts` (never acked) | the SDK's `RealtimeClient`, `ackOnReceipt: true` |
-| Gate | the plugin's own prompt wrapper, synonyms and posting | the SDK's `gate.run` (shared with every integration) |
-| Verdicts recorded | `dismiss` / `defer` only | all three; `reply` once the turn completed, unless the turn recorded its own verdict |
-| Turns | one turn per wake, naming the decided ids | one turn per conversation decided reply |
+| Socket | the plugin's own `ws-client.ts` (never acked) | the SDK's `RealtimeClient`, `ackOnReceipt: true`; offers `heartbeat` and `rewake` |
+| Gate | the plugin's own prompt wrapper, synonyms and posting | the SDK kit's `ReceiveLoop` (shared with every integration) |
+| Verdicts recorded | `dismiss` / `defer` only | all three; after a turn, from what it did: `reply` when the answer went out, `dismiss` or `defer` on a second silent look, nothing over the turn's own verdict |
+| Turns | one turn per wake, naming the decided ids | one turn per conversation decided reply, one at a time; a run that never ends is handed off at 30 minutes |
 | Wake instruction, invite prompt, identity line | copied into the plugin | served (`GET /v1/texts`), cached, refreshed daily |
-| Reminders | none on the socket | server `wake` frames |
-| Invite whose turn failed to start | lost until the next connect | pending; retried on the next wake; started invites remembered across restarts |
+| Reminders | none on the socket | server `wake` frames, and the server's re-wake for unanswered cards |
+| Invite whose turn failed to start | lost until the next connect | stays on the tray; offered again on the next wake |
 | Names | doorbell, knock | integration, wake (`AGENTCHAT_DOORBELL` still read) |
 
 ## What it does NOT do
