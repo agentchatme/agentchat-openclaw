@@ -9,7 +9,7 @@ This package is in pre-1.0 development.
 
 ## Unreleased
 
-Contract v1 ("finish the gate"). The release number is set at the release step. Needs, in this order: the AgentChat server with contract v1 (gate-call texts, tray invites, the unanswered re-wake), then the `agentchatme` SDK release that carries the integration kit — until then `package.json` points `agentchatme` at a local build of the kit and the lockfile is not installable from the registry.
+Contract v1 ("finish the gate"). The release number is set at the release step. Needs, in this order: the AgentChat server with contract v1 (tray invites and the unanswered re-wake; gate-call texts are used when served), then the `agentchatme` SDK release that carries the integration kit — until then `package.json` points `agentchatme` at a local build of the kit and the lockfile is not installable from the registry.
 
 ### Changed
 
@@ -17,7 +17,7 @@ Contract v1 ("finish the gate"). The release number is set at the release step. 
 - **The run's AgentChat calls are counted from its transcript** (`runtime.subagent.getSessionMessages`): direct `agentchat__<tool>` results and calls made through OpenClaw's tool-search surface. Unknown when OpenClaw does not allow the read.
 - **Group invites come from the tray (D4).** No invite frames handed on, no connect-time catch-up, no on-disk ledger: each pending invite on the tray gets one turn with the served invite prompt; one still pending after two turns that looked is dismissed (left pending, not offered again).
 - **The socket offers `rewake` and `heartbeat`** besides `ack`: the server re-wakes it while cards stay unanswered (D3), and its heartbeat frames feed the SDK's idle watchdog (D7).
-- **The gate takes its preamble and answer format from the served texts** (`gate_call_preamble`, `gate_call_answer_format`, re-spelled for OpenClaw like the other texts); without them it fails closed.
+- **The gate takes its preamble and answer format from the served texts** (`gate_call_preamble`, `gate_call_answer_format`, re-spelled for OpenClaw like the other texts); a server that serves neither gets the SDK's 1.2 wording.
 - **Setup goes through the SDK.** The key check (`getMe`), registration (`AgentChatClient.register` / `verify`) and recovery (`recover` with the handle, `recoverVerify`) no longer use the plugin's own HTTP; the result unions the wizard reads are unchanged. `RegisterOptions` carries only `apiBase` (the SDK's static calls take no `fetch` or timeout).
 - **The turn's conversation line names the conversation and nothing else** (`Conversation to answer: <id>`); what to do on a wake is the served wake instruction's to say.
 

@@ -76,10 +76,11 @@ afterEach(() => {
 })
 
 describe('IntegrationSocket — HELLO and wake frames', () => {
-  it('the OpenClaw HELLO offers ack, heartbeat and rewake; an accepted HELLO is `connected`, `ready`, and the connect metric', async () => {
+  it('the OpenClaw HELLO offers heartbeat and rewake, and ack once a message handler is attached (the loop attaches one); an accepted HELLO is `connected`, `ready`, and the connect metric', async () => {
     const connected: number[] = []
     const { socket, metrics } = makeSocket({ onConnected: (at) => connected.push(at) })
     sockets.push(socket)
+    socket.realtime.on('message.new', () => undefined) // the receive loop's handler, standing in
     await start(socket)
     const ws = MockWebSocket.latest()
     expect(ws.url).toBe('wss://api.agentchat.me/v1/ws')
@@ -95,12 +96,21 @@ describe('IntegrationSocket — HELLO and wake frames', () => {
     expect(metrics.wakes).toEqual(['connect'])
   })
 
+  it('without a message handler the SDK offers no ack (a handler-less client is marked on send)', async () => {
+    const { socket } = makeSocket()
+    sockets.push(socket)
+    await start(socket)
+    const ws = MockWebSocket.latest()
+    ws.simulateOpen()
+    expect(sentFrames(ws, 'hello')[0]!.capabilities).toEqual(['heartbeat', 'rewake'])
+  })
+
   it('server wake frames are labelled by their reason (reminder, unanswered, other) for the metric, and never acked', async () => {
     const { socket, metrics } = makeSocket()
     sockets.push(socket)
     await start(socket)
     const ws = MockWebSocket.latest()
-    ws.simulateReady()
+    ws.simulateReady(['ack', 'heartbeat', 'rewake']) // the contract-v1 wake shapes hold once rewake is echoed
     ws.simulateMessage(wakeFrame('conv_9', 2))
     ws.simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: ['conv_1', 'conv_2'], step: 1, at: '2026-11-08T00:00:00.000Z' } })
     ws.simulateMessage({ ...wakeFrame('conv_10'), payload: { ...(wakeFrame('conv_10').payload as object), reason: 'something-new' } })

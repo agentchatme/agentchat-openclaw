@@ -337,7 +337,7 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
       try {
         socket.bind()
         await socket.realtime.connect()
-        MockWebSocket.latest().simulateReady()
+        MockWebSocket.latest().simulateReady(['ack', 'heartbeat', 'rewake'])
         MockWebSocket.latest().simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: ['conv_1'], step: 1, at: '2026-11-08T00:00:00.000Z' } })
         expect(metrics!.snapshot!()).toMatchObject({ state: 'ready', wakes: { connect: 1, unanswered: 1 } })
 

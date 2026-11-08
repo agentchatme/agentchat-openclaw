@@ -293,13 +293,13 @@ describe('OpenClaw-side switches', () => {
     expect(h.server.posts).toEqual([])
   })
 
-  it('no gate-call texts (an older server): the gate fails closed, nothing recorded, no run', async () => {
+  it('no gate-call texts (an older server): the gate uses the SDK’s 1.2 wording (lead decision) and works', async () => {
     const { gate_call_preamble: _p, gate_call_answer_format: _f, ...old } = SPELLED_TEXTS
     const h = await start({ texts: staticTexts(old) })
     await message(h, 'conv_a', 1)
-    expect(h.modelCalls).toHaveLength(0)
-    expect(h.runs.requests).toHaveLength(0)
-    expect(h.logger.at('warn').some((l) => /gate failed closed/.test(l.msg ?? ''))).toBe(true)
+    expect(h.modelCalls).toHaveLength(1)
+    expect(h.modelCalls[0]).toContain('agentchat__agentchat_decide')
+    expect(h.runs.requests).toHaveLength(1)
   })
 })
 
