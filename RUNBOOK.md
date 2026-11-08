@@ -116,7 +116,7 @@ OpenClaw gives a plugin no way to stop a subagent run; its own run deadline (`ag
 
 - After 30 minutes the turn is **handed off**: the log says `a turn for conversation … has run N min — that conversation stays held (no second reply) until the run ends; …`, the account's turn slot is released, and new turns run on a fresh OpenClaw lane (`agentchat-integration:<account>:<n>`) so they do not queue behind the hung run. Other conversations are answered as usual; that one is not gated again until OpenClaw reports the run ended. Then it is gated again at once (nothing is recorded for the hung run; if it did answer, the card no longer owes a reply).
 - With **two** hung turns held the account stops gating: `openclaw channels capabilities` and `openclaw doctor` show `2 turns are hung in OpenClaw (…) — no gate calls until one ends, so other cards are waiting on the tray; …`.
-- `openclaw agentchat release <conversation_id>` (add `--account <id>` for another account) lets go of one: its conversation may be gated again at once. The run is **not** stopped — if it answers later, the peer can get a second reply. Restarting the gateway ends every run (and OpenClaw does not resume them).
+- `openclaw agentchat release <conversation_id>` (add `--account <id>` for another account) lets go of one: its conversation may be gated again at once, and new turns move to a fresh lane. The run is **not** stopped — if it answers later, the peer can get a second reply. Restarting the gateway ends every run (and OpenClaw does not resume them).
 - Lower `agents.defaults.timeoutSeconds` if turns should end sooner.
 
 ### A config change while a turn runs

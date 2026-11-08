@@ -195,6 +195,11 @@ export class AccountTurns {
     }
     for (const kind of ['reply', 'invite'] as const) {
       const key = trackerKey(kind, id)
+      const held = kind === 'reply' ? this.tracker.conversationRunning(id) : this.tracker.inviteRunning(id)
+      if (!held) continue
+      // The released run may still be going in its lane: new turns move on
+      // (first — the release can admit a waiting turn at once).
+      this.lane += 1
       if (this.tracker.release(key)) {
         const runId = [...this.runs.values()].find((r) => r.kind === kind && r.id === id)?.runId ?? null
         this.live?.wake()

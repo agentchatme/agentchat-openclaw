@@ -95,7 +95,9 @@ describe('a run that never ends', () => {
     turns.handOff('run_1')
     expect(turns.release('conv_a')).toMatchObject({ released: true, what: 'hung', runId: 'run_1' })
     expect(turns.tracker.conversationRunning('conv_a')).toBe(false)
+    const laneBefore = turns.laneGeneration
     expect(turns.release('conv_b')).toMatchObject({ released: true, what: 'running', key: 'conversation:conv_b', runId: 'run_2' })
+    expect(turns.laneGeneration).toBe(laneBefore + 1) // the released run may still occupy its lane
     expect(turns.tracker.conversationRunning('conv_b')).toBe(false)
     expect(turns.release('conv_x')).toEqual({ released: false, reason: 'no turn holds conv_x' })
     expect(wakes).toBeGreaterThanOrEqual(3)
