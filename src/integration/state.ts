@@ -1,16 +1,17 @@
 /**
  * The plugin's own state on disk: `<OpenClaw state dir>/agentchat/<accountId>/`.
  *
- * Two small JSON files live there, both caches of facts that exist elsewhere:
- * the served texts (`texts.json`, so a gateway can start while the server is
- * unreachable) and the group invites already offered to the agent
- * (`invites.json`, so a restart never starts a second turn for an invite the
- * agent chose to leave pending). Nothing secret, nothing authoritative —
- * deleting the directory costs one texts fetch and, at worst, one repeated
- * invite turn.
+ * Two small JSON files live there: the served texts (`texts.json`), a cache
+ * of what the server serves, so a gateway can start while the server is
+ * unreachable; and the turns in flight (`turns.json`, `./turn-store.ts`), so
+ * the next start after a gateway restart holds their conversations. Files
+ * earlier releases kept here are removed on start (`removeOldStateFiles`).
+ * Nothing secret, nothing authoritative — deleting the directory costs one
+ * texts fetch (and, while the gateway is stopped, the restart defense for
+ * that one restart).
  *
- * Writes are atomic (temp file + rename) so a crash mid-write leaves the
- * previous copy, never a truncated one.
+ * Both are written atomically (temp file + rename; the kit's cache also
+ * fsyncs).
  */
 
 import * as fs from 'node:fs'
@@ -30,34 +31,40 @@ export function integrationStateDir(accountId: string, stateDir: string = resolv
   return path.join(stateDir, PLUGIN_STATE_DIRNAME, safeSegment(accountId))
 }
 
-/** Parse a JSON file; `null` when it is absent, unreadable or not valid JSON. */
-export function readJsonFile(file: string): unknown {
-  let raw: string
+/** Files earlier releases kept here that nothing reads any more. */
+export const OLD_INVITE_LEDGER_FILE = 'invites.json'
+
+/**
+ * Upgrade cleanup, once per start: the invite ledger of earlier releases
+ * (invites now come from the tray) and a texts cache in the earlier shape
+ * (the kit's cache keeps `{ version: 1, runtime, fetched_at, texts }`; an
+ * older file is ignored by it and would only linger). Never throws; returns
+ * what was removed.
+ */
+export function removeOldStateFiles(accountId: string, stateDir?: string): string[] {
+  const dir = integrationStateDir(accountId, stateDir)
+  const removed: string[] = []
+  const ledger = path.join(dir, OLD_INVITE_LEDGER_FILE)
+  if (tryUnlink(ledger)) removed.push(ledger)
+  const texts = path.join(dir, 'texts.json')
   try {
-    raw = fs.readFileSync(file, 'utf8')
-  } catch {
-    return null
+    const entry = JSON.parse(fs.readFileSync(texts, 'utf8')) as { version?: unknown; runtime?: unknown }
+    if (entry.version !== 1 || typeof entry.runtime !== 'string') {
+      if (tryUnlink(texts)) removed.push(texts)
+    }
+  } catch (err) {
+    // Absent: nothing to do. Unreadable or not JSON: an old or damaged copy.
+    if ((err as NodeJS.ErrnoException)?.code !== 'ENOENT' && tryUnlink(texts)) removed.push(texts)
   }
+  return removed
+}
+
+function tryUnlink(file: string): boolean {
   try {
-    return JSON.parse(raw) as unknown
+    fs.unlinkSync(file)
+    return true
   } catch {
-    return null
+    return false
   }
 }
 
-/** Write JSON atomically (temp file in the same directory, then rename). Throws on I/O errors. */
-export function writeJsonFile(file: string, value: unknown): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.tmp`
-  fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
-  try {
-    fs.renameSync(tmp, file)
-  } catch (err) {
-    try {
-      fs.unlinkSync(tmp)
-    } catch {
-      // the rename failed; the temp file is the only thing left to clean
-    }
-    throw err
-  }
-}

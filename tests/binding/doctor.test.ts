@@ -13,17 +13,27 @@ const { IDENTITY_LINE } = vi.hoisted(() => ({
   ].join('\n'),
 }))
 
+// Unit tests never reach the network: a key without a handle would make
+// repairConfig ask the live API who it is.
+vi.mock('../../src/setup-client.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/setup-client.js')>()
+  return { ...actual, validateApiKey: vi.fn(async () => ({ ok: false, reason: 'unreachable', message: 'no network in unit tests' })) }
+})
+
 vi.mock('../../src/integration/texts.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/integration/texts.js')>()
   return { ...actual, loadIdentityLine: vi.fn(async () => IDENTITY_LINE) }
 })
 
 import { agentchatDoctorAdapter } from '../../src/binding/doctor.js'
+import { registerIntegration, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
+import { accountTurns, resetRunningTurnsForTest } from '../../src/integration/running.js'
 import { placeIntegration } from '../../src/integration/placement.js'
 import { loadIdentityLine } from '../../src/integration/texts.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
+import { testKey } from '../helpers/keys.js'
 
-const KEY = 'ac_live_' + 'd'.repeat(24)
+const KEY = ['ac', 'live', 'd'.repeat(24)].join('_')
 
 describe('doctor adapter', () => {
   let workspace: string
@@ -159,7 +169,7 @@ describe('doctor adapter', () => {
 })
 
 describe('doctor adapter — the llm override opt-in for a non-default bound agent', () => {
-  const KEY2 = 'ac_live_' + 'e'.repeat(24)
+  const KEY2 = testKey('e'.repeat(24))
   const bound = {
     channels: { agentchat: { apiKey: KEY2, agentHandle: 'alice' } },
     agents: { entries: { main: { default: true }, ops: {} } },
@@ -189,5 +199,38 @@ describe('doctor adapter — the llm override opt-in for a non-default bound age
     expect(warnings.some((w) => w.includes('mcp:'))).toBe(false)
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: substituted as never, doctorFixCommand: 'fix', env: {} })
     expect(fixed.changes.some((c) => c.includes('mcp.servers'))).toBe(false)
+  })
+
+  it('a turn the running integration has held past 30 minutes is a warning naming the conversation and the run deadline', async () => {
+    const config = { apiKey: KEY, apiBase: 'https://api.agentchat.me', reconnect: { initialBackoffMs: 1000, maxBackoffMs: 30000, jitterRatio: 0.2 }, ping: { intervalMs: 45000, timeoutMs: 30000 }, outbound: { maxInFlight: 256, sendTimeoutMs: 15000 }, observability: { logLevel: 'error', redactKeys: [] } }
+    try {
+      await registerIntegration({
+        accountId: 'default',
+        config: config as never,
+        logger: { trace() {}, debug() {}, info() {}, warn() {}, error() {}, child() { return this } } as never,
+        createSocket: () => ({ realtime: { disconnect() {} }, bind() {}, stopped() {}, getHealth: () => ({ state: 'ready', connectedAt: null, counters: { wakeFrames: 0, disconnects: 0 } }) }) as never,
+        build: () => ({
+          loop: {
+            loop: {
+              start: async () => undefined,
+              status: () => ({
+                turns: [{ kind: 'reply', conversationId: 'conv_hung', anchor: 'msg_1', startedAt: Date.now() - 40 * 60_000, waitTimedOutAt: null, overdue: true }],
+                recentCycles: [1, 2, 3].map(() => ({ outcome: 'fail_closed', failure: 'the gate call timed out' })),
+              }),
+            },
+            stop: async () => undefined,
+          } as never,
+          handlers: {},
+        }),
+      })
+      accountTurns('default').started({ runId: 'run_hung', kind: 'reply', id: 'conv_hung', anchor: 'msg_1', sessionKey: 'agent:main:subagent:x', startedAt: Date.now() - 40 * 60_000, owner: 'loop#1' })
+      const doctorCfg = { channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
+      const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: doctorCfg as never, doctorFixCommand: 'openclaw doctor --fix', env: {} })
+      expect(warnings.some((w) => /^\[agentchat:default\] the last 3 cycles decided nothing \(fail_closed\)/.test(w))).toBe(true)
+      expect(warnings.some((w) => /^\[agentchat:default\] a turn for conversation conv_hung has run 40 min — that conversation stays held \(no second reply\).*agents\.defaults\.timeoutSeconds = 172800/.test(w))).toBe(true)
+    } finally {
+      await resetRegistryForTest()
+      resetRunningTurnsForTest()
+    }
   })
 })

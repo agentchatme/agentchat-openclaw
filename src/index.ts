@@ -24,17 +24,14 @@ export type { AgentchatChannelConfig } from './config-schema.js'
 
 export { IntegrationSocket, realtimeOptionsFor } from './integration/socket.js'
 export type { SocketHandlers, SocketHealth, SocketState, SocketDisconnect, SocketBlocked, IntegrationSocketOptions } from './integration/socket.js'
-export { AgentInvoker } from './integration/invoker.js'
-export type { AgentInvokerOptions, CycleResult, CycleOutcome, WakeSource } from './integration/invoker.js'
-export { WakeCoalescer } from './integration/wake.js'
-export { TextsStore, loadTexts, loadIdentityLine } from './integration/texts.js'
-export { InviteLedger, groupInviteFromRecord } from './integration/invites.js'
-export type { GroupInvite } from './integration/invites.js'
+export { createIntegrationLoop } from './integration/loop.js'
+export type { IntegrationLoop, IntegrationLoopOptions } from './integration/loop.js'
+export { createLoopTurnStarter, turnEndOf } from './integration/turns.js'
+export { accountTurns, trackerFor, MAX_HUNG_TURNS } from './integration/running.js'
+export { OpenClawTexts, createTextsCache, loadIdentityLine, spellTextsForOpenClaw } from './integration/texts.js'
 export {
-  wakeTurnPrompt,
-  inviteTurnPrompt,
-  spellToolsForOpenClaw,
   mcpToolName,
+  spellToolsForOpenClaw,
   MCP_SERVER_NAME,
   OPENCLAW_TOOL_NAMER,
 } from './integration/turn.js'

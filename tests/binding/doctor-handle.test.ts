@@ -24,8 +24,9 @@ vi.mock('../../src/integration/texts.js', async (importOriginal) => {
 
 import { validateApiKey } from '../../src/setup-client.js'
 import { agentchatDoctorAdapter } from '../../src/binding/doctor.js'
+import { testKey } from '../helpers/keys.js'
 
-const KEY = 'ac_live_' + 'h'.repeat(24)
+const KEY = testKey('h'.repeat(24))
 
 describe('doctor --fix persists agentHandle', () => {
   it('learns the handle from the key when the field is missing and reports the change', async () => {

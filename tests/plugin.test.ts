@@ -23,8 +23,9 @@ import {
   agentchatChannelEntry,
   agentchatPlugin,
 } from '../src/channel.js'
+import { testKey } from './helpers/keys.js'
 
-const VALID_KEY = 'ac_live_' + 'x'.repeat(20)
+const VALID_KEY = testKey('x'.repeat(20))
 
 function cfg(channelSection: unknown): any {
   return { channels: { [AGENTCHAT_CHANNEL_ID]: channelSection } }

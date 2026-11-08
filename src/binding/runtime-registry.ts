@@ -3,31 +3,45 @@
  *
  * OpenClaw's gateway starts one integration per `(channelId, accountId)` pair
  * at channel enable and stops it on shutdown. The registry holds the live
- * socket, its invoker and the texts store so the status adapter can report
- * them, and serializes start/stop per account so a start-during-stop never
- * races.
+ * socket binding, the receive loop and the served texts so the status
+ * adapter can report them, and serializes start/stop per account so a
+ * start-during-stop never races.
  *
  * Keying is `accountId`-only; `channelId` is always `"agentchat"` here.
  */
 
+import type { integration } from 'agentchatme'
+
 import type { Logger } from '../log.js'
 import type { AgentchatChannelConfig } from '../config-schema.js'
 import { IntegrationSocket, type IntegrationSocketOptions, type SocketHandlers } from '../integration/socket.js'
-import type { AgentInvoker } from '../integration/invoker.js'
-import type { TextsStore } from '../integration/texts.js'
+import type { IntegrationLoop } from '../integration/loop.js'
 import type { MetricsRecorder } from '../metrics.js'
 
 export interface IntegrationEntry {
   readonly socket: IntegrationSocket
-  readonly invoker: AgentInvoker | null
-  readonly texts: TextsStore | null
-  /** The recorder the socket (and the invoker) count into; the status probe reads its snapshot when it keeps one. */
+  readonly loop: IntegrationLoop | null
+  /** The served texts as the loop reads them. */
+  readonly texts: integration.TextsSource | null
+  /** The recorder the socket binding and the loop count into; the status probe reads its snapshot when it keeps one. */
   readonly metrics: MetricsRecorder | null
   readonly config: AgentchatChannelConfig
   readonly logger: Logger
 }
 
-const registry = new Map<string, IntegrationEntry>()
+export interface BuiltIntegration {
+  readonly loop: IntegrationLoop | null
+  readonly texts?: integration.TextsSource | null
+  /** Stopped after the loop (the texts refresh timer). */
+  readonly textsCache?: integration.TextsCache | null
+  readonly handlers: SocketHandlers
+}
+
+interface LiveEntry extends IntegrationEntry {
+  readonly textsCache: integration.TextsCache | null
+}
+
+const registry = new Map<string, LiveEntry>()
 
 /** Per-account mutex: every register/unregister for the same account runs through this queue. */
 const accountLocks = new Map<string, Promise<unknown>>()
@@ -51,8 +65,8 @@ export interface RegisterIntegrationParams {
   readonly accountId: string
   readonly config: AgentchatChannelConfig
   readonly logger: Logger
-  /** Builds the invoker and the handlers that feed it, given the socket that will be started. */
-  readonly build: (socket: IntegrationSocket) => { invoker: AgentInvoker | null; texts?: TextsStore | null; handlers: SocketHandlers }
+  /** Builds the loop over the socket's SDK client, and the lifecycle handlers for the gateway. */
+  readonly build: (socket: IntegrationSocket) => BuiltIntegration
   /** Extra socket options (the SDK client for the reconnect drain, a WebSocket seam). */
   readonly socketOptions?: Pick<IntegrationSocketOptions, 'client' | 'webSocket' | 'metrics' | 'createRealtime'>
   /** Test seam for the socket constructor. */
@@ -71,13 +85,11 @@ export function registerIntegration(params: RegisterIntegrationParams): Promise<
       registry.delete(params.accountId)
     }
 
-    // The handlers close over the socket and the socket over the handlers;
-    // a late-bound reference resolves the cycle. The socket cannot deliver a
-    // frame before `start()`, so the reference is set before any handler runs.
-    let built: { invoker: AgentInvoker | null; texts?: TextsStore | null; handlers: SocketHandlers } | null = null
+    // The handlers close over what `build` returns and the loop over the
+    // socket; a late-bound reference resolves the cycle. Nothing fires
+    // before `bind()`.
+    let built: BuiltIntegration | null = null
     const handlers: SocketHandlers = {
-      onWake: (source, detail) => built?.handlers.onWake?.(source, detail),
-      onGroupInvite: (invite) => built?.handlers.onGroupInvite?.(invite),
       onConnected: (at) => built?.handlers.onConnected?.(at),
       onDisconnected: (info) => built?.handlers.onDisconnected?.(info),
       onBlocked: (info) => built?.handlers.onBlocked?.(info),
@@ -88,21 +100,23 @@ export function registerIntegration(params: RegisterIntegrationParams): Promise<
     const socket = create({ config: params.config, logger: params.logger, handlers, ...(params.socketOptions ?? {}) })
     built = params.build(socket)
 
-    const entry: IntegrationEntry = {
+    const entry: LiveEntry = {
       socket,
-      invoker: built.invoker,
+      loop: built.loop,
       texts: built.texts ?? null,
+      textsCache: built.textsCache ?? null,
       metrics: params.socketOptions?.metrics ?? null,
       config: params.config,
       logger: params.logger,
     }
     registry.set(params.accountId, entry)
+    socket.bind()
     try {
-      await socket.start()
+      // The loop attaches to the socket's client and connects it.
+      await built.loop?.loop.start()
     } catch (err) {
       registry.delete(params.accountId)
-      built.invoker?.stop()
-      built.texts?.stop()
+      await stopEntry(entry)
       throw err
     }
     return entry
@@ -119,14 +133,23 @@ export function unregisterIntegration(accountId: string): Promise<void> {
   })
 }
 
-async function stopEntry(entry: IntegrationEntry): Promise<void> {
-  entry.invoker?.stop()
-  entry.texts?.stop()
+async function stopEntry(entry: LiveEntry): Promise<void> {
   try {
-    await entry.socket.stop()
+    // Stops the cycles and disconnects the socket. Runs already admitted
+    // are OpenClaw's; they stay registered for the account until they end.
+    await entry.loop?.stop()
   } catch (err) {
-    entry.logger.error({ err: err instanceof Error ? err.message : String(err) }, 'socket.stop threw during unregister')
+    entry.logger.error({ err: err instanceof Error ? err.message : String(err) }, 'receive loop stop threw during unregister')
   }
+  if (!entry.loop) {
+    try {
+      entry.socket.realtime.disconnect()
+    } catch {
+      // never connected
+    }
+  }
+  entry.socket.stopped()
+  entry.textsCache?.stop()
 }
 
 export function getIntegration(accountId: string): IntegrationEntry | undefined {

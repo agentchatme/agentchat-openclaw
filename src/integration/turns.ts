@@ -1,0 +1,108 @@
+/**
+ * How the kit's receive loop starts a turn on OpenClaw.
+ *
+ * The loop (gate-call mode) decides which conversations and invites get a
+ * turn, composes the prompt from the served texts, and holds the card in
+ * its tracker while the turn runs; this adapter runs the turn as one
+ * OpenClaw agent run (`runtime.subagent.run`, `deliver: false`, a fresh
+ * session, the account's lane) and reports its end in the kit's terms once
+ * OpenClaw has confirmed it (`./run.ts`):
+ *
+ *   - `ok`                        → `completed`, with the AgentChat calls the
+ *                                   run made (from its transcript; null = unknown)
+ *   - `error`, `timeout`          → `failed` (the run's own deadline is a failure,
+ *                                   never an elapsed wait)
+ *   - the plugin runtime is gone  → `still_running` with no `next`: the tracker
+ *                                   keeps the conversation, nothing in this process
+ *                                   starts a second turn for it
+ *
+ * A run that never ends keeps holding its conversation: the loop cannot end
+ * a turn, and the plugin runtime offers no abort for a subagent run. After
+ * 30 minutes the turn is handed off (`AccountTurns.handOff`): the kit's slot
+ * is freed so other conversations get turns, while that one stays held until
+ * OpenClaw reports the run ended (its run deadline,
+ * `agents.defaults.timeoutSeconds`) — then the after-turn rule is applied
+ * to it there, with the card the gate saw, which the record carries.
+ */
+
+import type { integration } from 'agentchatme'
+
+import type { Logger } from '../log.js'
+import type { TurnOutcome, TurnStarter as RuntimeTurnStarter } from './model.js'
+import type { AccountTurns } from './running.js'
+import { integrationLane, inviteSessionKey, wakeSessionKey } from './turn.js'
+
+export interface LoopTurnStarterOptions {
+  readonly accountId: string
+  /** The OpenClaw agent the account is routed to. */
+  readonly agentId: string
+  /** Starts one OpenClaw run and reports its confirmed end (`createRuntimeTurnStarter`). */
+  readonly startRun: RuntimeTurnStarter
+  /** The account's turns (`accountTurns`): every run is recorded there until OpenClaw reports it ended. */
+  readonly turns: AccountTurns
+  /** The loop this starter belongs to. */
+  readonly owner: string
+  readonly logger: Logger
+  readonly now?: () => number
+}
+
+/** The kit's `TurnStarter` for OpenClaw. */
+export function createLoopTurnStarter(options: LoopTurnStarterOptions): integration.TurnStarter {
+  const now = options.now ?? Date.now
+  return async (request) => {
+    const id = request.kind === 'reply' ? request.conversationId : request.invite.invite_id
+    const sessionKey = request.kind === 'reply' ? wakeSessionKey(options.agentId, now()) : inviteSessionKey(options.agentId, id, now())
+    // Watched from here: if the kit's hold is released while OpenClaw admits
+    // the run (an operator's --force), the run starts out let go of.
+    const watch = options.turns.admission(request.kind, id)
+    const admission = await options.startRun({ sessionKey, prompt: request.prompt, lane: integrationLane(options.accountId, options.turns.laneGeneration) })
+    if (!admission.ran) {
+      options.turns.admitted(watch)
+      return { started: false, error: admission.error }
+    }
+    options.turns.started({
+      runId: admission.runId,
+      kind: request.kind,
+      id,
+      anchor: request.kind === 'reply' ? request.anchor : null,
+      sessionKey: admission.sessionKey,
+      startedAt: now(),
+      owner: options.owner,
+      // What the after-turn rule compares when the turn ends outside the
+      // kit's watch (handed off, or after a restart).
+      ...(request.kind === 'reply' ? { card: request.card, category: request.category } : { invite: request.invite }),
+    }, { admission: watch })
+    options.logger.info(
+      { kind: request.kind, sessionKey, runId: admission.runId, ...(request.kind === 'reply' ? { conversationId: id } : { inviteId: id }) },
+      request.kind === 'reply' ? 'turn start' : 'group-invite turn start',
+    )
+    const done = admission.done.then((outcome): integration.TurnEnd => {
+      if (outcome.status === 'gone') {
+        options.logger.warn({ sessionKey, runId: outcome.runId }, 'turn end not confirmed: the plugin runtime is gone — its card stays held')
+        return { status: 'still_running', detail: 'the plugin runtime is gone' }
+      }
+      const end = turnEndOf(outcome)
+      void options.turns.ended(admission.runId, end)
+      options.logger[outcome.status === 'ok' ? 'info' : 'warn'](
+        {
+          sessionKey,
+          runId: outcome.runId,
+          status: outcome.status,
+          ...(outcome.error ? { error: outcome.error } : {}),
+          ...(outcome.elapsedMs !== undefined ? { elapsedMs: outcome.elapsedMs } : {}),
+          agentchatCalls: outcome.agentchatCalls ?? null,
+        },
+        request.kind === 'reply' ? 'turn ended (final text discarded; the send is a hosted-tool call)' : 'group-invite turn ended',
+      )
+      return end
+    })
+    return { started: true, done }
+  }
+}
+
+/** What OpenClaw reported, as the kit's D5 rule reads it. `ok` without an error is the only completed end. */
+export function turnEndOf(outcome: TurnOutcome): integration.TurnEnd {
+  const agentchatCalls = outcome.agentchatCalls ?? null
+  if (outcome.status === 'ok' && !outcome.error) return { status: 'completed', agentchatCalls }
+  return { status: 'failed', agentchatCalls, detail: outcome.error ?? `run ended: ${outcome.status ?? 'unknown'}` }
+}

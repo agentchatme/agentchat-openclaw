@@ -1,6 +1,6 @@
 /**
  * Counters for the integration: the socket's state, its closes and the
- * notices the SDK surfaces, and the wakes handed to the invoker. The
+ * notices the SDK surfaces, and the wakes the receive loop acts on. The
  * integration sends nothing, so there are no outbound metrics.
  *
  * Where they can be read. OpenClaw gives a plugin no Prometheus registry:
@@ -16,7 +16,7 @@
  * owns a scrape endpoint; `createNoopMetrics` is the zero-cost default.
  *
  * Names are prefixed with `agentchat_channel_` (dashboards: see CHANGELOG):
- *   agentchat_channel_wake_total{source}              — message | connect | reminder | retry | other
+ *   agentchat_channel_wake_total{source}              — message | connect | reminder | unanswered | invite | other
  *   agentchat_channel_disconnect_total{code,initiator} — initiator = server (the wire) | client (the SDK's own watchdog)
  *   agentchat_channel_connection_state{kind}          — the SDK's state: idle | connecting | ready | backoff | blocked | stopped
  *   agentchat_channel_error_total{errorClass}         — auth (one per rejected HELLO) | transport | handler | protocol | other
@@ -41,7 +41,7 @@ export interface MetricsRecorder {
   incError(labels: { errorClass: string }): void
   /** Set the current connection state (cardinality bounded by state kinds). */
   setConnectionState(kind: string): void
-  /** Incremented on every wake handed to the invoker (message frames, connects, server wake frames, the ladder's retries). */
+  /** Incremented on every wake: peer message frames, connects, server wake frames (by reason), invite frames. */
   incWake(labels: { source: string }): void
   /** The counters so far, when the recorder keeps them (the in-memory one does; a prom-client registry is read by scraping). */
   snapshot?(): MetricsSnapshot

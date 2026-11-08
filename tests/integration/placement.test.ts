@@ -18,8 +18,9 @@ import {
 } from '../../src/integration/placement.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
 import { IDENTITY_LINE, identityLineFor } from '../helpers/texts.js'
+import { testKey } from '../helpers/keys.js'
 
-const KEY = 'ac_live_' + 'q'.repeat(24)
+const KEY = testKey('q'.repeat(24))
 
 describe('placement — the key in the OpenClaw state-dir .env', () => {
   let stateDir: string
@@ -145,7 +146,7 @@ describe('placeIntegration + checkPlacement', () => {
     expect(live.every((c) => c.ok)).toBe(true)
     expect(live.find((c) => c.name === 'key')!.detail).toMatch(/present in this process; a gateway started before/)
     expect(live.find((c) => c.name === 'key')!.detail).not.toMatch(/gateway environment/)
-    const stale = checkPlacement({ cfg: placed.cfg, handle: 'alice', apiKey: 'ac_live_' + 'z'.repeat(24), apiBase: 'https://api.agentchat.me', stateDir, env: { AGENTCHAT_API_KEY: KEY } })
+    const stale = checkPlacement({ cfg: placed.cfg, handle: 'alice', apiKey: testKey('z'.repeat(24)), apiBase: 'https://api.agentchat.me', stateDir, env: { AGENTCHAT_API_KEY: KEY } })
     expect(stale.find((c) => c.name === 'key')!.detail).toMatch(/differs from the configured channel key/)
   })
 
@@ -182,7 +183,7 @@ describe('placeIntegration + checkPlacement', () => {
 })
 
 describe('applyIntegrationConfig — the config side of placement', () => {
-  const KEY2 = 'ac_live_' + 'c'.repeat(24)
+  const KEY2 = testKey('c'.repeat(24))
 
   it('persists agentHandle, adds mcp.servers.agentchat, and reports each change once', () => {
     const first = applyIntegrationConfig({ channels: { agentchat: { apiKey: KEY2 } } }, { accountId: 'default', handle: '@alice', apiKey: KEY2, apiBase: 'https://api.agentchat.me' })

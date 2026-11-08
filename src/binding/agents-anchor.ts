@@ -11,10 +11,12 @@
  * triggered the run (docs.openclaw.ai/concepts/system-prompt).
  *
  * The text is served by AgentChat (`GET /v1/texts` → `identity_line`,
- * fetched by `../integration/texts.ts`). It is not ours: this module places
- * whatever text it is handed between marker fences, so re-runs upsert and
- * `channels remove` strips it cleanly. No official "plugin → AGENTS.md" API
- * exists.
+ * fetched by `../integration/texts.ts`). It is not ours, and neither is the
+ * block's shape: the SDK kit's `anchor` functions render it (the fences, a
+ * handle line, the served line), find it (current, legacy and unmarked
+ * shapes) and replace or remove it, so re-runs upsert and `channels remove`
+ * strips it cleanly. This module only reads and writes the file. No
+ * official "plugin → AGENTS.md" API exists.
  *
  * Lifecycle
  * ─────────
@@ -36,6 +38,8 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
+import { integration } from 'agentchatme'
+
 import type { OpenClawConfig } from './openclaw-types.js'
 // Path resolution is delegated to the shared OpenClaw layout module (which
 // reads the environment through the credential helper). This module
@@ -43,13 +47,9 @@ import type { OpenClawConfig } from './openclaw-types.js'
 // file and never touches the host environment directly (SECURITY.md).
 import { resolveOpenClawWorkspaceDir } from '../openclaw-layout.js'
 
-// Marker fences shared with the universal skill's own placement recipe.
-export const ANCHOR_START = '<!-- agentchat:start -->'
-export const ANCHOR_END = '<!-- agentchat:end -->'
-
-// Legacy markers from an earlier recipe; migrated silently on the next write.
-const LEGACY_ANCHOR_START = '<!-- agentchat-skill:start -->'
-const LEGACY_ANCHOR_END = '<!-- agentchat-skill:end -->'
+// Marker fences (the kit's; shared with the universal skill's own placement recipe).
+export const ANCHOR_START = integration.anchor.START_MARKER
+export const ANCHOR_END = integration.anchor.END_MARKER
 
 /**
  * The workspace OpenClaw loads for the agent this channel wakes — per-agent
@@ -66,20 +66,17 @@ export function agentsAnchorPath(cfg: OpenClawConfig | undefined, agentId?: stri
   return path.join(resolveWorkspaceDir(cfg, agentId), 'AGENTS.md')
 }
 
-function renderAnchorBlock(text: string): string {
-  return [ANCHOR_START, text.trim(), ANCHOR_END].join('\n')
-}
-
 function bareHandle(handle: string | undefined): string {
-  return (handle ?? '').trim().replace(/^@/, '')
+  return integration.anchor.normalizeHandle(handle ?? '')
 }
 
 /**
  * Idempotent write of `text` (the served identity line) for `handle`.
- * Re-running upserts the existing block (handle change, text update) without
- * leaving stale duplicates or blank-line drift. Throws when the handle did
- * not land in the file (a regression: the served text names the handle) or
- * when the workspace is not writable — the caller decides whether to
+ * Re-running upserts the existing block (handle change, text update, an
+ * older unmarked or legacy-fenced block) without leaving stale duplicates or
+ * blank-line drift. Throws — writing nothing — when the text does not name
+ * the handle (a peer would be handed an address that reaches someone else),
+ * and when the workspace is not writable; the caller decides whether to
  * surface it.
  */
 export function writeAgentsAnchor(params: { cfg: OpenClawConfig | undefined; handle: string; text: string; agentId?: string | undefined }): { path: string } {
@@ -93,7 +90,10 @@ export function writeAgentsAnchor(params: { cfg: OpenClawConfig | undefined; han
   fs.mkdirSync(workspaceDir, { recursive: true })
 
   const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : ''
-  const next = upsertAnchorBlock(existing, renderAnchorBlock(text))
+  // The kit renders the block for the handle (it refuses a text that does
+  // not name it) and replaces the first block of any known shape.
+  const block = integration.anchor.render({ identity_line: text, identity_line_template: '' }, bare)
+  const next = integration.anchor.replace(existing, block)
   fs.writeFileSync(filePath, next, 'utf-8')
 
   const verify = fs.readFileSync(filePath, 'utf-8')
@@ -108,21 +108,19 @@ export function removeAgentsAnchor(params: { cfg: OpenClawConfig | undefined; ag
   const filePath = agentsAnchorPath(params.cfg, params.agentId)
   if (!fs.existsSync(filePath)) return { removed: false, path: filePath }
   const existing = fs.readFileSync(filePath, 'utf-8')
-  const next = stripAnchorBlock(existing)
+  const next = integration.anchor.remove(existing)
   if (next === existing) return { removed: false, path: filePath }
   fs.writeFileSync(filePath, next, 'utf-8')
   return { removed: true, path: filePath }
 }
 
-/** What the file holds between our markers, if anything. */
+/** What the file holds in our block (current or legacy fences), without the handle line, if anything. */
 export function readAgentsAnchor(params: { cfg: OpenClawConfig | undefined; agentId?: string | undefined }): { present: boolean; text: string | null; path: string } {
   const filePath = agentsAnchorPath(params.cfg, params.agentId)
   if (!fs.existsSync(filePath)) return { present: false, text: null, path: filePath }
-  const content = fs.readFileSync(filePath, 'utf-8')
-  const startIdx = content.indexOf(ANCHOR_START)
-  const endIdx = content.indexOf(ANCHOR_END)
-  if (startIdx < 0 || endIdx < 0 || endIdx <= startIdx) return { present: false, text: null, path: filePath }
-  return { present: true, text: content.slice(startIdx + ANCHOR_START.length, endIdx).trim(), path: filePath }
+  const found = integration.anchor.find(fs.readFileSync(filePath, 'utf-8'))
+  if (!found) return { present: false, text: null, path: filePath }
+  return { present: true, text: found.body, path: filePath }
 }
 
 /**
@@ -141,35 +139,4 @@ export function hasAgentsAnchorFor(params: { cfg: OpenClawConfig | undefined; ha
     return { present: found.text === params.text.trim(), path: found.path }
   }
   return { present: found.text.includes(`@${bareHandle(params.handle)}`), path: found.path }
-}
-
-function upsertAnchorBlock(existing: string, block: string): string {
-  const cleaned = stripBlockBetween(existing, LEGACY_ANCHOR_START, LEGACY_ANCHOR_END)
-  const startIdx = cleaned.indexOf(ANCHOR_START)
-  const endIdx = cleaned.indexOf(ANCHOR_END)
-  if (startIdx >= 0 && endIdx >= 0 && endIdx > startIdx) {
-    const before = cleaned.slice(0, startIdx).replace(/\n+$/, '')
-    const after = cleaned.slice(endIdx + ANCHOR_END.length).replace(/^\n+/, '')
-    return [before, block, after].filter((s) => s.length > 0).join('\n\n') + '\n'
-  }
-  const trimmed = cleaned.replace(/\n+$/, '')
-  if (trimmed.length === 0) return block + '\n'
-  return trimmed + '\n\n' + block + '\n'
-}
-
-function stripAnchorBlock(existing: string): string {
-  const afterUnified = stripBlockBetween(existing, ANCHOR_START, ANCHOR_END)
-  return stripBlockBetween(afterUnified, LEGACY_ANCHOR_START, LEGACY_ANCHOR_END)
-}
-
-function stripBlockBetween(existing: string, start: string, end: string): string {
-  const startIdx = existing.indexOf(start)
-  const endIdx = existing.indexOf(end)
-  if (startIdx < 0 || endIdx < 0 || endIdx <= startIdx) return existing
-  const before = existing.slice(0, startIdx).replace(/\n+$/, '')
-  const after = existing.slice(endIdx + end.length).replace(/^\n+/, '')
-  if (before.length === 0 && after.length === 0) return ''
-  if (before.length === 0) return after.endsWith('\n') ? after : after + '\n'
-  if (after.length === 0) return before + '\n'
-  return before + '\n\n' + after + (after.endsWith('\n') ? '' : '\n')
 }

@@ -16,6 +16,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { getClient, disposeClient, resetClientCacheForTest } from '../../src/binding/sdk-client.js'
 import type { AgentchatChannelConfig } from '../../src/config-schema.js'
 import { PACKAGE_VERSION } from '../../src/version.js'
+import { testKey } from '../helpers/keys.js'
 
 function makeConfig(apiKey: string, apiBase = 'https://api.agentchat.me'): AgentchatChannelConfig {
   return {
@@ -34,7 +35,7 @@ describe('sdk-client cache', () => {
   })
 
   it('returns the same client for repeated calls with the same config', () => {
-    const cfg = makeConfig('ac_live_key_aaaaaaaaaaaaaaaaaaaaaaaa')
+    const cfg = makeConfig(testKey('key_aaaaaaaaaaaaaaaaaaaaaaaa'))
     const a = getClient({ accountId: 'default', config: cfg })
     const b = getClient({ accountId: 'default', config: cfg })
     expect(a).toBe(b)
@@ -43,11 +44,11 @@ describe('sdk-client cache', () => {
   it('issues a fresh client when apiKey changes (rotation path)', () => {
     const a = getClient({
       accountId: 'default',
-      config: makeConfig('ac_live_key_aaaaaaaaaaaaaaaaaaaaaaaa'),
+      config: makeConfig(testKey('key_aaaaaaaaaaaaaaaaaaaaaaaa')),
     })
     const b = getClient({
       accountId: 'default',
-      config: makeConfig('ac_live_key_bbbbbbbbbbbbbbbbbbbbbbbb'),
+      config: makeConfig(testKey('key_bbbbbbbbbbbbbbbbbbbbbbbb')),
     })
     expect(a).not.toBe(b)
   })
@@ -65,7 +66,7 @@ describe('sdk-client cache', () => {
   })
 
   it('keeps entries independent across accountIds', () => {
-    const cfg = makeConfig('ac_live_key_shared_between_accts_12')
+    const cfg = makeConfig(testKey('key_shared_between_accts_12'))
     const a = getClient({ accountId: 'prod', config: cfg })
     const b = getClient({ accountId: 'staging', config: cfg })
     expect(a).not.toBe(b)
@@ -74,7 +75,7 @@ describe('sdk-client cache', () => {
   })
 
   it('dispose drops the cached client for that accountId only', () => {
-    const cfg = makeConfig('ac_live_key_aaaaaaaaaaaaaaaaaaaaaaaa')
+    const cfg = makeConfig(testKey('key_aaaaaaaaaaaaaaaaaaaaaaaa'))
     const a = getClient({ accountId: 'default', config: cfg })
     disposeClient('default')
     const b = getClient({ accountId: 'default', config: cfg })
@@ -98,7 +99,7 @@ describe('sdk-client cache', () => {
     }
     const client = getClient({
       accountId: 'identity',
-      config: makeConfig('ac_live_key_aaaaaaaaaaaaaaaaaaaaaaaa'),
+      config: makeConfig(testKey('key_aaaaaaaaaaaaaaaaaaaaaaaa')),
       options: { fetch: fetchImpl as typeof fetch },
     })
 

@@ -72,6 +72,16 @@ import {
   readAgentchatConfigField,
 } from '../src/channel-account.js'
 
+// Key-shaped test values are built at run time so no secret-shaped literal sits in the repository.
+const testKey = (tail: string): string => ['ac', 'live', tail].join('_')
+const KEY_PASTED = testKey('abcdef0123456789abcd')
+const KEY_EXISTING = testKey('0123456789abcdef0123')
+const KEY_BAD = testKey('bad00000000000000000')
+const KEY_REGISTERED = testKey('fedcba9876543210fedc')
+const KEY_RECOVERED = testKey('recovered0000000000')
+const KEY_STAGING = testKey('stagingkey0000000000')
+
+
 type Scripted =
   | { kind: 'note'; contains?: string }
   | {
@@ -192,7 +202,7 @@ const emptyCfg = {
   agents: { defaults: { workspace: wizardWorkspace } },
 } as never
 const configuredCfg = applyAgentchatAccountPatch(emptyCfg, 'default', {
-  apiKey: 'ac_live_abcdef0123456789abcd',
+  apiKey: KEY_PASTED,
   agentHandle: 'alice',
 }) as never
 
@@ -226,7 +236,7 @@ describe('agentchatSetupWizard.prepare — dispatch', () => {
     const result = await agentchatSetupWizard.prepare!({
       cfg: configuredCfg,
       accountId: 'default',
-      credentialValues: { token: 'ac_live_abcdef0123456789abcd' },
+      credentialValues: { token: KEY_PASTED },
       prompter: s.prompter as never,
     } as never)
 
@@ -242,7 +252,7 @@ describe('agentchatSetupWizard.prepare — dispatch', () => {
     const result = await agentchatSetupWizard.prepare!({
       cfg: configuredCfg,
       accountId: 'default',
-      credentialValues: { token: 'ac_live_abcdef0123456789abcd' },
+      credentialValues: { token: KEY_PASTED },
       prompter: s.prompter as never,
     } as never)
 
@@ -261,7 +271,7 @@ describe('agentchatSetupWizard.prepare — change-base flow', () => {
     const result = await agentchatSetupWizard.prepare!({
       cfg: configuredCfg,
       accountId: 'default',
-      credentialValues: { token: 'ac_live_abcdef0123456789abcd' },
+      credentialValues: { token: KEY_PASTED },
       prompter: s.prompter as never,
     } as never)
 
@@ -287,7 +297,7 @@ describe('agentchatSetupWizard.prepare — change-base flow', () => {
     const result = await agentchatSetupWizard.prepare!({
       cfg: withCustomBase as never,
       accountId: 'default',
-      credentialValues: { token: 'ac_live_abcdef0123456789abcd' },
+      credentialValues: { token: KEY_PASTED },
       prompter: s.prompter as never,
     } as never)
 
@@ -306,7 +316,7 @@ describe('agentchatSetupWizard.prepare — change-base flow', () => {
       agentchatSetupWizard.prepare!({
         cfg: configuredCfg,
         accountId: 'default',
-        credentialValues: { token: 'ac_live_abcdef0123456789abcd' },
+        credentialValues: { token: KEY_PASTED },
         prompter: s.prompter as never,
       } as never),
     ).rejects.toThrow(/Not a valid URL/)
@@ -321,7 +331,7 @@ describe('agentchatSetupWizard.prepare — change-base flow', () => {
       agentchatSetupWizard.prepare!({
         cfg: configuredCfg,
         accountId: 'default',
-        credentialValues: { token: 'ac_live_abcdef0123456789abcd' },
+        credentialValues: { token: KEY_PASTED },
         prompter: s.prompter as never,
       } as never),
     ).rejects.toThrow(/http:\/\/ or https:\/\//)
@@ -339,7 +349,7 @@ describe('agentchatSetupWizard.prepare — register flow happy path', () => {
         email: 'alice@example.com',
         createdAt: '2026-04-21T00:00:00Z',
       },
-      apiKey: 'ac_live_0123456789abcdef0123',
+      apiKey: KEY_EXISTING,
     })
 
     const s = scripted([
@@ -367,10 +377,10 @@ describe('agentchatSetupWizard.prepare — register flow happy path', () => {
       credentialValues: Record<string, string>
     }
     expect(readAgentchatConfigField(cfg as never, 'default', 'apiKey')).toBe(
-      'ac_live_0123456789abcdef0123',
+      KEY_EXISTING,
     )
     expect(readAgentchatConfigField(cfg as never, 'default', 'agentHandle')).toBe('alice')
-    expect(credentialValues.token).toBe('ac_live_0123456789abcdef0123')
+    expect(credentialValues.token).toBe(KEY_EXISTING)
     expect(s.remaining()).toBe(0)
   })
 })
@@ -388,7 +398,7 @@ describe('agentchatSetupWizard.prepare — register flow retryable errors', () =
         email: 'alice@example.com',
         createdAt: '2026-04-21T00:00:00Z',
       },
-      apiKey: 'ac_live_fedcba9876543210fedc',
+      apiKey: KEY_REGISTERED,
     })
 
     const s = scripted([
@@ -499,7 +509,7 @@ describe('agentchatSetupWizard.prepare — register flow retryable errors', () =
         email: 'alice+bot2@example.com',
         createdAt: '2026-04-21T00:00:00Z',
       },
-      apiKey: 'ac_live_0123456789abcdef0123',
+      apiKey: KEY_EXISTING,
     })
 
     const s = scripted([
@@ -544,7 +554,7 @@ describe('agentchatSetupWizard.prepare — register flow retryable errors', () =
       pendingId: 'pnd_r1',
       message: 'If an account is registered with this email, a verification code has been sent.',
     })
-    recVerify.mockResolvedValueOnce({ ok: true, handle: 'alice-codex', apiKey: 'ac_live_recovered0000000000' })
+    recVerify.mockResolvedValueOnce({ ok: true, handle: 'alice-codex', apiKey: KEY_RECOVERED })
 
     const s = scripted([
       { kind: 'select', contains: 'How would you like to configure', value: 'register' },
@@ -577,7 +587,7 @@ describe('agentchatSetupWizard.prepare — register flow retryable errors', () =
       expect.anything(),
     )
     const { cfg } = result as { cfg: unknown }
-    expect(readAgentchatConfigField(cfg as never, 'default', 'apiKey')).toBe('ac_live_recovered0000000000')
+    expect(readAgentchatConfigField(cfg as never, 'default', 'apiKey')).toBe(KEY_RECOVERED)
     expect(readAgentchatConfigField(cfg as never, 'default', 'agentHandle')).toBe('alice-codex')
     expect(s.remaining()).toBe(0)
   })
@@ -618,7 +628,7 @@ describe('agentchatSetupWizard.prepare — register flow retryable errors', () =
 })
 
 describe('agentchatSetupWizard.prepare — recover flow', () => {
-  const RECOVERED_KEY = 'ac_live_recovered0000000000'
+  const RECOVERED_KEY = KEY_RECOVERED
   const GENERIC_ACK = 'If an account is registered with this email, a verification code has been sent.'
 
   it('recovers a key from the unconfigured menu, always sending handle + email', async () => {
@@ -680,7 +690,7 @@ describe('agentchatSetupWizard.prepare — recover flow', () => {
     const result = await agentchatSetupWizard.prepare!({
       cfg: configuredCfg,
       accountId: 'default',
-      credentialValues: { token: 'ac_live_abcdef0123456789abcd' },
+      credentialValues: { token: KEY_PASTED },
       prompter: s.prompter as never,
     } as never)
 
@@ -711,7 +721,7 @@ describe('agentchatSetupWizard.prepare — recover flow', () => {
     const result = await agentchatSetupWizard.prepare!({
       cfg: configuredCfg,
       accountId: 'default',
-      credentialValues: { token: 'ac_live_abcdef0123456789abcd' },
+      credentialValues: { token: KEY_PASTED },
       prompter: s.prompter as never,
     } as never)
 
@@ -962,10 +972,10 @@ describe('agentchatSetupWizard.finalize', () => {
 
     const result = await agentchatSetupWizard.finalize!({
       cfg: applyAgentchatAccountPatch(emptyCfg, 'default', {
-        apiKey: 'ac_live_abcdef0123456789abcd',
+        apiKey: KEY_PASTED,
       }) as never,
       accountId: 'default',
-      credentialValues: { token: 'ac_live_abcdef0123456789abcd' },
+      credentialValues: { token: KEY_PASTED },
       prompter: s.prompter as never,
     } as never)
 
@@ -978,13 +988,13 @@ describe('agentchatSetupWizard.finalize', () => {
     expect(entry.url).toBe('https://api.agentchat.me/mcp')
     expect(entry.transport).toBe('streamable-http')
     expect(entry.headers.Authorization).toBe('Bearer ${AGENTCHAT_API_KEY}')
-    expect(JSON.stringify(entry)).not.toContain('ac_live_abcdef0123456789abcd')
+    expect(JSON.stringify(entry)).not.toContain(KEY_PASTED)
     // Placement: the served identity line landed in the workspace AGENTS.md.
     const agents = fs.readFileSync(path.join(wizardWorkspace, 'AGENTS.md'), 'utf8')
     expect(agents).toContain('I am @alice on AgentChat (api.agentchat.me).')
     // Placement: the key landed in the (test-redirected) OpenClaw state-dir .env.
     const dotenv = fs.readFileSync(path.join(process.env.OPENCLAW_STATE_DIR!, '.env'), 'utf8')
-    expect(dotenv).toContain('AGENTCHAT_API_KEY=ac_live_abcdef0123456789abcd')
+    expect(dotenv).toContain(`AGENTCHAT_API_KEY=${KEY_PASTED}`)
     expect(s.remaining()).toBe(0)
   })
 
@@ -1022,10 +1032,10 @@ describe('agentchatSetupWizard.finalize', () => {
 
     const result = await agentchatSetupWizard.finalize!({
       cfg: applyAgentchatAccountPatch(emptyCfg, 'default', {
-        apiKey: 'ac_live_bad00000000000000000',
+        apiKey: KEY_BAD,
       }) as never,
       accountId: 'default',
-      credentialValues: { token: 'ac_live_bad00000000000000000' },
+      credentialValues: { token: KEY_BAD },
       prompter: s.prompter as never,
     } as never)
 
@@ -1098,22 +1108,22 @@ describe('agentchatSetupWizard.status', () => {
 describe('applyAgentchatAccountPatch', () => {
   it('writes to the flat channels.agentchat.* shape for the default account', () => {
     const patched = applyAgentchatAccountPatch(emptyCfg, 'default', {
-      apiKey: 'ac_live_abcdef0123456789abcd',
+      apiKey: KEY_PASTED,
       agentHandle: 'alice',
     })
     expect(readAgentchatConfigField(patched, 'default', 'apiKey')).toBe(
-      'ac_live_abcdef0123456789abcd',
+      KEY_PASTED,
     )
     expect(readAgentchatConfigField(patched, 'default', 'agentHandle')).toBe('alice')
   })
 
   it('writes to the accounts-map shape for a non-default account id', () => {
     const patched = applyAgentchatAccountPatch(emptyCfg, 'staging', {
-      apiKey: 'ac_live_stagingkey0000000000',
+      apiKey: KEY_STAGING,
       apiBase: 'https://staging.agentchat.me',
     })
     expect(readAgentchatConfigField(patched, 'staging', 'apiKey')).toBe(
-      'ac_live_stagingkey0000000000',
+      KEY_STAGING,
     )
     expect(readAgentchatConfigField(patched, 'staging', 'apiBase')).toBe(
       'https://staging.agentchat.me',
@@ -1124,7 +1134,7 @@ describe('applyAgentchatAccountPatch', () => {
 
   it('treats an undefined field value as a removal', () => {
     const seeded = applyAgentchatAccountPatch(emptyCfg, 'default', {
-      apiKey: 'ac_live_abcdef0123456789abcd',
+      apiKey: KEY_PASTED,
       apiBase: 'https://staging.agentchat.me',
     })
     const patched = applyAgentchatAccountPatch(seeded, 'default', {
@@ -1133,7 +1143,7 @@ describe('applyAgentchatAccountPatch', () => {
     expect(readAgentchatConfigField(patched, 'default', 'apiBase')).toBeUndefined()
     // apiKey untouched.
     expect(readAgentchatConfigField(patched, 'default', 'apiKey')).toBe(
-      'ac_live_abcdef0123456789abcd',
+      KEY_PASTED,
     )
   })
 })

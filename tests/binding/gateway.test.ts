@@ -44,9 +44,17 @@ import { parseChannelConfig } from '../../src/config-schema.js'
 import { IntegrationSocket } from '../../src/integration/socket.js'
 import { silentLogger } from '../helpers/logger.js'
 import { MockWebSocket, MockWebSocketCtor, messageNew } from '../helpers/mock-websocket.js'
+
+/** What `build` receives: a socket binding; `realtime: null` builds the loop with no socket (wakes only through `wake()`). */
+const NO_SOCKET = { realtime: null } as never
+
+async function disposeBuilt(result: { loop: { stop(): Promise<void> } | null; textsCache?: { stop(): void } | null }): Promise<void> {
+  await result.loop?.stop()
+  result.textsCache?.stop()
+}
 import { IDENTITY_LINE } from '../helpers/texts.js'
 
-const KEY = 'ac_live_' + 'g'.repeat(24)
+const KEY = ['ac', 'live', 'g'.repeat(24)].join('_')
 
 function config() {
   return {
@@ -171,11 +179,7 @@ describe('gateway.startAccount', () => {
       const before = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')
       await agentchatGatewayAdapter.startAccount!(ctxFor(cfg).ctx as never)
       expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toBe(before)
-      for (const call of vi.mocked(registerIntegration).mock.calls) {
-        const built = call[0].build({} as never)
-        built.texts?.stop()
-        built.invoker?.stop()
-      }
+      for (const call of vi.mocked(registerIntegration).mock.calls) await disposeBuilt(call[0].build(NO_SOCKET))
     } finally {
       fs.rmSync(workspace, { recursive: true, force: true })
     }
@@ -228,12 +232,12 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
     }
     await agentchatGatewayAdapter.startAccount!(harness.ctx as never)
     const build = vi.mocked(registerIntegration).mock.calls.at(-1)![0].build
-    const result = build({} as never)
-    return { ...harness, h: result.handlers, invoker: result.invoker, texts: result.texts, setStatusCalls: () => setStatusCalls }
+    const result = build(NO_SOCKET)
+    return { ...harness, h: result.handlers, dispose: () => disposeBuilt(result), setStatusCalls: () => setStatusCalls }
   }
 
   it("reports lifecycle starting → ready → recovering → ready → stopped from the SDK's states", async () => {
-    const { h, status, invoker, texts } = await built()
+    const { h, status, dispose } = await built()
     expect(status().lifecycle).toBe('starting')
     h.onStateChanged!('connecting', 'idle')
     expect(status().lifecycle).toBe('starting')
@@ -251,12 +255,11 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
     expect(status().lifecycle).toBe('ready')
     h.onStateChanged!('stopped', 'ready')
     expect(status()).toMatchObject({ running: false, connected: false, lifecycle: 'stopped' })
-    invoker?.stop()
-    texts?.stop()
+    await dispose()
   })
 
   it("a rejected key is one error line and one steady blocked status across the SDK's 10–15 min retries; an accepted HELLO clears it", async () => {
-    const { h, log, status, invoker, texts, setStatusCalls } = await built()
+    const { h, log, status, dispose, setStatusCalls } = await built()
     const errorLines = () => log.error.mock.calls.map((c) => String(c[0]))
     const warnLines = () => log.warn.mock.calls.map((c) => String(c[0]))
     const debugLines = () => log.debug.mock.calls.map((c) => String(c[0]))
@@ -310,14 +313,13 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
 
     h.onStateChanged!('stopped', 'blocked')
     expect(status()).toMatchObject({ running: false, connected: false, lifecycle: 'stopped' })
-    invoker?.stop()
-    texts?.stop()
+    await dispose()
   })
 
-  it('wires one in-memory recorder into the socket: a message.new wake counts wake_total{source=message} and closes count disconnect_total{code,initiator}, readable as the snapshot the status probe shows', async () => {
+  it('wires one in-memory recorder into the socket binding: connects and wake frames by reason, closes by code/initiator, readable as the snapshot the status probe shows', async () => {
     vi.useFakeTimers()
     try {
-      const { invoker, texts } = await built()
+      const { dispose } = await built()
       const params = vi.mocked(registerIntegration).mock.calls.at(-1)![0]
       const metrics = params.socketOptions?.metrics
       expect(metrics).toBeDefined()
@@ -333,16 +335,17 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
         webSocket: MockWebSocketCtor,
       })
       try {
-        await socket.start()
-        MockWebSocket.latest().simulateReady()
-        MockWebSocket.latest().simulateMessage(messageNew('conv_1', 1, { sender: '@bob' }))
-        expect(metrics!.snapshot!()).toMatchObject({ state: 'ready', wakes: { connect: 1, message: 1 } })
+        socket.bind()
+        await socket.realtime.connect()
+        MockWebSocket.latest().simulateReady(['ack', 'heartbeat', 'rewake'])
+        MockWebSocket.latest().simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: ['conv_1'], step: 1, at: '2026-11-08T00:00:00.000Z' } })
+        expect(metrics!.snapshot!()).toMatchObject({ state: 'ready', wakes: { connect: 1, unanswered: 1 } })
 
         // A close from the wire.
         MockWebSocket.latest().simulateClose(1006, 'abnormal')
         expect(metrics!.snapshot!().disconnects).toEqual({ '1006/server': 1 })
 
-        // The SDK's own handshake deadline on the reconnect (the live-fire's forced handshake timeout): 4000/client, one transport notice.
+        // The SDK's own handshake deadline on the reconnect: 4000/client, one transport notice.
         vi.advanceTimersByTime(1000) // > the first backoff step
         expect(MockWebSocket.instances).toHaveLength(2)
         vi.advanceTimersByTime(15_000)
@@ -352,11 +355,11 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
           errors: { transport: 1 },
         })
       } finally {
-        await socket.stop()
+        socket.realtime.disconnect()
+        socket.stopped()
       }
       expect(metrics!.snapshot!().state).toBe('stopped')
-      invoker?.stop()
-      texts?.stop()
+      await dispose()
     } finally {
       vi.useRealTimers()
     }

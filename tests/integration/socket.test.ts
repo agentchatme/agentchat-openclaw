@@ -1,26 +1,20 @@
 /**
- * The socket binding over the real SDK `RealtimeClient`, with a mock
- * WebSocket underneath:
- *   - every accepted HELLO is a connect wake; `message.new` and server `wake`
- *     frames are wakes; our own echo is not;
- *   - the delivery ack is on the wire before any wake handler — and before
- *     the gate's model call when a real invoker is wired in;
- *   - `group.invite.received` is handed on; malformed ones are dropped;
+ * The socket's lifecycle binding over the real SDK `RealtimeClient`, with a
+ * mock WebSocket underneath (wakes are the kit's receive loop's — see
+ * `loop.test.ts`):
+ *   - the OpenClaw HELLO offers ack, heartbeat and rewake; an accepted HELLO
+ *     is `connected` and `ready`;
+ *   - server wake frames are labelled by reason for the metric, never acked;
  *   - the SDK's lifecycle is reported as it is: `ready` / `backoff` /
  *     `blocked` / `stopped` from its state, a rejected key from its
  *     `blocked` event (the SDK, not the plugin, tells it from a plain close
  *     and retries it 10–15 min later);
- *   - handler errors never escape; `stop()` is final.
+ *   - handler errors never escape; the stop is final.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import * as fs from 'node:fs'
-import * as os from 'node:os'
-import * as path from 'node:path'
 
 import { parseChannelConfig } from '../../src/config-schema.js'
-import { AgentInvoker } from '../../src/integration/invoker.js'
-import { InviteLedger } from '../../src/integration/invites.js'
 import {
   IntegrationSocket,
   classifyRealtimeError,
@@ -31,12 +25,11 @@ import {
 } from '../../src/integration/socket.js'
 import type { MetricsRecorder } from '../../src/metrics.js'
 import { PACKAGE_VERSION } from '../../src/version.js'
-import { MockWebSocket, MockWebSocketCtor, messageNew, sentFrames, settle, wakeFrame } from '../helpers/mock-websocket.js'
-import { card, fakeClient, tray } from '../helpers/fake-client.js'
+import { MockWebSocket, MockWebSocketCtor, messageNew, sentFrames, flushAsync, wakeFrame } from '../helpers/mock-websocket.js'
 import { silentLogger } from '../helpers/logger.js'
-import { staticTexts } from '../helpers/texts.js'
+import { testKey } from '../helpers/keys.js'
 
-const KEY = 'ac_live_' + 'w'.repeat(24)
+const KEY = testKey('w'.repeat(24))
 
 function recordingMetrics(): MetricsRecorder & { states: string[]; wakes: string[]; disconnects: string[]; errors: string[] } {
   const m = {
@@ -65,140 +58,90 @@ function makeSocket(handlers: SocketHandlers = {}, configOverrides: Record<strin
   return { socket, metrics, config }
 }
 
+/** What the receive loop does with the client: bind, then connect. */
+async function start(socket: IntegrationSocket): Promise<void> {
+  socket.bind()
+  await socket.realtime.connect()
+}
+
+/** What the registry does on stop: the loop disconnects, then the binding reports `stopped`. */
+function stop(socket: IntegrationSocket): void {
+  socket.realtime.disconnect()
+  socket.stopped()
+}
+
 const sockets: IntegrationSocket[] = []
 beforeEach(() => MockWebSocket.reset())
-afterEach(async () => {
-  for (const s of sockets.splice(0)) await s.stop()
+afterEach(() => {
+  for (const s of sockets.splice(0)) stop(s)
 })
 
-describe('IntegrationSocket — wakes', () => {
-  it('starts the SDK socket with an OpenClaw HELLO; an accepted HELLO is a connect wake and `ready`', async () => {
-    const wakes: string[] = []
+describe('IntegrationSocket — HELLO and wake frames', () => {
+  it('the OpenClaw HELLO offers heartbeat and rewake, and ack once a message handler is attached (the loop attaches one); an accepted HELLO is `connected`, `ready`, and the connect metric', async () => {
     const connected: number[] = []
-    const { socket, metrics } = makeSocket({ onWake: (s) => wakes.push(s), onConnected: (at) => connected.push(at) })
+    const { socket, metrics } = makeSocket({ onConnected: (at) => connected.push(at) })
     sockets.push(socket)
-    await socket.start()
+    socket.realtime.on('message.new', () => undefined) // the receive loop's handler, standing in
+    await start(socket)
     const ws = MockWebSocket.latest()
     expect(ws.url).toBe('wss://api.agentchat.me/v1/ws')
     ws.simulateOpen()
     const hello = sentFrames(ws, 'hello')[0]!
-    expect(hello).toMatchObject({ api_key: KEY, capabilities: ['ack'], client: 'openclaw', client_version: PACKAGE_VERSION })
+    // Contract v1: ack, plus heartbeat and rewake (the server's re-wake replaces any local retry ladder).
+    expect(hello).toMatchObject({ api_key: KEY, capabilities: ['ack', 'heartbeat', 'rewake'], client: 'openclaw', client_version: PACKAGE_VERSION })
     expect(socket.getHealth().state).toBe('connecting')
-    ws.simulateMessage({ type: 'hello.ok', capabilities: ['ack'] })
+    ws.simulateMessage({ type: 'hello.ok', capabilities: ['ack', 'heartbeat', 'rewake'] })
     expect(connected).toHaveLength(1)
-    expect(wakes).toEqual(['connect'])
     expect(socket.getHealth().state).toBe('ready')
     expect(metrics.states).toEqual(['idle', 'connecting', 'ready'])
     expect(metrics.wakes).toEqual(['connect'])
   })
 
-  it('a peer message.new is a wake with the ack already on the wire; our own echo is not a wake; the body is never needed', async () => {
-    const wakes: Array<{ source: string; acksSoFar: number; detail: unknown }> = []
-    const { socket } = makeSocket({
-      onWake: (source, detail) => wakes.push({ source, acksSoFar: sentFrames(MockWebSocket.latest(), 'ack').length, detail }),
-    })
+  it('without a message handler the SDK offers no ack (a handler-less client is marked on send)', async () => {
+    const { socket } = makeSocket()
     sockets.push(socket)
-    await socket.start()
+    await start(socket)
+    const ws = MockWebSocket.latest()
+    ws.simulateOpen()
+    expect(sentFrames(ws, 'hello')[0]!.capabilities).toEqual(['heartbeat', 'rewake'])
+  })
+
+  it('server wake frames are labelled by their reason (reminder, unanswered, other) for the metric, and never acked', async () => {
+    const { socket, metrics } = makeSocket()
+    sockets.push(socket)
+    await start(socket)
+    const ws = MockWebSocket.latest()
+    ws.simulateReady(['ack', 'heartbeat', 'rewake']) // the contract-v1 wake shapes hold once rewake is echoed
+    ws.simulateMessage(wakeFrame('conv_9', 2))
+    ws.simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: ['conv_1', 'conv_2'], step: 1, at: '2026-11-08T00:00:00.000Z' } })
+    ws.simulateMessage({ ...wakeFrame('conv_10'), payload: { ...(wakeFrame('conv_10').payload as object), reason: 'something-new' } })
+    await flushAsync()
+    expect(metrics.wakes).toEqual(['connect', 'reminder', 'unanswered', 'other'])
+    expect(sentFrames(ws, 'ack')).toEqual([])
+    expect(socket.getHealth().counters.wakeFrames).toBe(3)
+  })
+
+  it('the binding attaches no message handler, so nothing is acked until the receive loop attaches its own (the SDK never acks unhandled)', async () => {
+    const { socket } = makeSocket()
+    sockets.push(socket)
+    await start(socket)
     const ws = MockWebSocket.latest()
     ws.simulateReady()
     ws.simulateMessage(messageNew('conv_1', 1, { sender: '@bob' }))
-    ws.simulateMessage(messageNew('grp_1', 1, { id: 'msg_x', sender: 'carol', content: { text: 'secret' } }))
-    ws.simulateMessage(messageNew('conv_1', 2, { sender: '@Alice' })) // our own echo
-    await settle()
-    expect(wakes.map((w) => w.source)).toEqual(['connect', 'message', 'message'])
-    expect(wakes[1]).toMatchObject({ acksSoFar: 1, detail: { conversationId: 'conv_1', messageId: 'msg_1', from: 'bob' } })
-    expect(wakes[2]).toMatchObject({ acksSoFar: 2, detail: { conversationId: 'grp_1', messageId: 'msg_x', from: 'carol' } })
-    expect(sentFrames(ws, 'ack').map((f) => f.message_id)).toEqual(['msg_1', 'msg_x', 'msg_2'])
-    expect(socket.getHealth().counters).toMatchObject({ frames: 3, selfFiltered: 1, wakes: 3 })
-  })
-
-  it('ackOnReceipt before any gate call: with a real invoker wired in, the ack is sent before the model is asked', async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-socket-invoker-'))
-    try {
-      const { client, posts } = fakeClient({ trays: [tray([card('conv_1', 'msg_1')])] })
-      const acksAtModelCall: number[] = []
-      const invoker = new AgentInvoker({
-        accountId: 'default',
-        agentId: 'main',
-        client,
-        callModel: async () => {
-          acksAtModelCall.push(sentFrames(MockWebSocket.latest(), 'ack').length)
-          return '{"decisions":[{"conversation_id":"conv_1","decision":"dismiss"}]}'
-        },
-        startTurn: async () => ({ ran: false, error: 'not in this test' }),
-        texts: staticTexts(),
-        invites: new InviteLedger({ accountId: 'default', stateDir }),
-        logger: silentLogger,
-        debounceMs: 0,
-      })
-      const { socket } = makeSocket({ onWake: (source) => invoker.wake(source) })
-      sockets.push(socket)
-      await socket.start()
-      const ws = MockWebSocket.latest()
-      ws.simulateReady()
-      ws.simulateMessage(messageNew('conv_1', 1, { sender: '@bob' }))
-      await settle(30)
-      for (let i = 0; i < 10; i++) await invoker.settled()
-      expect(acksAtModelCall).toEqual([1])
-      expect(posts).toEqual([{ conversationId: 'conv_1', body: { decision: 'dismiss', through_message_id: 'msg_1' } }])
-      invoker.stop()
-    } finally {
-      fs.rmSync(stateDir, { recursive: true, force: true })
-    }
-  })
-
-  it('a server wake frame is one wake with the reminder as its source, never acked', async () => {
-    const wakes: Array<[string, unknown]> = []
-    const { socket, metrics } = makeSocket({ onWake: (source, detail) => wakes.push([source, detail]) })
-    sockets.push(socket)
-    await socket.start()
-    const ws = MockWebSocket.latest()
-    ws.simulateReady()
-    ws.simulateMessage(wakeFrame('conv_9', 2))
-    // A reason this version does not know is still a wake, labelled `other` (the metric label stays bounded).
-    ws.simulateMessage({ ...wakeFrame('conv_10'), payload: { ...(wakeFrame('conv_10').payload as object), reason: 'something-new' } })
-    await settle()
-    expect(wakes).toEqual([
-      ['connect', {}],
-      ['reminder', { conversationId: 'conv_9' }],
-      ['other', { conversationId: 'conv_10' }],
-    ])
+    await flushAsync()
     expect(sentFrames(ws, 'ack')).toEqual([])
-    expect(metrics.wakes).toEqual(['connect', 'reminder', 'other'])
-  })
-
-  it('group.invite.received is the second wake kind; malformed invites are dropped', async () => {
-    const invites: unknown[] = []
-    const wakes: string[] = []
-    const { socket } = makeSocket({ onGroupInvite: (i) => invites.push(i), onWake: (s) => wakes.push(s) })
-    sockets.push(socket)
-    await socket.start()
-    const ws = MockWebSocket.latest()
-    ws.simulateReady()
-    ws.simulateMessage({ type: 'group.invite.received', payload: { id: 'inv_1', group_id: 'grp_1', group_name: 'Ops', inviter_handle: '@bob', created_at: 'x' } })
-    ws.simulateMessage({ type: 'group.invite.received', payload: { group_name: 'no ids' } })
-    await settle()
-    expect(invites).toEqual([{ inviteId: 'inv_1', groupId: 'grp_1', groupName: 'Ops', inviterHandle: 'bob' }])
-    expect(wakes).toEqual(['connect'])
-    expect(socket.getHealth().counters.invites).toBe(1)
   })
 
   it('a throwing handler never takes the socket down', async () => {
-    const seen: string[] = []
     const { socket } = makeSocket({
-      onWake: (source) => {
-        seen.push(source)
+      onConnected: () => {
         throw new Error('handler boom')
       },
     })
     sockets.push(socket)
-    await socket.start()
-    const ws = MockWebSocket.latest()
-    ws.simulateReady()
-    ws.simulateMessage(messageNew('conv_1', 1))
-    ws.simulateMessage(messageNew('conv_1', 2))
-    await settle()
-    expect(seen).toEqual(['connect', 'message', 'message'])
+    await start(socket)
+    MockWebSocket.latest().simulateReady()
+    await flushAsync()
     expect(socket.getHealth().state).toBe('ready')
   })
 })
@@ -213,7 +156,7 @@ describe('IntegrationSocket — the SDK lifecycle, reported as it is', () => {
       onStateChanged: (next) => events.push(`state:${next}`),
     })
     sockets.push(socket)
-    await socket.start()
+    await start(socket)
     MockWebSocket.latest().simulateReady()
     MockWebSocket.latest().simulateClose(1006, 'abnormal')
     expect(socket.getHealth().state).toBe('backoff')
@@ -240,7 +183,7 @@ describe('IntegrationSocket — the SDK lifecycle, reported as it is', () => {
     const blocked: SocketBlocked[] = []
     const { socket, metrics } = makeSocket({ onBlocked: (info) => blocked.push(info) })
     sockets.push(socket)
-    await socket.start()
+    await start(socket)
     MockWebSocket.latest().simulateOpen()
     MockWebSocket.latest().simulateClose(1008, 'HELLO frame required')
     expect(socket.getHealth().state).toBe('backoff')
@@ -265,7 +208,7 @@ describe('IntegrationSocket — the SDK lifecycle, reported as it is', () => {
         onStateChanged: (next) => events.push(`state:${next}`),
       })
       sockets.push(socket)
-      await socket.start()
+      await start(socket)
       MockWebSocket.latest().simulateOpen()
       MockWebSocket.latest().simulateClose(1008, 'Invalid token')
       expect(socket.getHealth().state).toBe('blocked')
@@ -303,37 +246,33 @@ describe('IntegrationSocket — the SDK lifecycle, reported as it is', () => {
     }
   })
 
-  it('stop() is final: `stopped` through the SDK state, the socket is closed, and nothing fires afterwards', async () => {
+  it('the stop is final: `stopped` through the SDK state, the socket is closed, and nothing fires afterwards', async () => {
     const events: string[] = []
     const { socket, metrics } = makeSocket({
       onDisconnected: () => events.push('disconnected'),
-      onWake: () => events.push('wake'),
+      onConnected: () => events.push('connected'),
       onStateChanged: (next) => events.push(`state:${next}`),
     })
-    sockets.push(socket)
-    await socket.start()
+    await start(socket)
     const ws = MockWebSocket.latest()
     ws.simulateReady()
-    await socket.stop()
+    stop(socket)
     expect(socket.getHealth().state).toBe('stopped')
     expect(ws.closed).not.toBeNull()
-    ws.simulateMessage(messageNew('conv_1', 1))
     ws.simulateClose(1000, 'bye')
-    await settle()
-    expect(events).toEqual(['state:connecting', 'state:ready', 'wake', 'state:stopped'])
+    await flushAsync()
+    expect(events).toEqual(['state:connecting', 'state:ready', 'connected', 'state:stopped'])
     expect(metrics.states.at(-1)).toBe('stopped')
-    await socket.stop() // idempotent
-    await socket.start() // a stopped socket stays stopped
-    expect(MockWebSocket.instances).toHaveLength(1)
+    stop(socket) // idempotent
+    socket.bind() // a stopped binding stays stopped
     expect(metrics.states.filter((s) => s === 'stopped')).toHaveLength(1)
   })
 
-  it('stop() before any start() is `stopped` too, and a later start() opens nothing', async () => {
+  it('stopped before any connect is `stopped` too', () => {
     const { socket, metrics } = makeSocket()
-    await socket.stop()
+    socket.stopped()
     expect(socket.getHealth().state).toBe('stopped')
     expect(metrics.states).toEqual(['idle', 'stopped'])
-    await socket.start()
     expect(MockWebSocket.instances).toHaveLength(0)
   })
 })
@@ -351,6 +290,7 @@ describe('classifyRealtimeError / wakeSourceOf / realtimeOptionsFor', () => {
 
   it('maps a server wake reason onto the fixed source set', () => {
     expect(wakeSourceOf('reminder')).toBe('reminder')
+    expect(wakeSourceOf('unanswered')).toBe('unanswered')
     expect(wakeSourceOf('digest')).toBe('other')
     expect(wakeSourceOf(undefined)).toBe('other')
   })
@@ -368,6 +308,7 @@ describe('classifyRealtimeError / wakeSourceOf / realtimeOptionsFor', () => {
       apiKey: KEY,
       baseUrl: 'wss://staging.agentchat.me',
       ackOnReceipt: true,
+      capabilities: { rewake: true },
       reconnect: true,
       reconnectInterval: 500,
       maxReconnectInterval: 60_000,
