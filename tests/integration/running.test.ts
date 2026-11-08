@@ -156,3 +156,24 @@ describe('the long-turn line', () => {
     expect(lines[1]).toMatch(/^a turn for invite gri_old has run 60 min/)
   })
 })
+
+describe('a release that comes in through a gateway RPC', () => {
+  it('runs in the live loop’s async context, not the caller’s (OpenClaw retires the request scope when the RPC returns)', async () => {
+    const { AsyncLocalStorage } = await import('node:async_hooks')
+    const scope = new AsyncLocalStorage<string>()
+    const turns = new AccountTurns()
+    const seenOnWake: Array<string | undefined> = []
+    // The loop is created in the account's own context…
+    scope.run('account-task', () => {
+      const inLoopContext = AsyncLocalStorage.snapshot()
+      turns.setLive('loop#1', () => inLoopContext(() => seenOnWake.push(scope.getStore())), (fn) => inLoopContext(fn))
+    })
+    turns.tracker.begin({ kind: 'reply', conversationId: 'conv_a', anchor: 'msg_1' })
+    const seenOnRelease: Array<string | undefined> = []
+    turns.tracker.onRelease(() => seenOnRelease.push(scope.getStore()))
+    // …the operator's release arrives inside a gateway request's context.
+    scope.run('gateway-rpc', () => turns.release('conv_a'))
+    expect(seenOnRelease).toEqual(['account-task'])
+    expect(seenOnWake).toEqual(['account-task'])
+  })
+})

@@ -66,6 +66,14 @@ export type ReleaseResult =
 interface LiveLoop {
   readonly owner: string
   readonly wake: () => void
+  /**
+   * Runs `fn` in the async context the loop was created in. A release comes
+   * in through a gateway RPC (`agentchat.release`); work it starts — the
+   * wake's next cycle, a waiting turn admitted into the freed slot — must not
+   * inherit that request's context, which OpenClaw retires when the RPC
+   * returns ("Gateway caller authority is no longer active").
+   */
+  readonly run: <T>(fn: () => T) => T
 }
 
 function trackerKey(kind: 'reply' | 'invite', id: string): string {
@@ -91,9 +99,9 @@ export class AccountTurns {
     this.tracker = new integration.TurnTracker({ now: this.now })
   }
 
-  /** The loop now receiving for the account; a held run that ends wakes it. */
-  setLive(owner: string, wake: () => void): void {
-    this.live = { owner, wake }
+  /** The loop now receiving for the account; a held run that ends wakes it. `run` = the loop's own async context (default: as called). */
+  setLive(owner: string, wake: () => void, run: <T>(fn: () => T) => T = (fn) => fn()): void {
+    this.live = { owner, wake, run }
   }
 
   clearLive(owner: string): void {
@@ -173,6 +181,11 @@ export class AccountTurns {
    * second reply is then possible; the operator's call.
    */
   release(id: string): ReleaseResult {
+    const live = this.live
+    return live ? live.run(() => this.releaseNow(id)) : this.releaseNow(id)
+  }
+
+  private releaseNow(id: string): ReleaseResult {
     for (const [runId, entry] of this.hung) {
       if (entry.record.id !== id) continue
       this.hung.delete(runId)

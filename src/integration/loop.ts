@@ -17,6 +17,8 @@
  * agent judges every card inside it and records its own verdicts.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks'
+
 import { integration, type RealtimeClient } from 'agentchatme'
 
 import type { Logger } from '../log.js'
@@ -111,8 +113,15 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
   })
 
   // The account's live loop: a held run that ends (hung, or started by an
-  // earlier loop) wakes it, so what arrived meanwhile is gated at once.
-  options.turns.setLive(owner, () => loop.wake())
+  // earlier loop) wakes it, so what arrived meanwhile is gated at once. Work
+  // started from outside (an operator's release through a gateway RPC) runs
+  // in this loop's own async context, not the caller's.
+  const inLoopContext = AsyncLocalStorage.snapshot()
+  options.turns.setLive(
+    owner,
+    () => inLoopContext(() => loop.wake()),
+    (fn) => inLoopContext(fn),
+  )
 
   return {
     loop,
