@@ -36,5 +36,8 @@ describe('session keys and lanes', () => {
   it('integrationLane is per account', () => {
     expect(integrationLane('default')).toBe('agentchat-integration:default')
     expect(integrationLane('a b')).toBe('agentchat-integration:a-b')
+    // After a hand-off new turns go to the next lane (a hung run blocks its lane).
+    expect(integrationLane('default', 0)).toBe('agentchat-integration:default')
+    expect(integrationLane('default', 2)).toBe('agentchat-integration:default:2')
   })
 })

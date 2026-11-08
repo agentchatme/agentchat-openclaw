@@ -128,7 +128,7 @@ function singleRunStarter(options: IntegrationLoopOptions, logger: Logger, now: 
   return async (request) => {
     const sessionKey = wakeSessionKey(options.agentId, now())
     logger.info({ sessionKey, cards: request.cards, invites: request.invites }, 'gate off — one run with the served wake instruction')
-    const admission = await options.startRun({ sessionKey, prompt: request.prompt, lane: integrationLane(options.accountId) })
+    const admission = await options.startRun({ sessionKey, prompt: request.prompt, lane: integrationLane(options.accountId, options.turns.laneGeneration) })
     if (!admission.ran) return { status: 'not_started', detail: admission.error }
     const outcome = await admission.done
     logger[outcome.status === 'ok' ? 'info' : 'warn']({ sessionKey, runId: outcome.runId, status: outcome.status, agentchatCalls: outcome.agentchatCalls ?? null }, 'gate off — run ended')

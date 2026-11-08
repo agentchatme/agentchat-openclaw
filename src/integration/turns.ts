@@ -51,7 +51,7 @@ export function createLoopTurnStarter(options: LoopTurnStarterOptions): integrat
   return async (request) => {
     const id = request.kind === 'reply' ? request.conversationId : request.invite.invite_id
     const sessionKey = request.kind === 'reply' ? wakeSessionKey(options.agentId, now()) : inviteSessionKey(options.agentId, id, now())
-    const admission = await options.startRun({ sessionKey, prompt: request.prompt, lane: integrationLane(options.accountId) })
+    const admission = await options.startRun({ sessionKey, prompt: request.prompt, lane: integrationLane(options.accountId, options.turns.laneGeneration) })
     if (!admission.ran) return { started: false, error: admission.error }
     options.turns.started({
       runId: admission.runId,

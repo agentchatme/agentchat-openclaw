@@ -280,6 +280,9 @@ describe('a run that never ends does not freeze the account', () => {
     await settle(30)
     expect(h.runs.requests).toHaveLength(2)
     expect(h.runs.requests[1]!.prompt).toContain('conv_b')
+    // …on the next OpenClaw lane: the hung run would block its own.
+    expect(h.runs.requests[0]!.lane).toBe('agentchat-integration:default')
+    expect(h.runs.requests[1]!.lane).toBe('agentchat-integration:default:1')
 
     await message(h, 'conv_a', 2) // still held: no second turn for it
     expect(h.runs.requests.filter((r) => r.prompt.includes('conv_a'))).toHaveLength(1)

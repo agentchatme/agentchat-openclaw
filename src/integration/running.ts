@@ -14,8 +14,10 @@
  * live loop is woken, so a message that arrived meanwhile is gated at once.
  *
  * A run OpenClaw never reports as ended must not freeze the account. After
- * `TURN_OVERDUE_MS` the turn is handed off: the kit's slot is released (other
- * conversations get turns again) while this module keeps the conversation
+ * `TURN_OVERDUE_MS` the turn is handed off: the kit's slot is released and
+ * new turns move to a fresh OpenClaw lane (OpenClaw runs a lane's runs one
+ * after another, so they would otherwise queue behind the hung run) — other
+ * conversations get turns again — while this module keeps the conversation
  * held until OpenClaw reports that run ended. At most `MAX_HUNG_TURNS` are held
  * that way; beyond that, readiness says not-ready (no gate calls) and status
  * and doctor say why. An operator can let one go:
@@ -80,6 +82,8 @@ export class AccountTurns {
   private readonly runs = new Map<string, RunRecord>()
   private readonly hung = new Map<string, { readonly record: RunRecord; readonly handle: integration.TurnHandle; readonly since: number }>()
   private live: LiveLoop | null = null
+  /** Which OpenClaw lane new turns go to; moves on at every hand-off (a hung run blocks its lane). */
+  private lane = 0
   private readonly now: () => number
 
   constructor(options: { now?: () => number } = {}) {
@@ -117,6 +121,11 @@ export class AccountTurns {
     return this.hung.size
   }
 
+  /** The lane generation new turns start on (`integrationLane(accountId, laneGeneration)`). */
+  get laneGeneration(): number {
+    return this.lane
+  }
+
   /**
    * OpenClaw reported the run ended (or it was let go of). A hung hold is
    * dropped; then the live loop is woken once the card is free — at once for
@@ -147,6 +156,9 @@ export class AccountTurns {
     const record = this.runs.get(runId)
     if (!record || this.hung.has(runId)) return null
     const key = trackerKey(record.kind, record.id)
+    // OpenClaw serializes a lane: the next turn must not queue behind this
+    // run. Moved first — the release below can admit a waiting turn at once.
+    this.lane += 1
     this.tracker.release(key)
     const handle = this.tracker.begin(trackedTurn(record))
     if (!handle) return null

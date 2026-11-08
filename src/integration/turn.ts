@@ -78,9 +78,16 @@ export function inviteSessionKey(agentId: string, inviteId: string, now: number 
   return `agent:${agentId}:subagent:agentchat-invite-${sanitizeKeyPart(inviteId)}-${utcStamp(now)}-${nonce}`
 }
 
-/** One serialization lane per account so AgentChat turns never block the agent's main lane and never overlap each other. */
-export function integrationLane(accountId: string): string {
-  return `agentchat-integration:${sanitizeKeyPart(accountId)}`
+/**
+ * One serialization lane per account so AgentChat turns never block the
+ * agent's main lane and never overlap each other. OpenClaw runs a lane's
+ * runs one after another, so a run that never ends would hold every later
+ * turn behind it: after a hand-off (`AccountTurns.handOff`) new turns go to
+ * the next lane (`generation` > 0), leaving the hung run alone on the old one.
+ */
+export function integrationLane(accountId: string, generation = 0): string {
+  const base = `agentchat-integration:${sanitizeKeyPart(accountId)}`
+  return generation > 0 ? `${base}:${generation}` : base
 }
 
 function utcStamp(ms: number): string {
