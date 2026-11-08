@@ -364,11 +364,11 @@ describe('OpenClaw-side switches', () => {
     await message(h, 'conv_a', 1)
     await message(h, 'conv_a', 2)
     expect(h.modelCalls).toHaveLength(0)
-    expect(h.logger.at('warn').filter((l) => /tools not available/.test(l.msg ?? ''))).toHaveLength(1)
+    expect(h.logger.at('warn').filter((l) => /not gating — no turn can start now/.test(l.msg ?? '') && /mcp\.servers\.agentchat/.test(String(l.obj.reason)))).toHaveLength(1)
     reason = null
     await message(h, 'conv_a', 3)
     expect(h.modelCalls).toHaveLength(1)
-    expect(h.logger.at('info').some((l) => l.msg === 'AgentChat tools available to turns again')).toBe(true)
+    expect(h.logger.at('info').some((l) => l.msg === 'turns can start again — gating resumes')).toBe(true)
   })
 
   it('gate off: single-run mode — one run with the served wake instruction, nothing recorded on its behalf', async () => {

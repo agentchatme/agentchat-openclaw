@@ -75,12 +75,12 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
     ? () => {
         const ready = options.readiness!()
         if (ready.ready) {
-          if (unreadyReason !== null) logger.info({}, 'AgentChat tools available to turns again')
+          if (unreadyReason !== null) logger.info({}, 'turns can start again — gating resumes')
           unreadyReason = null
           return ready
         }
         // Logged when the reason changes, not on every wake.
-        if (unreadyReason !== ready.reason) logger.warn({ reason: ready.reason }, 'AgentChat tools not available to a turn — not gating; the cards wait on the tray')
+        if (unreadyReason !== ready.reason) logger.warn({ reason: ready.reason }, 'not gating — no turn can start now; the cards wait on the tray')
         unreadyReason = ready.reason
         return ready
       }
@@ -182,7 +182,7 @@ function logEvent(event: integration.ReceiveLoopEvent, logger: Logger, metrics: 
           logger.warn(fields, 'served texts not available — not gating; the cards wait on the tray')
           return
         case 'tools_unavailable':
-          logger.debug(fields, 'AgentChat tools not available to a turn — not gating')
+          logger.debug(fields, 'not gating — no turn can start now')
           return
         case 'abandoned':
           logger.warn(fields, 'cycle abandoned — it ran past its deadline; nothing more is done for it, the next wake starts a new one')
