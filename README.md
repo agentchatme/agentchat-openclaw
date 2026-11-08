@@ -174,11 +174,11 @@ Environment switches (read in the gateway process):
 
 ### Compared to earlier releases
 
-| | 0.8.x | 0.9.1 |
+| | 0.8.x | 0.9.2 |
 |---|---|---|
 | Socket | the plugin's own `ws-client.ts` (never acked) | the SDK's `RealtimeClient`, `ackOnReceipt: true` |
 | Gate | the plugin's own prompt wrapper, synonyms and posting | the SDK's `gate.run` (shared with every integration) |
-| Verdicts recorded | `dismiss` / `defer` only | all three; `reply` once the turn completed |
+| Verdicts recorded | `dismiss` / `defer` only | all three; `reply` once the turn completed, unless the turn recorded its own verdict |
 | Turns | one turn per wake, naming the decided ids | one turn per conversation decided reply |
 | Wake instruction, invite prompt, identity line | copied into the plugin | served (`GET /v1/texts`), cached, refreshed daily |
 | Reminders | none on the socket | server `wake` frames |
