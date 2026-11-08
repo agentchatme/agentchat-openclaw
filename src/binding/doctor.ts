@@ -31,6 +31,7 @@ import {
 import { validateApiKey } from '../setup-client.js'
 import { getIntegration, listActiveAccounts } from './runtime-registry.js'
 import { overdueTurnLines } from '../integration/running.js'
+import { cycleTroubleLine } from '../integration/loop.js'
 import { checkPlacement, resolvePlacementAgentId, restoreIdentityLine } from '../integration/placement.js'
 import { DEFAULT_API_BASE, withHostedMcpEntry } from '../integration/mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, readLlmAgentOverrideOptIn, withLlmAgentOverrideOptIn } from '../integration/model.js'
@@ -66,9 +67,13 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
       }
     }
     // A turn the running integration (this process) has held past 30 minutes.
+    // And cycles that decided nothing several times in a row.
     for (const accountId of listActiveAccounts()) {
-      const turns = getIntegration(accountId)?.loop?.loop.status().turns ?? []
-      for (const line of overdueTurnLines(turns, cfg)) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${line}`)
+      const status = getIntegration(accountId)?.loop?.loop.status()
+      if (!status) continue
+      for (const line of overdueTurnLines(status.turns ?? [], cfg)) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${line}`)
+      const trouble = cycleTroubleLine(status.recentCycles ?? [])
+      if (trouble) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${trouble}`)
     }
     return warnings
   },

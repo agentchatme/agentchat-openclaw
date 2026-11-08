@@ -13,6 +13,13 @@ const { IDENTITY_LINE } = vi.hoisted(() => ({
   ].join('\n'),
 }))
 
+// Unit tests never reach the network: a key without a handle would make
+// repairConfig ask the live API who it is.
+vi.mock('../../src/setup-client.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../src/setup-client.js')>()
+  return { ...actual, validateApiKey: vi.fn(async () => ({ ok: false, reason: 'unreachable', message: 'no network in unit tests' })) }
+})
+
 vi.mock('../../src/integration/texts.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/integration/texts.js')>()
   return { ...actual, loadIdentityLine: vi.fn(async () => IDENTITY_LINE) }
@@ -203,7 +210,13 @@ describe('doctor adapter — the llm override opt-in for a non-default bound age
         createSocket: () => ({ realtime: { disconnect() {} }, bind() {}, stopped() {}, getHealth: () => ({ state: 'ready', connectedAt: null, counters: { wakeFrames: 0, disconnects: 0 } }) }) as never,
         build: () => ({
           loop: {
-            loop: { start: async () => undefined, status: () => ({ turns: [{ kind: 'reply', conversationId: 'conv_hung', anchor: 'msg_1', startedAt: Date.now() - 40 * 60_000, waitTimedOutAt: null, overdue: true }] }) },
+            loop: {
+              start: async () => undefined,
+              status: () => ({
+                turns: [{ kind: 'reply', conversationId: 'conv_hung', anchor: 'msg_1', startedAt: Date.now() - 40 * 60_000, waitTimedOutAt: null, overdue: true }],
+                recentCycles: [1, 2, 3].map(() => ({ outcome: 'fail_closed', failure: 'the gate call timed out' })),
+              }),
+            },
             stop: async () => undefined,
           } as never,
           handlers: {},
@@ -211,6 +224,7 @@ describe('doctor adapter — the llm override opt-in for a non-default bound age
       })
       const doctorCfg = { channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
       const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: doctorCfg as never, doctorFixCommand: 'openclaw doctor --fix', env: {} })
+      expect(warnings.some((w) => /^\[agentchat:default\] the last 3 cycles decided nothing \(fail_closed\)/.test(w))).toBe(true)
       expect(warnings.some((w) => /^\[agentchat:default\] a turn for conversation conv_hung has run 40 min — its card stays held \(no second reply\).*agents\.defaults\.timeoutSeconds = 172800/.test(w))).toBe(true)
     } finally {
       await resetRegistryForTest()

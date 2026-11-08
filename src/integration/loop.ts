@@ -171,6 +171,9 @@ function logEvent(event: integration.ReceiveLoopEvent, logger: Logger, metrics: 
         case 'tools_unavailable':
           logger.debug(fields, 'AgentChat tools not available to a turn — not gating')
           return
+        case 'abandoned':
+          logger.warn(fields, 'cycle abandoned — it ran past its deadline; nothing more is done for it, the next wake starts a new one')
+          return
         default: {
           const unsettled = s.turnsRefused > 0 || s.recordFailures > 0 || s.undecided > 0
           logger[unsettled ? 'warn' : 'info'](fields, unsettled ? 'gate — some cards were left on the tray; the server re-wakes' : 'gate')
@@ -204,3 +207,33 @@ function logEvent(event: integration.ReceiveLoopEvent, logger: Logger, metrics: 
       return
   }
 }
+
+/** Cycle outcomes that mean nothing could be decided: repeated, they are an operator's problem. */
+const TROUBLE_OUTCOMES: ReadonlySet<string> = new Set(['fail_closed', 'tools_unavailable', 'texts_missing', 'abandoned'])
+
+/** How many cycles in a row must end in trouble before status and doctor warn. */
+export const CYCLE_TROUBLE_RUN = 3
+
+const TROUBLE_MEANING: Readonly<Record<string, string>> = {
+  fail_closed: 'the gate call failed (model unreachable, too slow, or nothing usable)',
+  tools_unavailable: 'no turn could have the hosted tools',
+  texts_missing: 'the served texts are not available',
+  abandoned: 'the cycle ran past its deadline and was abandoned',
+}
+
+/**
+ * One operator line when the most recent cycles (`status().recentCycles`,
+ * oldest first) ended in trouble at least `CYCLE_TROUBLE_RUN` times in a row,
+ * else null. Nothing was gated in those cycles; the cards wait on the tray
+ * and AgentChat re-wakes them.
+ */
+export function cycleTroubleLine(recentCycles: ReadonlyArray<{ readonly outcome: string; readonly failure?: string | null; readonly at?: string }>): string | null {
+  let run = 0
+  for (let i = recentCycles.length - 1; i >= 0 && TROUBLE_OUTCOMES.has(recentCycles[i]!.outcome); i -= 1) run += 1
+  if (run < CYCLE_TROUBLE_RUN) return null
+  const last = recentCycles[recentCycles.length - 1]!
+  const kinds = [...new Set(recentCycles.slice(-run).map((c) => c.outcome))]
+  const meaning = kinds.map((k) => TROUBLE_MEANING[k] ?? k).join('; ')
+  return `the last ${run} cycles decided nothing (${kinds.join(', ')}): ${meaning}${last.failure ? ` — latest: ${last.failure}` : ''}; the cards wait on the tray and AgentChat re-wakes them`
+}
+

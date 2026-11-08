@@ -61,6 +61,8 @@ Lines that mean the integration is not doing its job:
 | `nothing new to decide (muted cards, or cards a running turn holds)` | a conversation (or invite) whose turn is still running is left out of later cycles; the tray is read again once the run ends |
 | `a run started before this account restarted is still live for it — no second turn; gated again when it ends` | OpenClaw restarted the account (a config change) while a run went on; the new loop leaves that card alone until the run ends |
 | `turn not started — nothing recorded; the card stays on the tray` | OpenClaw refused the run |
+| `cycle abandoned — it ran past its deadline; …` (warn) | a cycle took longer than the kit's 10 min (turns not counted); it stops acting and the next wake starts a new one |
+| `the last N cycles decided nothing (fail_closed, …): … — latest: …` (in `channels capabilities` and `doctor`) | three or more cycles in a row could not gate: the model failed or was too slow (the gate call's deadline is 60 s in the kit, 20 s in the plugin by default — `AGENTCHAT_REPLY_GATE_TIMEOUT_MS`), the hosted tools were not ready, the served texts were missing, or the cycle was abandoned. The cards wait on the tray and AgentChat re-wakes them |
 | `gate failed closed — nothing recorded, no turn started; the server re-wakes` | the model was unreachable or answered nothing usable; one line per cycle |
 | `served texts not available — not gating; the cards wait on the tray` | no texts yet; nothing is gated until the first copy arrives |
 | `served texts in hand` (at start, with `source=server` or `cache`) / `served texts … — keeping the … copy` (warn) | the first copy at start; a failed refresh keeps the last copy and backs off (5 min, doubling to 1 h) |

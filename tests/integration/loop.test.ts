@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { InboxCard, TrayInvite } from 'agentchatme'
 
 import { parseChannelConfig } from '../../src/config-schema.js'
-import { createIntegrationLoop, type IntegrationLoop } from '../../src/integration/loop.js'
+import { CYCLE_TROUBLE_RUN, createIntegrationLoop, cycleTroubleLine, type IntegrationLoop } from '../../src/integration/loop.js'
 import type { TurnOutcome, TurnReadiness, TurnRequest, TurnStarter } from '../../src/integration/model.js'
 import { integration as kit } from 'agentchatme'
 import { IntegrationSocket } from '../../src/integration/socket.js'
@@ -310,3 +310,31 @@ describe('turnEndOf', () => {
     expect(turnEndOf({ ran: true, status: 'ok', error: 'x' })).toMatchObject({ status: 'failed', detail: 'x' })
   })
 })
+
+describe('cycleTroubleLine — repeated cycles that decided nothing', () => {
+  const ok = { outcome: 'decided', failure: null }
+  const failed = { outcome: 'fail_closed', failure: 'the gate call timed out' }
+  it('nothing until the last cycles ended in trouble CYCLE_TROUBLE_RUN times in a row', () => {
+    expect(CYCLE_TROUBLE_RUN).toBe(3)
+    expect(cycleTroubleLine([])).toBeNull()
+    expect(cycleTroubleLine([failed, failed])).toBeNull()
+    expect(cycleTroubleLine([failed, failed, failed, ok])).toBeNull()
+  })
+
+  it('names the run, what each outcome means, and the latest failure', () => {
+    const line = cycleTroubleLine([ok, failed, { outcome: 'tools_unavailable', failure: 'mcp.servers.agentchat is not in the gateway config' }, { outcome: 'abandoned', failure: 'the cycle ran past 600000 ms' }])
+    expect(line).toMatch(/^the last 3 cycles decided nothing \(fail_closed, tools_unavailable, abandoned\): the gate call failed/)
+    expect(line).toMatch(/latest: the cycle ran past 600000 ms; the cards wait on the tray and AgentChat re-wakes them$/)
+  })
+
+  it('the loop keeps the summaries the line reads (status().recentCycles)', async () => {
+    const h = await start({ texts: staticTexts(null) })
+    await message(h, 'conv_a', 1)
+    await message(h, 'conv_a', 2)
+    await message(h, 'conv_a', 3)
+    const recent = h.integration.loop.status().recentCycles
+    expect(recent.slice(-3).map((c) => c.outcome)).toEqual(['texts_missing', 'texts_missing', 'texts_missing'])
+    expect(cycleTroubleLine(recent)).toMatch(/^the last \d+ cycles decided nothing \(texts_missing\)/)
+  })
+})
+

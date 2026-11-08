@@ -124,16 +124,24 @@ export function createRuntimeModelCall(params: {
   const getRuntime = params.runtime ?? getPluginRuntime
   const maxTokens = params.maxTokens ?? DEFAULT_GATE_MAX_TOKENS
   const timeoutMs = params.timeoutMs ?? DEFAULT_GATE_TIMEOUT_MS
-  return async (prompt) => {
+  return async (prompt, options) => {
     const runtime = getRuntime()
     if (!runtime) throw new RuntimeUnavailableError('the gate call')
+    // Two reasons to stop: our own timeout, and the kit's gate-call deadline
+    // (the loop aborts its signal when it no longer wants the answer).
+    // OpenClaw's `llm.complete` takes an AbortSignal, so both reach the call.
+    const signals = [
+      ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? [AbortSignal.timeout(timeoutMs)] : []),
+      ...(options?.signal ? [options.signal] : []),
+    ]
+    const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
     const result = await runtime.llm.complete({
       messages: [{ role: 'user', content: prompt }],
       maxTokens,
       temperature: GATE_TEMPERATURE,
       ...(params.agentIdOverride ? { agentId: params.agentIdOverride } : {}),
       purpose: 'AgentChat reply gate: the server\'s question about the server\'s cards (tool-free triage)',
-      ...(Number.isFinite(timeoutMs) && timeoutMs > 0 ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
+      ...(signal ? { signal } : {}),
     })
     return typeof result?.text === 'string' ? result.text : ''
   }

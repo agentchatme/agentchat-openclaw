@@ -56,11 +56,11 @@ function stubSocket(state: SocketState): IntegrationSocket {
 const silent = { trace() {}, debug() {}, info() {}, warn() {}, error() {}, child() { return this } } as never
 
 /** A receive loop as the status probe reads it: its `status()` counters. */
-function loopWith(c: { wakes: number; cycles: number; turns: number; running?: Array<Record<string, unknown>> }): never {
+function loopWith(c: { wakes: number; cycles: number; turns: number; running?: Array<Record<string, unknown>>; recent?: Array<Record<string, unknown>> }): never {
   return {
     loop: {
       start: async () => undefined,
-      status: () => ({ coalescer: { wakes: c.wakes, cycles: c.cycles }, counters: { turnsStarted: c.turns, inviteTurnsStarted: 0, runsStarted: 0 }, turns: c.running ?? [] }),
+      status: () => ({ coalescer: { wakes: c.wakes, cycles: c.cycles }, counters: { turnsStarted: c.turns, inviteTurnsStarted: 0, runsStarted: 0 }, turns: c.running ?? [], recentCycles: c.recent ?? [] }),
     },
     stop: async () => undefined,
   } as never
@@ -145,7 +145,7 @@ describe('status adapter — the doctor-style probe', () => {
       logger: silent,
       createSocket: () => stubSocket('ready'),
       build: () => ({
-        loop: loopWith({ wakes: 1, cycles: 1, turns: 1, running: [{ kind: 'reply', conversationId: 'conv_slow', anchor: 'msg_1', startedAt: started, waitTimedOutAt: null, overdue: true }] }),
+        loop: loopWith({ wakes: 1, cycles: 4, turns: 1, recent: [1, 2, 3].map(() => ({ outcome: 'tools_unavailable', failure: 'mcp.servers.agentchat is not in the gateway config' })), running: [{ kind: 'reply', conversationId: 'conv_slow', anchor: 'msg_1', startedAt: started, waitTimedOutAt: null, overdue: true }] }),
         texts: { source: 'server' } as never,
         handlers: {},
       }),
@@ -153,7 +153,9 @@ describe('status adapter — the doctor-style probe', () => {
     const cfg = { agents: { defaults: { workspace, timeoutSeconds: 7200 } } }
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account(cfg) as never, timeoutMs: 2000, cfg: cfg as never } as never)
     expect(probe.integration?.overdue).toHaveLength(1)
+    expect(probe.integration?.trouble).toMatch(/^the last 3 cycles decided nothing \(tools_unavailable\): no turn could have the hosted tools — latest: mcp\.servers\.agentchat is not in the gateway config/)
     const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+    expect(lines.find((l) => l.text.startsWith('the last 3 cycles decided nothing'))?.tone).toBe('warn')
     const line = lines.find((l) => l.text.startsWith('a turn for conversation conv_slow'))
     expect(line?.tone).toBe('warn')
     expect(line?.text).toMatch(/has run 4[45] min — its card stays held \(no second reply\) until the run ends; OpenClaw ends it at its run deadline, agents\.defaults\.timeoutSeconds = 7200$/)

@@ -67,6 +67,18 @@ describe('createRuntimeModelCall — the gate is a tool-free completion', () => 
     expect((calls.complete[0] as Record<string, unknown>).agentId).toBe('ops')
   })
 
+  it('the kit loop’s deadline reaches OpenClaw: its signal aborts the completion together with our own timeout', async () => {
+    const { runtime, calls } = fakeRuntime({ completeText: 'answer' })
+    const callModel = createRuntimeModelCall({ runtime: () => runtime, timeoutMs: 60_000 })
+    const deadline = new AbortController()
+    await callModel('p', { signal: deadline.signal })
+    const passed = (calls.complete[0] as { signal: AbortSignal }).signal
+    expect(passed).toBeInstanceOf(AbortSignal)
+    expect(passed.aborted).toBe(false)
+    deadline.abort(new Error('gate-call deadline'))
+    expect(passed.aborted).toBe(true)
+  })
+
   it('throws RuntimeUnavailableError when setRuntime never happened (the gate then fails closed)', async () => {
     const callModel = createRuntimeModelCall({ runtime: () => null })
     await expect(callModel('p')).rejects.toBeInstanceOf(RuntimeUnavailableError)
