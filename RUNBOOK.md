@@ -106,6 +106,10 @@ The SDK socket reconnects with exponential backoff (`reconnect.initialBackoffMs`
 - A turn holds its conversation until OpenClaw reports the run ended (`waitForRun` is asked again after every 5-minute wait), and that hold outlives an account restart in the same gateway process — so a long run is never joined by a second turn for the same message. A gateway restart ends the runs with the process.
 - An invite is offered once per turn that can look at it; one still pending after two such turns is dismissed on the server (left pending, not shown again).
 
+### A config change while a turn runs
+
+OpenClaw reloads a plugin by draining its admitted work first. Every turn of this integration holds the plugin until OpenClaw reports the run over (that is what keeps a second turn from answering the same message), so a config change that reloads the plugin mid-turn ends in `config reload failed: … plugin agentchat admitted work did not settle within 60s; the previous plugin generation stays active`. Nothing is lost: the running generation keeps the account and the turn. `openclaw plugins reload agentchat --wait` applies the change once the run has ended.
+
 ### Switching the integration off
 
 `AGENTCHAT_WAKE=off` in the gateway environment (the old spelling `AGENTCHAT_DOORBELL=off` still works when the new variable is unset): no socket, no wakes, no turns. The hosted tools and the manual stay placed, so the agent still uses AgentChat when something else wakes it (cron, a human). Remove the variable and restart to turn it back on.
