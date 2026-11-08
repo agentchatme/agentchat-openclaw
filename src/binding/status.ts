@@ -102,8 +102,16 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
 
     const live = getIntegration(account.accountId)
     const health = live?.socket.getHealth()
-    const counters = live?.invoker?.counters()
-    const textsSource: 'server' | 'cache' | 'missing' | undefined = live ? (live.texts?.source ?? 'missing') : undefined
+    const loopStatus = live?.loop?.loop.status()
+    const counters = loopStatus
+      ? {
+          wakes: loopStatus.coalescer.wakes,
+          cycles: loopStatus.coalescer.cycles,
+          turns: loopStatus.counters.turnsStarted + loopStatus.counters.inviteTurnsStarted + loopStatus.counters.runsStarted,
+        }
+      : undefined
+    const servedFrom = live?.texts?.source
+    const textsSource: 'server' | 'cache' | 'missing' | undefined = live ? (servedFrom === 'server' || servedFrom === 'cache' ? servedFrom : 'missing') : undefined
     const socketCounters = live?.metrics?.snapshot?.()
     const integration: NonNullable<AgentchatProbeResult['integration']> = {
       mode: readWakeModeFromEnv().mode,

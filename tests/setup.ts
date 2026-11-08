@@ -3,7 +3,7 @@
  *
  * The integration places the API key in OpenClaw's state-dir `.env`
  * (`$OPENCLAW_STATE_DIR/.env`, `~/.openclaw/.env` by default) and keeps its
- * texts cache and invite ledger under `<state dir>/agentchat/`. Tests that
+ * texts cache under `<state dir>/agentchat/`. Tests that
  * exercise placement must never touch the developer's or CI runner's real
  * OpenClaw state, so the state dir is redirected to a fresh temp directory
  * for the whole run. Individual tests may override it again.

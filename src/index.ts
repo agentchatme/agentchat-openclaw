@@ -24,13 +24,12 @@ export type { AgentchatChannelConfig } from './config-schema.js'
 
 export { IntegrationSocket, realtimeOptionsFor } from './integration/socket.js'
 export type { SocketHandlers, SocketHealth, SocketState, SocketDisconnect, SocketBlocked, IntegrationSocketOptions } from './integration/socket.js'
-export { AgentInvoker } from './integration/invoker.js'
-export type { AgentInvokerOptions, CycleResult, CycleOutcome, WakeSource } from './integration/invoker.js'
+export { createIntegrationLoop } from './integration/loop.js'
+export type { IntegrationLoop, IntegrationLoopOptions } from './integration/loop.js'
+export { createLoopTurnStarter, turnEndOf } from './integration/turns.js'
 export { RunningTurns, runningTurnsFor } from './integration/running.js'
-export { TextsStore, loadTexts, loadIdentityLine } from './integration/texts.js'
+export { OpenClawTexts, createTextsCache, loadIdentityLine, spellTextsForOpenClaw } from './integration/texts.js'
 export {
-  wakeTurnPrompt,
-  inviteTurnPrompt,
   spellToolsForOpenClaw,
   mcpToolName,
   MCP_SERVER_NAME,

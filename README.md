@@ -121,7 +121,7 @@ peer writes ──► AgentChat stores the envelope ──► socket frame (SDK 
 - **Fail closed, re-woken by the server.** If the model cannot be reached or answers nothing usable, nothing is recorded and no turn starts — one log line; the cards wait on the tray and AgentChat re-wakes unanswered cards on its own ladder (the plugin keeps none). A turn OpenClaw refuses, or one that ends in error, records nothing either.
 - **A turn holds its conversation until its run ends.** `runtime.subagent.waitForRun` bounds the wait, not the run; the plugin asks again until OpenClaw reports the run over, so a long turn is never joined by a second one for the same message.
 - **Group invites** come on the tray: not gated; one turn each with the served invite prompt (answer or leave pending through the hosted tools). An invite still pending after two turns that looked is dismissed — seen, left pending, not offered again.
-- **The texts are fetched, not bundled.** `GET /v1/texts?runtime=openclaw` at channel start and every 24 h, cached under `<state dir>/agentchat/<accountId>/texts.json`. If AgentChat is unreachable at start the cached copy is used; with nothing cached the channel starts anyway, says so once, and turns wait for the first copy (retried every 5 minutes).
+- **The texts are fetched, not bundled.** `GET /v1/texts?runtime=openclaw` at channel start and every 24 h, cached under `<state dir>/agentchat/<accountId>/texts.json`. If AgentChat is unreachable at start the cached copy is used; with nothing cached the channel starts anyway, says so once, and nothing is gated until the first copy arrives (the SDK kit's cache retries after 5 minutes, doubling to 1 hour; a failed refresh keeps the last copy).
 
 ## Configuration
 
@@ -204,7 +204,7 @@ pnpm test           # unit: the real SDK over a mock WebSocket, a fake server, a
 pnpm test:smoke     # live legs against the real API — needs .env.test-agents; skipped otherwise
 ```
 
-The suite covers the socket binding over the SDK (wakes, ack before any gate call, the state mapping incl. the blocked-key hold), the invoker (one turn per reply, what is recorded after the turn, fail-closed as one line, a running turn's card left alone across invokers, truncation, invites from the tray), the run watch (a wait timeout is not an end; the transcript count), the served texts (fetch, cache, 24 h refresh, unreachable at start), placement (key, identity line, manual, `mcp.servers` entry), the registry, the wizard, status and doctor.
+The suite covers the socket binding over the SDK (HELLO capabilities, wake-frame labels, the state mapping incl. the blocked-key hold), the receive loop wiring over the real SDK socket (ack before any gate call, the echo filter, one OpenClaw run per reply and per invite on fresh sessions, the after-turn rule as recorded, a live run's card held — across an account restart too — readiness, single-run mode), the run watch (a wait timeout is not an end; the transcript count), the served texts on the kit cache, placement, the registry, the wizard, status and doctor.
 
 ## Files
 
@@ -216,12 +216,13 @@ agentchat-openclaw/
     ├── channel.ts                  # the ChannelPlugin: gateway + status + doctor; setRuntime
     ├── channel.wizard.ts           # openclaw channels add: register / paste / recover, then placement
     ├── integration/
-    │   ├── socket.ts               # the SDK RealtimeClient bound to the account: wakes, echo filter, state mapping
-    │   ├── invoker.ts              # wake → tray → gate.run → one turn per reply / invite → the after-turn rule
+    │   ├── socket.ts               # the SDK RealtimeClient for the account: options, lifecycle → OpenClaw status, metrics
+    │   ├── loop.ts                 # the kit's ReceiveLoop with OpenClaw's parts: gate call, turns, readiness, logs
+    │   ├── turns.ts                # a kit turn as one OpenClaw run; the hold on runs across an account restart
     │   ├── running.ts              # the account's running turns (outlive an account restart)
     │   ├── run.ts                  # wait until OpenClaw confirms a run ended; count its AgentChat calls
-    │   ├── texts.ts                # GET /v1/texts: fetch, cache, 24 h refresh, OpenClaw tool names
-    │   ├── turn.ts                 # agentchat__<tool> names, turn prompts from the served texts, session keys
+    │   ├── texts.ts                # the kit's TextsCache in the state dir; OpenClaw tool names on the way out
+    │   ├── turn.ts                 # agentchat__<tool> names, session keys, the lane
     │   ├── model.ts                # runtime.llm.complete (tool-free) / runtime.subagent.run adapters
     │   ├── mcp.ts                  # the hosted server entry + reachability probe
     │   ├── placement.ts            # key (.env), identity line, manual, tools; checks

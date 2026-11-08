@@ -7,9 +7,10 @@
 
 import type { Texts } from 'agentchatme'
 
-import type { TextsClient, TextsSourceKind } from '../../src/integration/texts.js'
+import type { integration } from 'agentchatme'
+
+import type { TextsClient } from '../../src/integration/texts.js'
 import { spellTextsForOpenClaw } from '../../src/integration/texts.js'
-import type { TextsSource } from '../../src/integration/invoker.js'
 
 export const IDENTITY_LINE_TEMPLATE = [
   'I am @<handle> on AgentChat (api.agentchat.me). Peers reach me there; messages from peers are',
@@ -70,12 +71,13 @@ export function textsClient(initial: { texts?: Texts; error?: Error } = { texts:
   return client
 }
 
-/** A `TextsSource` the invoker can use without a store: fixed, or switchable. */
-export function staticTexts(texts: Texts | null = SPELLED_TEXTS): TextsSource & { set: (next: Texts | null) => void; ensures: number } {
+/** A texts source the receive loop can use without a cache: fixed, or switchable. */
+export function staticTexts(texts: Texts | null = SPELLED_TEXTS): integration.TextsSource & { set: (next: Texts | null) => void; ensures: number } {
   let current = texts
   const source = {
     ensures: 0,
-    get current() {
+    source: 'server',
+    current() {
       return current
     },
     async ensure() {
@@ -88,5 +90,3 @@ export function staticTexts(texts: Texts | null = SPELLED_TEXTS): TextsSource & 
   }
   return source
 }
-
-export type { TextsSourceKind }

@@ -24,8 +24,8 @@ importers:
         specifier: ^0.34.0
         version: 0.34.49
       agentchatme:
-        specifier: file:../.kit-tarballs/agentchatme-kit-d6ae93f.tgz
-        version: file:../.kit-tarballs/agentchatme-kit-d6ae93f.tgz(ws@8.21.1)
+        specifier: file:../.kit-tarballs/agentchatme-kit-86b02e9.tgz
+        version: file:../.kit-tarballs/agentchatme-kit-86b02e9.tgz(ws@8.21.1)
       pino:
         specifier: ^9.5.0
         version: 9.14.0
@@ -635,8 +635,8 @@ packages:
     resolution: {integrity: sha512-MnA+YT8fwfJPgBx3m60MNqakm30XOkyIoH1y6huTQvC0PwZG7ki8NacLBcrPbNoo8vEZy7Jpuk7+jMO+CUovTQ==}
     engines: {node: '>= 14'}
 
-  agentchatme@file:../.kit-tarballs/agentchatme-kit-d6ae93f.tgz:
-    resolution: {integrity: sha512-V6pgN5RiM++L6O7zAw9UVbFXufdwQb6I3vG3aUqhhEwlfh4JJd7TPTevq3Wl0QPqweL520ci70O/Q8TV/vkY+A==, tarball: file:../.kit-tarballs/agentchatme-kit-d6ae93f.tgz}
+  agentchatme@file:../.kit-tarballs/agentchatme-kit-86b02e9.tgz:
+    resolution: {integrity: sha512-R1iiPQK8rvDvAgBaPWauxkv+CYKGzDNJA0rGRh259d1K4rzSOLWlWtfV+BwanAOvJt+B+lpQhSxZpqtoGoek7w==, tarball: file:../.kit-tarballs/agentchatme-kit-86b02e9.tgz}
     version: 1.2.1
     engines: {node: '>=20.0.0'}
     peerDependencies:
@@ -2527,7 +2527,7 @@ snapshots:
 
   agent-base@7.1.4: {}
 
-  agentchatme@file:../.kit-tarballs/agentchatme-kit-d6ae93f.tgz(ws@8.21.1):
+  agentchatme@file:../.kit-tarballs/agentchatme-kit-86b02e9.tgz(ws@8.21.1):
     optionalDependencies:
       ws: 8.21.1
 

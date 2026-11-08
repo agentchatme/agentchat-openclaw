@@ -1,11 +1,11 @@
 /**
- * Turns: the names OpenClaw gives the hosted tools, the prompts a turn starts
- * with, and the session keys and lane the turns run on.
+ * Turns: the names OpenClaw gives the hosted tools, and the session keys and
+ * lane the turns run on.
  *
- * No product text lives here. The wake instruction and the invite prompt are
- * served by AgentChat (`GET /v1/texts`) and placed by this module; the one
- * line of our own states a fact (which conversation the gate decided to
- * answer), never an instruction.
+ * No text lives here. What a turn starts with — the served wake instruction
+ * or invite prompt and the id it is about — is composed by the SDK kit's
+ * receive loop from `GET /v1/texts`; this module only re-spells the hosted
+ * tool names in served text the way OpenClaw exposes them.
  *
  * OpenClaw exposes an MCP server's tools to the model as `<server>__<tool>`:
  * the tool-policy pipeline builds the namespace prefix as
@@ -16,7 +16,7 @@
  * re-spells exactly those tokens so the agent is told the names it can call.
  */
 
-import type { Texts, ToolNamer } from 'agentchatme'
+import type { ToolNamer } from 'agentchatme'
 
 /** Name of the MCP server entry this plugin places. Changing it changes every tool name the model sees — keep in lockstep with `./mcp.ts`. */
 export const MCP_SERVER_NAME = 'agentchat'
@@ -48,40 +48,15 @@ export const OPENCLAW_TOOL_NAMER: ToolNamer = (tool) => (tool.startsWith(MCP_TOO
 
 // A bare hosted tool name: `agentchat_` followed by the tool, never a second
 // underscore (which is the already-prefixed form) and never inside a longer
-// word. `api.agentchat.me` carries no underscore and is untouched.
+// word. `api.agentchat.me` carries no underscore and is untouched. The SDK's
+// gate holds the same pattern privately for the tray question; until the
+// server serves texts spelled for OpenClaw, or the SDK exports its speller,
+// the served texts are re-spelled here.
 const HOSTED_TOOL_TOKEN = /\bagentchat_(?!_)[a-z0-9_]+\b/g
 
 /** Re-spell every bare hosted tool name in a served text the way OpenClaw exposes it. Pure, idempotent. */
 export function spellToolsForOpenClaw(text: string): string {
   return text.replace(HOSTED_TOOL_TOKEN, (token) => OPENCLAW_TOOL_NAMER(token))
-}
-
-/**
- * The prompt a wake turn starts with: the served wake instruction and, when
- * the gate decided a specific conversation, one line naming it.
- *
- * `conversationLine` is the only agent-facing text this package writes. It
- * states one fact — which conversation the agent's own gate chose to
- * answer — and no instructions: what to do on a wake (look at the tray,
- * open the conversation, answer, record the verdict) is the served wake
- * instruction's to say. It belongs in `GET /v1/texts` too (a per-runtime
- * turn line with a conversation placeholder); until the server serves one,
- * this line stays this short.
- */
-export function wakeTurnPrompt(texts: Pick<Texts, 'wake_instruction'>, conversationId?: string): string {
-  const instruction = texts.wake_instruction.trim()
-  if (!conversationId) return instruction
-  return `${instruction}\n\n${conversationLine(conversationId)}`
-}
-
-/** The one line of ours in a wake turn: the conversation the gate chose to answer. */
-export function conversationLine(conversationId: string): string {
-  return `Conversation to answer: ${conversationId}`
-}
-
-/** The prompt a group-invite turn starts with: the served invite prompt. */
-export function inviteTurnPrompt(texts: Pick<Texts, 'invite_prompt'>): string {
-  return texts.invite_prompt.trim()
 }
 
 /**
@@ -97,8 +72,14 @@ export function wakeSessionKey(agentId: string, now: number = Date.now(), nonce:
   return `agent:${agentId}:subagent:agentchat-wake-${utcStamp(now)}-${nonce}`
 }
 
-export function inviteSessionKey(agentId: string, inviteId: string): string {
-  return `agent:${agentId}:subagent:agentchat-invite-${sanitizeKeyPart(inviteId)}`
+/**
+ * A fresh session per invite turn too. An invite can get a second turn (the
+ * kit's rule dismisses one still pending after two turns that looked); a
+ * reused session would show it the first turn's history, and a turn that
+ * then makes no AgentChat call would read as one that could not look.
+ */
+export function inviteSessionKey(agentId: string, inviteId: string, now: number = Date.now(), nonce: string = randomNonce()): string {
+  return `agent:${agentId}:subagent:agentchat-invite-${sanitizeKeyPart(inviteId)}-${utcStamp(now)}-${nonce}`
 }
 
 /** One serialization lane per account so AgentChat turns never block the agent's main lane and never overlap each other. */

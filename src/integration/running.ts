@@ -1,30 +1,33 @@
 /**
  * The turns running for an account, kept for the life of the gateway
- * process — not of one invoker.
+ * process — not of one receive loop.
  *
  * A turn holds its conversation (or invite) until OpenClaw confirms its run
  * ended (`./run.ts`): while it runs, the card stays on the tray (nothing is
  * recorded before the turn ends), and gating it again would start a second
- * turn that answers the same message twice. OpenClaw restarts an account's
- * channel task on a config change; the run started by the old task goes on
- * in OpenClaw's lane. The registry is therefore per account and module-wide,
- * so the next invoker for the same account sees the turns the last one
- * started and leaves their cards alone until those runs end.
+ * turn that answers the same message twice. Within one receive loop the
+ * kit's tracker holds it. OpenClaw restarts an account's channel task on a
+ * config change, and the run started under the old loop goes on in
+ * OpenClaw's lane — so the account's runs are also kept here, per account
+ * and module-wide, and the next loop for the same account does not start a
+ * second turn for them (`./turns.ts`).
  *
  * A gateway restart ends the process and every run with it, so nothing here
  * is persisted.
  */
 
-export type RunningKind = 'reply' | 'invite' | 'ungated'
+export type RunningKind = 'reply' | 'invite'
 
 export interface RunningTurn {
-  /** `conv:<conversation id>`, `invite:<invite id>`, or `ungated`. */
+  /** `conv:<conversation id>` or `invite:<invite id>`. */
   readonly key: string
   readonly kind: RunningKind
   readonly runId: string
   readonly sessionKey: string
   /** Local clock, ms. */
   readonly startedAt: number
+  /** The receive loop that started it; its end wakes the loops that came after. */
+  readonly owner: string
 }
 
 export type RunningTurnListener = (turn: RunningTurn) => void
@@ -35,6 +38,10 @@ export class RunningTurns {
 
   has(key: string): boolean {
     return this.turns.has(key)
+  }
+
+  get(key: string): RunningTurn | undefined {
+    return this.turns.get(key)
   }
 
   get size(): number {
@@ -79,7 +86,6 @@ export class RunningTurns {
 
 export const conversationKey = (conversationId: string): string => `conv:${conversationId}`
 export const inviteKey = (inviteId: string): string => `invite:${inviteId}`
-export const UNGATED_KEY = 'ungated'
 
 const byAccount = new Map<string, RunningTurns>()
 

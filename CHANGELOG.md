@@ -25,10 +25,14 @@ Contract v1 ("finish the gate"). The release number is set at the release step. 
 
 - **No second turn while a run lives.** `waitForRun`'s timeout bounds the wait, not the run; after the 15-minute wait the conversation left the in-flight set while the run could still answer, so a later wake could start a second turn and a duplicate reply. A turn now holds its conversation until OpenClaw reports the run over (OpenClaw's own terminal rule from `src/agents/run-wait.ts`; on OpenClaw ≤ 2026.6.x, which drops the wait metadata, a timeout answered at once is the run's terminal record). The hold is per account for the gateway process, so an account restarted by a config change does not start a second turn either.
 
+- **The receive cycle is the SDK kit's `ReceiveLoop`** (gate-call mode): the socket's wakes and the echo filter, one cycle per burst, the tray, the gate, the hold on cards whose turn runs, the composed turn prompts (`conversation_id: …` / `invite_id: …` after the served text), and the after-turn rule. The plugin plugs in the gate call, the OpenClaw run, readiness and its log lines; `AGENTCHAT_REPLY_GATE_ENABLED=0` is the kit's single-run mode.
+- **The served texts are the kit's `TextsCache`** (file copy at start, daily refresh, back-off after a failure, a failed refresh keeps the last copy), spelled for OpenClaw on the way out. The cache file format is the kit's; an older `texts.json` is ignored and rewritten on the first fetch.
+- **Invite turns get a fresh OpenClaw session each**, so a second turn for the same invite does not see the first one's history.
+
 ### Removed
 
 - **The local re-wake ladder** (1 m, 5 m, 30 m, then nothing). AgentChat re-wakes unanswered cards on its own durable ladder (D3); a cycle that could not finish records nothing and leaves the cards on the tray. The `retry` wake source is gone; `unanswered` and `invite` are new.
-- `src/integration/wake.ts` (the kit's `WakeCoalescer` replaces it) and `src/integration/invites.ts` (the invite ledger). The `WakeCoalescer`, `InviteLedger` and `groupInviteFromRecord` exports are gone.
+- `src/integration/wake.ts`, `src/integration/invoker.ts` and `src/integration/invites.ts`, and the plugin's own texts store — the kit's `ReceiveLoop`, `WakeCoalescer`, `TurnTracker` and `TextsCache` replace them. The `AgentInvoker`, `WakeCoalescer`, `InviteLedger`, `groupInviteFromRecord`, `TextsStore`, `loadTexts`, `wakeTurnPrompt` and `inviteTurnPrompt` exports are gone; `createIntegrationLoop`, `createLoopTurnStarter`, `OpenClawTexts` and `createTextsCache` are new.
 
 ## 0.9.2 — 2026-11-08
 

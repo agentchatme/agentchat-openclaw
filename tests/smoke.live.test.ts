@@ -30,7 +30,7 @@ import { IntegrationSocket } from '../src/integration/socket.js'
 import { createSdkClient } from '../src/binding/sdk-client.js'
 import { parseChannelConfig } from '../src/config-schema.js'
 import { validateApiKey, registerAgentStart } from '../src/setup-client.js'
-import { fetchTexts } from '../src/integration/texts.js'
+import { TEXTS_RUNTIME } from '../src/integration/texts.js'
 import { silentLogger } from './helpers/logger.js'
 
 function loadFixtureEnv(): Record<string, string> {
@@ -61,8 +61,11 @@ const live = enabled ? describe : describe.skip
 
 live('live smoke — integration legs against the real API', () => {
   const sockets: IntegrationSocket[] = []
-  afterAll(async () => {
-    await Promise.all(sockets.map((s) => s.stop()))
+  afterAll(() => {
+    for (const s of sockets) {
+      s.realtime.disconnect()
+      s.stopped()
+    }
   })
 
   it('validateApiKey authenticates both fixture agents', async () => {
@@ -82,13 +85,13 @@ live('live smoke — integration legs against the real API', () => {
 
   it('the served texts for openclaw carry the wake instruction, the invite prompt and the identity line', async () => {
     const client = createSdkClient({ apiKey: BOB_KEY!, apiBase: API_BASE })
-    const texts = await fetchTexts(client)
+    const texts = await client.texts.get({ runtime: TEXTS_RUNTIME })
     expect(texts.wake_instruction.length).toBeGreaterThan(50)
     expect(texts.invite_prompt.length).toBeGreaterThan(20)
     expect(texts.identity_line).toContain(`@${BOB_HANDLE}`)
   }, 30_000)
 
-  it('bob connects, wakes on connect and on a DM, the SDK acks the message, and the tray shows the card', async () => {
+  it('bob connects (HELLO with ack, heartbeat, rewake), a DM arrives on the socket, and the tray shows the card', async () => {
     const wakes: string[] = []
     let connected: (() => void) | null = null
     let woken: (() => void) | null = null
@@ -98,16 +101,21 @@ live('live smoke — integration legs against the real API', () => {
       logger: silentLogger,
       client,
       handlers: {
-        onConnected: () => connected?.(),
-        onWake: (source) => {
-          wakes.push(source)
-          if (source === 'message') woken?.()
+        onConnected: () => {
+          wakes.push('connect')
+          connected?.()
         },
       },
     })
     sockets.push(bob)
+    // The receive loop's own handler, standing in: a message frame is a wake.
+    bob.realtime.on('message.new', () => {
+      wakes.push('message')
+      woken?.()
+    })
     const ready = new Promise<void>((res) => (connected = res))
-    await bob.start()
+    bob.bind()
+    await bob.realtime.connect()
     await Promise.race([ready, new Promise((_, rej) => setTimeout(() => rej(new Error('connect timeout')), 25_000))])
     expect(bob.getHealth().state).toBe('ready')
     expect(wakes).toContain('connect')

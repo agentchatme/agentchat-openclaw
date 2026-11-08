@@ -4,9 +4,10 @@
  * OpenClaw calls `startAccount` when a configured account is enabled. The
  * integration then:
  *
- *   socket frame / connect / wake frame ──► wake ──► coalesce ──► tray ──► gate ──► one turn per reply
+ *   socket frame / connect / wake frame ──► one cycle ──► tray ──► gate ──► one turn per reply ──► after-turn rule
  *
- * everything after the wake lives in `../integration/invoker.ts`; this file
+ * everything after the wake is the SDK kit's receive loop, with OpenClaw's
+ * parts plugged in (`../integration/loop.ts`); this file
  * only wires OpenClaw's context (config, logger, status sink, abort signal,
  * agent routing, the plugin runtime captured by `setRuntime`) to it and
  * keeps the account task pending until OpenClaw aborts it.
@@ -16,6 +17,8 @@
  * and the manual stay placed, so the agent can still use AgentChat when
  * something else wakes it.
  */
+
+import type { Texts } from 'agentchatme'
 
 import type { ChannelGatewayAdapter, ChannelGatewayContext } from './openclaw-types.js'
 
@@ -32,8 +35,8 @@ import {
 } from '../credentials/read-env.js'
 import { multiAccountRefusal } from '../channel-account.js'
 import { registerIntegration, unregisterIntegration, getIntegration } from './runtime-registry.js'
-import { AgentInvoker } from '../integration/invoker.js'
-import { TextsStore } from '../integration/texts.js'
+import { createIntegrationLoop } from '../integration/loop.js'
+import { OpenClawTexts, createTextsCache, spellTextsForOpenClaw } from '../integration/texts.js'
 import { runningTurnsFor } from '../integration/running.js'
 import { refreshIdentityLine } from '../integration/placement.js'
 import {
@@ -180,24 +183,30 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     const client = getClient({ accountId: ctx.accountId, config })
     const gateTimeoutMs = readReplyGateTimeoutMsFromEnv()
 
-    // The served texts: fetched now (server, then the cached copy), refreshed
-    // daily. Unreachable with nothing cached → the store says so once and the
-    // integration starts anyway; turns wait for the first copy.
-    const texts = new TextsStore({ client, accountId: ctx.accountId, logger })
+    // The served texts: the kit's cache — the file copy at once, one fetch,
+    // then daily (backing off after a failure). Unreachable with nothing
+    // cached → the integration starts anyway; nothing is gated until the
+    // first copy arrives.
+    const textsCache = createTextsCache({ client, accountId: ctx.accountId, logger })
+    const texts = new OpenClawTexts(textsCache)
+    const first = await textsCache.start()
+    if (first) logger.info({ version: first.version, manual: first.manual?.version, source: textsCache.source }, 'served texts in hand')
+    else logger.warn({ err: textsCache.lastError }, 'served texts not available yet (AgentChat unreachable, nothing cached) — nothing is gated until the first copy arrives')
     const handle = config.agentHandle
     if (handle) {
-      // A server copy that differs from the placed line refreshes it (an
+      // The served identity line replaces a placed one that differs (an
       // install upgraded from a release that bundled the line gets the
-      // served one on its first start); an absent line is the wizard's /
-      // doctor's to place. Registered BEFORE the first load so the first
-      // copy counts.
-      texts.onServerCopy((copy) => {
-        const refreshed = refreshIdentityLine(ctx.cfg, ctx.accountId, handle, copy.identity_line)
+      // served one on its first start): once from the copy in hand, then on
+      // every copy that changes. An absent line is the wizard's / doctor's
+      // to place.
+      const refresh = (copy: Texts) => {
+        const refreshed = refreshIdentityLine(ctx.cfg, ctx.accountId, handle, spellTextsForOpenClaw(copy).identity_line)
         if (refreshed.outcome === 'updated') ctx.log?.info?.(`[agentchat:${ctx.accountId}] identity line refreshed from the served texts in ${refreshed.path}`)
         else if (refreshed.outcome === 'failed') ctx.log?.warn?.(`[agentchat:${ctx.accountId}] identity line could not be refreshed in ${refreshed.path}: ${refreshed.detail ?? 'unknown error'}`)
-      })
+      }
+      if (first) refresh(first)
+      textsCache.onChange((copy) => refresh(copy))
     }
-    await texts.start()
 
     // One recorder per account for the socket's counters. OpenClaw offers a plugin no Prometheus registry (see
     // `metrics.ts`), so the counters live here and the status probe reads
@@ -210,14 +219,17 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       logger,
       socketOptions: { client, metrics },
       build: (socket) => {
-        const invoker = new AgentInvoker({
+        const loop = createIntegrationLoop({
           accountId: ctx.accountId,
           agentId,
           client,
+          texts,
+          socket: socket.realtime,
+          handle: config.agentHandle,
           callModel: createRuntimeModelCall({ agentIdOverride, ...(gateTimeoutMs !== undefined ? { timeoutMs: gateTimeoutMs } : {}) }),
-          // A turn stays in flight until OpenClaw confirms its run ended; a
-          // wait that elapses is asked again (`integration/run.ts`).
-          startTurn: createRuntimeTurnStarter({
+          // A turn holds its conversation until OpenClaw confirms its run
+          // ended; a wait that elapses is asked again (`integration/run.ts`).
+          startRun: createRuntimeTurnStarter({
             onStillRunning: ({ runId, sessionKey, elapsedMs }) =>
               logger.info({ runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000) }, 'turn still running — its conversation stays in flight until OpenClaw reports the run ended'),
             onWaitError: ({ runId, sessionKey, error, attempt, retryInMs }) =>
@@ -231,9 +243,8 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
             const live = readLiveConfig(ctx.cfg)
             return turnReadiness({ cfg: live.cfg, apiBase: config.apiBase, apiKey: config.apiKey, live: live.live })
           },
-          texts,
-          // The account's running turns outlive this invoker: a config
-          // change restarts the account while its runs go on in OpenClaw.
+          // The account's runs outlive this loop: a config change restarts
+          // the account while its runs go on in OpenClaw.
           running: runningTurnsFor(ctx.accountId),
           logger,
           metrics,
@@ -249,10 +260,10 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
         // health flap.
         let blocked = false
         return {
-          invoker,
+          loop,
           texts,
+          textsCache,
           handlers: {
-            onWake: (source) => invoker.wake(source),
             onConnected: (at) => {
               if (blocked) {
                 blocked = false

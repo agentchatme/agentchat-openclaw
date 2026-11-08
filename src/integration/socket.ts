@@ -1,41 +1,28 @@
 /**
- * The socket as a wake — the SDK's `RealtimeClient` bound to one account.
+ * The SDK socket's lifecycle, as OpenClaw reports it — one account.
  *
- * The transport is the SDK's, lifecycle included: HELLO, the reconnect
- * backoff that never gives up (one notice after a long outage, then a wider
- * cap), the handshake and idle watchdogs, the 10–15 min retry of a rejected
- * key, the delivery ack, per-conversation ordering, the reconnect drain. This
- * module holds what is runtime logic: starting and stopping it with the
- * account, turning what arrives into wakes for the invoker, filtering the
- * echo of the agent's own sends, and handing the SDK's lifecycle events to
- * the gateway as they are.
+ * The transport is the SDK's `RealtimeClient`, lifecycle included: HELLO,
+ * the reconnect backoff that never gives up (one notice after a long outage,
+ * then a wider cap), the handshake and idle watchdogs, the 10–15 min retry
+ * of a rejected key, the delivery ack, per-conversation ordering, the
+ * reconnect drain. What arrives on it is the kit's receive loop's: it
+ * attaches its own handlers to the same client (message frames that are not
+ * the agent's own echo, wake frames, invites, every accepted HELLO become
+ * one cycle), and connects and disconnects it.
  *
- *   - `message.new`              → `onWake('message')` — after reading only
- *                                   the sender (to skip our own echo) and the
- *                                   ids for the log line. The body is never
- *                                   looked at; the agent reads it through the
- *                                   hosted tools inside its turn.
- *   - `wake`                     → `onWake(reason)` — the server's content-free
- *                                   wake (a deferred conversation's reminder,
- *                                   or cards still unanswered).
- *   - every successful HELLO     → `onWake('connect')` — whatever landed while
- *                                   the socket was down is on the tray.
- *   - `group.invite.received`    → `onWake('invite')` — the invite itself is
- *                                   read from the tray (tray v1), like a card.
+ * This module builds the client with the plugin's options and hands the
+ * SDK's lifecycle events to the gateway as they are, for OpenClaw's status
+ * and the metrics: connected, closed, blocked, the state, notices. It acts on
+ * nothing and sends nothing.
  *
  * HELLO offers `ack`, `heartbeat` and `rewake`: while cards stay unanswered
- * the server re-wakes this socket on its own durable ladder, so a cycle
- * that could not finish needs no local retry.
+ * the server re-wakes this socket on its own durable ladder (contract v1,
+ * D3), so the integration keeps no retry ladder of its own.
  *
  * `ackOnReceipt: true`: the SDK acknowledges every `message.new` the moment
  * the frame is parsed, before any handler runs — delivered means this
  * machine received it. Whether the agent looked is read state, recorded by
- * the gate's verdicts; an early ack never empties the tray. No frame is
- * ever acknowledged by this module; it sends nothing.
- *
- * Every frame is a wake and every wake reads the whole tray, so no ordering
- * assumption is made: frames the SDK parks on a sequence gap and flushes on
- * a close are wakes like any other.
+ * the verdicts; an early ack never empties the tray.
  *
  * Nothing here classifies a close. Whether a close was a rejected key, a
  * slow handshake or the client's own watchdog is the SDK's call: it says
@@ -51,7 +38,6 @@ import {
   type RealtimeOptions,
   type RealtimeState,
   type WakeFrame,
-  type WsMessage,
 } from 'agentchatme'
 
 import type { AgentchatChannelConfig } from '../config-schema.js'
@@ -59,10 +45,18 @@ import type { Logger } from '../log.js'
 import type { MetricsRecorder } from '../metrics.js'
 import { createNoopMetrics } from '../metrics.js'
 import { AGENTCHAT_CLIENT_IDENTITY } from '../client-identity.js'
-import type { WakeSource } from './invoker.js'
 
-/** A server wake frame's `reason` → the fixed wake-source set (the metric label must stay bounded). */
-export function wakeSourceOf(reason: unknown): WakeSource {
+/**
+ * A wake's label for the metric and the log — a closed set: `message` (a
+ * peer wrote), `connect` (an accepted HELLO), `reminder` (a deferred
+ * conversation came due), `unanswered` (the server's re-wake for cards
+ * still waiting), `invite` (a group invite arrived), `other` (a server wake
+ * with a reason this version does not know).
+ */
+export type WakeLabel = 'message' | 'connect' | 'reminder' | 'unanswered' | 'invite' | 'other'
+
+/** A server wake frame's `reason` → the fixed label set (the metric label must stay bounded). */
+export function wakeSourceOf(reason: unknown): WakeLabel {
   if (reason === 'reminder') return 'reminder'
   if (reason === 'unanswered') return 'unanswered'
   return 'other'
@@ -74,7 +68,7 @@ export function wakeSourceOf(reason: unknown): WakeSource {
  * socket opens or its HELLO awaits `hello.ok`, `ready` while a session is up,
  * `backoff` between a close and the next attempt, `blocked` after the server
  * rejected the key during the handshake (the SDK retries a fresh HELLO every
- * 10–15 min; a later `hello.ok` clears it), `stopped` after `stop()` — the
+ * 10–15 min; a later `hello.ok` clears it), `stopped` after the stop — the
  * only state the client never leaves on its own.
  */
 export type SocketState = RealtimeState
@@ -85,18 +79,10 @@ export type SocketDisconnect = DisconnectInfo
 /** A rejected HELLO: the close code and reason, and the delay to the SDK's next attempt. */
 export type SocketBlocked = BlockedInfo
 
-export interface WakeDetail {
-  readonly conversationId?: string
-  readonly messageId?: string
-  readonly from?: string
-}
-
 export interface SocketHandlers {
-  /** A wake: the tray may have changed. `source` is for the log line and the metric label only. */
-  onWake?: (source: WakeSource, detail: WakeDetail) => void
-  /** Once per accepted HELLO (initial + every reconnect), before the connect wake. */
+  /** Once per accepted HELLO (initial + every reconnect). */
   onConnected?: (at: number) => void
-  /** Every socket close the SDK reports (never for our own `stop()`). The state that follows says what comes next. */
+  /** Every socket close the SDK reports (never for our own stop). The state that follows says what comes next. */
   onDisconnected?: (info: SocketDisconnect) => void
   /**
    * The server rejected the key during the handshake. Once per rejected
@@ -130,15 +116,12 @@ export interface SocketHealth {
   readonly state: SocketState
   readonly connectedAt: number | null
   readonly counters: {
-    readonly frames: number
-    readonly selfFiltered: number
-    readonly wakes: number
-    readonly invites: number
+    readonly wakeFrames: number
     readonly disconnects: number
   }
 }
 
-/** The SDK realtime options for a channel config: `wss://…` base, the account's backoff, the integration identity. */
+/** The SDK realtime options for a channel config: `wss://…` base, the account's backoff, the integration identity, contract-v1 capabilities. */
 export function realtimeOptionsFor(config: AgentchatChannelConfig, extra: Pick<IntegrationSocketOptions, 'client' | 'webSocket'> = {}): RealtimeOptions {
   return {
     apiKey: config.apiKey,
@@ -158,193 +141,128 @@ export function realtimeOptionsFor(config: AgentchatChannelConfig, extra: Pick<I
 }
 
 export class IntegrationSocket {
-  private readonly config: AgentchatChannelConfig
+  /** The SDK client: handed to the receive loop, which connects and disconnects it. */
+  readonly realtime: RealtimeClient
+
   private readonly logger: Logger
   private readonly handlers: SocketHandlers
   private readonly metrics: MetricsRecorder
-  private readonly client: AgentChatClient | undefined
-  private readonly createRealtime: (options: RealtimeOptions) => RealtimeClient
-  private readonly webSocket: typeof globalThis.WebSocket | undefined
   private readonly now: () => number
-  private readonly selfHandle: string | undefined
 
-  private realtime: RealtimeClient | null = null
-  /** The SDK's state as last reported through its `state` event; `stopped` is set here only for a stop before any start. */
+  /** The SDK's state as last reported through its `state` event. */
   private state: SocketState = 'idle'
   private connectedAt: number | null = null
+  private bound = false
   private stopping = false
+  private readonly unbind: Array<() => void> = []
 
-  private frames = 0
-  private selfFiltered = 0
-  private wakes = 0
-  private invites = 0
+  private wakeFrames = 0
   private disconnects = 0
 
   constructor(options: IntegrationSocketOptions) {
-    this.config = options.config
     this.logger = options.logger.child({ component: 'socket' })
     this.handlers = options.handlers ?? {}
     this.metrics = options.metrics ?? createNoopMetrics()
-    this.client = options.client
-    this.createRealtime = options.createRealtime ?? ((opts) => new RealtimeClient(opts))
-    this.webSocket = options.webSocket
     this.now = options.now ?? Date.now
-    this.selfHandle = this.config.agentHandle?.replace(/^@/, '').toLowerCase()
+    const create = options.createRealtime ?? ((opts: RealtimeOptions) => new RealtimeClient(opts))
+    this.realtime = create(realtimeOptionsFor(options.config, { client: options.client, webSocket: options.webSocket }))
     this.metrics.setConnectionState(this.state)
   }
 
-  /**
-   * Open the socket. Idempotent. Resolves once the SDK has started its
-   * connect loop; a failure to resolve a WebSocket implementation is logged
-   * and left to the SDK's own retry. Never throws.
-   */
-  async start(): Promise<void> {
-    if (this.realtime || this.stopping) return
-    const realtime = this.createRealtime(realtimeOptionsFor(this.config, { client: this.client, webSocket: this.webSocket }))
-    this.realtime = realtime
-    this.bind(realtime)
-    try {
-      await realtime.connect()
-    } catch (err) {
-      this.logger.warn({ err: describe(err) }, 'socket connect failed — the SDK retries on its own schedule')
-    }
+  /** Attach the lifecycle handlers. Idempotent. The receive loop connects the client. */
+  bind(): void {
+    if (this.bound || this.stopping) return
+    this.bound = true
+    const realtime = this.realtime
+    this.unbind.push(
+      realtime.on('state', (next, prev) => this.onState(next, prev)),
+      realtime.onConnect(() => {
+        const at = this.now()
+        this.connectedAt = at
+        this.logger.info({ at: new Date(at).toISOString() }, 'connected (HELLO accepted)')
+        this.metrics.incWake({ source: 'connect' })
+        this.guard('onConnected', () => this.handlers.onConnected?.(at))
+      }),
+      realtime.onDisconnect((info) => {
+        if (this.stopping) return
+        this.disconnects += 1
+        this.connectedAt = null
+        this.metrics.incDisconnect({ code: String(info.code), initiator: info.initiator })
+        this.logger.info({ code: info.code, reason: info.reason, initiator: info.initiator }, 'socket closed — the SDK decides what follows (backoff or blocked)')
+        this.guard('onDisconnected', () => this.handlers.onDisconnected?.(info))
+      }),
+      realtime.on('blocked', (info) => {
+        if (this.stopping) return
+        // One rejected HELLO: the SDK's typed event is what counts it.
+        this.metrics.incError({ errorClass: 'auth' })
+        this.logger.warn(
+          { code: info.code, reason: info.reason, retryInMs: info.retryInMs },
+          'the server rejected the key during the handshake — the SDK retries a fresh HELLO on its own',
+        )
+        this.guard('onBlocked', () => this.handlers.onBlocked?.(info))
+      }),
+      realtime.onError((error) => {
+        if (this.stopping) return
+        if (realtime.state === 'blocked') {
+          // The SDK's one rejection notice per blocked run is emitted between
+          // its `blocked` state and the `blocked` event that carries the code
+          // and reason; the event is what the gateway reports and the metric
+          // counts, so the notice itself is a debug line here.
+          this.logger.debug({ err: error.message }, 'SDK notice while blocked')
+          return
+        }
+        this.metrics.incError({ errorClass: classifyRealtimeError(error) })
+        this.logger.debug({ err: error.message }, 'socket error')
+        this.guard('onError', () => this.handlers.onError?.(error))
+      }),
+      // The loop turns a wake frame into a cycle; here it is only labelled
+      // by its reason for the log line and the metric.
+      realtime.on('wake', (frame: WakeFrame) => {
+        this.wakeFrames += 1
+        const payload = (frame.payload ?? {}) as { reason?: unknown; conversation_id?: unknown; conversation_ids?: unknown; step?: unknown }
+        const conversations = Array.isArray(payload.conversation_ids) ? payload.conversation_ids.length : undefined
+        this.metrics.incWake({ source: wakeSourceOf(payload.reason) })
+        this.logger.info(
+          {
+            reason: payload.reason,
+            step: payload.step,
+            ...(typeof payload.conversation_id === 'string' ? { conversationId: payload.conversation_id } : {}),
+            ...(conversations !== undefined ? { conversations } : {}),
+          },
+          'wake — server wake frame',
+        )
+      }),
+    )
   }
 
-  /** Close the socket for good; a stopped socket does not reconnect. Idempotent. */
-  async stop(): Promise<void> {
+  /** The loop has disconnected the client (or never started it): report `stopped`, detach. Idempotent. */
+  stopped(): void {
     this.stopping = true
-    const realtime = this.realtime
-    this.realtime = null
     this.connectedAt = null
-    if (realtime) {
+    for (const off of this.unbind.splice(0)) {
       try {
-        // `disconnect()` is the SDK's only way into `stopped`; its state event
-        // carries the transition to the gateway like every other.
-        realtime.disconnect()
-      } catch (err) {
-        this.logger.warn({ err: describe(err) }, 'socket disconnect threw — continuing')
+        off()
+      } catch {
+        // already detached
       }
     }
     if (this.state !== 'stopped') this.onState('stopped', this.state)
   }
 
   getHealth(): SocketHealth {
-    return {
-      state: this.state,
-      connectedAt: this.connectedAt,
-      counters: { frames: this.frames, selfFiltered: this.selfFiltered, wakes: this.wakes, invites: this.invites, disconnects: this.disconnects },
-    }
-  }
-
-  // ─── Internals ─────────────────────────────────────────────────────
-
-  private bind(realtime: RealtimeClient): void {
-    realtime.on('state', (next, prev) => this.onState(next, prev))
-
-    realtime.onConnect(() => {
-      const at = this.now()
-      this.connectedAt = at
-      this.logger.info({ at: new Date(at).toISOString() }, 'connected (HELLO accepted)')
-      this.guard('onConnected', () => this.handlers.onConnected?.(at))
-      // Whatever landed while the socket was down is on the tray now; the
-      // connect itself is the wake that covers the gap.
-      this.wake('connect', {})
-    })
-
-    realtime.onDisconnect((info) => {
-      if (this.stopping) return
-      this.disconnects += 1
-      this.connectedAt = null
-      this.metrics.incDisconnect({ code: String(info.code), initiator: info.initiator })
-      this.logger.info({ code: info.code, reason: info.reason, initiator: info.initiator }, 'socket closed — the SDK decides what follows (backoff or blocked)')
-      this.guard('onDisconnected', () => this.handlers.onDisconnected?.(info))
-    })
-
-    realtime.on('blocked', (info) => {
-      if (this.stopping) return
-      // One rejected HELLO: the SDK's typed event is what counts it.
-      this.metrics.incError({ errorClass: 'auth' })
-      this.logger.warn(
-        { code: info.code, reason: info.reason, retryInMs: info.retryInMs },
-        'the server rejected the key during the handshake — the SDK retries a fresh HELLO on its own',
-      )
-      this.guard('onBlocked', () => this.handlers.onBlocked?.(info))
-    })
-
-    realtime.onError((error) => {
-      if (this.stopping) return
-      if (realtime.state === 'blocked') {
-        // The SDK's one rejection notice per blocked run is emitted between
-        // its `blocked` state and the `blocked` event that carries the code
-        // and reason; the event is what the gateway reports and the metric
-        // counts, so the notice itself is a debug line here, not a second
-        // signal for the same rejection.
-        this.logger.debug({ err: error.message }, 'SDK notice while blocked')
-        return
-      }
-      this.metrics.incError({ errorClass: classifyRealtimeError(error) })
-      this.logger.debug({ err: error.message }, 'socket error')
-      this.guard('onError', () => this.handlers.onError?.(error))
-    })
-
-    realtime.on('message.new', (message) => this.onMessageNew(message))
-    realtime.on('wake', (frame) => this.onWakeFrame(frame))
-    realtime.on('group.invite.received', (message) => this.onInvite(message))
-  }
-
-  private onMessageNew(message: WsMessage): void {
-    this.frames += 1
-    const payload = message.payload ?? {}
-    const senderRaw = payload.sender ?? payload.from ?? ''
-    const sender = typeof senderRaw === 'string' ? senderRaw.replace(/^@/, '').toLowerCase() : ''
-    const detail: WakeDetail = {
-      ...(typeof payload.conversation_id === 'string' ? { conversationId: payload.conversation_id } : {}),
-      ...(typeof payload.id === 'string' ? { messageId: payload.id } : {}),
-      ...(sender ? { from: sender } : {}),
-    }
-    if (this.selfHandle && sender === this.selfHandle) {
-      // Server-side fan-out echoes our own sends back; our own words never wake us.
-      this.selfFiltered += 1
-      this.logger.debug(detail, 'own echo — not a wake')
-      return
-    }
-    this.logger.debug(detail, 'wake — message.new')
-    this.wake('message', detail)
-  }
-
-  private onWakeFrame(frame: WakeFrame): void {
-    this.frames += 1
-    const payload = (frame.payload ?? {}) as { reason?: unknown; conversation_id?: unknown; conversation_ids?: unknown; step?: unknown }
-    const detail: WakeDetail = typeof payload.conversation_id === 'string' ? { conversationId: payload.conversation_id } : {}
-    const conversations = Array.isArray(payload.conversation_ids) ? payload.conversation_ids.length : undefined
-    this.logger.info({ ...detail, reason: payload.reason, step: payload.step, ...(conversations !== undefined ? { conversations } : {}) }, 'wake — server wake frame')
-    this.wake(wakeSourceOf(payload.reason), detail)
-  }
-
-  private onInvite(message: WsMessage): void {
-    this.frames += 1
-    this.invites += 1
-    // Only the ids for the log line; the invite itself is read from the tray.
-    const payload = (message.payload ?? {}) as { id?: unknown; group_id?: unknown }
-    this.logger.debug({ inviteId: payload.id, groupId: payload.group_id }, 'wake — group.invite.received')
-    this.wake('invite', {})
-  }
-
-  private wake(source: WakeSource, detail: WakeDetail): void {
-    this.wakes += 1
-    this.metrics.incWake({ source })
-    this.guard('onWake', () => this.handlers.onWake?.(source, detail))
+    return { state: this.state, connectedAt: this.connectedAt, counters: { wakeFrames: this.wakeFrames, disconnects: this.disconnects } }
   }
 
   /** The SDK's state transition, mirrored for the health probe and the gauge, then handed on. */
   private onState(next: SocketState, prev: SocketState): void {
+    if (this.state === next) return
     this.state = next
     this.metrics.setConnectionState(next)
     this.logger.debug({ from: prev, to: next }, 'socket state')
     this.guard('onStateChanged', () => this.handlers.onStateChanged?.(next, prev))
   }
 
-  /** A failing handler never takes the socket down; the next frame wakes again and the tray keeps the cards. */
+  /** A failing handler never takes the socket down. */
   private guard(name: string, fn: () => void): void {
     try {
       fn()

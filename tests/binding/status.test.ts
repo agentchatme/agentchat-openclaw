@@ -20,7 +20,7 @@ import { probeHostedMcp } from '../../src/integration/mcp.js'
 import { registerIntegration, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
 import { createInMemoryMetrics } from '../../src/metrics.js'
 import type { IntegrationSocket, SocketState } from '../../src/integration/socket.js'
-import type { TextsStore } from '../../src/integration/texts.js'
+import type { OpenClawTexts } from '../../src/integration/texts.js'
 import { IDENTITY_LINE } from '../helpers/texts.js'
 
 const KEY = 'ac_live_' + 's'.repeat(24)
@@ -46,13 +46,25 @@ function account(cfg: object) {
 
 function stubSocket(state: SocketState): IntegrationSocket {
   return {
-    async start() {},
-    async stop() {},
-    getHealth: () => ({ state, connectedAt: null, counters: { frames: 0, selfFiltered: 0, wakes: 3, invites: 0, disconnects: 0 } }),
+    realtime: { disconnect() {} },
+    bind() {},
+    stopped() {},
+    getHealth: () => ({ state, connectedAt: null, counters: { wakeFrames: 0, disconnects: 0 } }),
   } as unknown as IntegrationSocket
 }
 
 const silent = { trace() {}, debug() {}, info() {}, warn() {}, error() {}, child() { return this } } as never
+
+/** A receive loop as the status probe reads it: its `status()` counters. */
+function loopWith(c: { wakes: number; cycles: number; turns: number }): never {
+  return {
+    loop: {
+      start: async () => undefined,
+      status: () => ({ coalescer: { wakes: c.wakes, cycles: c.cycles }, counters: { turnsStarted: c.turns, inviteTurnsStarted: 0, runsStarted: 0 } }),
+    },
+    stop: async () => undefined,
+  } as never
+}
 
 describe('status adapter — the doctor-style probe', () => {
   let workspace: string
@@ -115,7 +127,7 @@ describe('status adapter — the doctor-style probe', () => {
       config: account({}).config as never,
       logger: silent,
       createSocket: () => stubSocket('ready'),
-      build: () => ({ invoker: { counters: () => ({ wakes: 3, cycles: 2, turns: 1 }), stop() {} } as never, texts: { source: 'cache', stop() {} } as unknown as TextsStore, handlers: {} }),
+      build: () => ({ loop: loopWith({ wakes: 3, cycles: 2, turns: 1 }), texts: { source: 'cache' } as unknown as OpenClawTexts, handlers: {} }),
     })
     const cfg = { agents: { defaults: { workspace } } }
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account(cfg) as never, timeoutMs: 2000, cfg: cfg as never } as never)
@@ -139,7 +151,7 @@ describe('status adapter — the doctor-style probe', () => {
       logger: silent,
       createSocket: () => stubSocket('ready'),
       socketOptions: { metrics },
-      build: () => ({ invoker: { counters: () => ({ wakes: 3, cycles: 1, turns: 0 }), stop() {} } as never, texts: { source: 'server', stop() {} } as unknown as TextsStore, handlers: {} }),
+      build: () => ({ loop: loopWith({ wakes: 3, cycles: 1, turns: 0 }), texts: { source: 'server' } as unknown as OpenClawTexts, handlers: {} }),
     })
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
     expect(probe.integration?.socket).toEqual({ state: 'ready', wakes: { connect: 1, message: 2 }, disconnects: { '4000/client': 1 }, errors: { transport: 1 } })
@@ -156,7 +168,7 @@ describe('status adapter — the doctor-style probe', () => {
       config: account({}).config as never,
       logger: silent,
       createSocket: () => stubSocket('blocked'),
-      build: () => ({ invoker: null, texts: { source: null, stop() {} } as unknown as TextsStore, handlers: {} }),
+      build: () => ({ loop: null, texts: { source: 'none' } as unknown as OpenClawTexts, handlers: {} }),
     })
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
     expect(probe.integration).toEqual({ mode: 'on', state: 'blocked', texts: 'missing' })

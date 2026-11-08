@@ -1,6 +1,6 @@
 /**
  * Counters for the integration: the socket's state, its closes and the
- * notices the SDK surfaces, and the wakes handed to the invoker. The
+ * notices the SDK surfaces, and the wakes the receive loop acts on. The
  * integration sends nothing, so there are no outbound metrics.
  *
  * Where they can be read. OpenClaw gives a plugin no Prometheus registry:
@@ -41,7 +41,7 @@ export interface MetricsRecorder {
   incError(labels: { errorClass: string }): void
   /** Set the current connection state (cardinality bounded by state kinds). */
   setConnectionState(kind: string): void
-  /** Incremented on every wake handed to the invoker (message frames, connects, server wake frames, the ladder's retries). */
+  /** Incremented on every wake: peer message frames, connects, server wake frames (by reason), invite frames. */
   incWake(labels: { source: string }): void
   /** The counters so far, when the recorder keeps them (the in-memory one does; a prom-client registry is read by scraping). */
   snapshot?(): MetricsSnapshot

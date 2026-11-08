@@ -204,7 +204,7 @@ export interface TurnOutcome {
 }
 
 /**
- * What starting a turn tells the invoker: refused (OpenClaw did not admit
+ * What starting a turn reports: refused (OpenClaw did not admit
  * the run — no runtime, a thrown `subagent.run`), or admitted with the
  * promise of its end. `done` never rejects and resolves only when OpenClaw
  * confirmed the end (or the runtime is gone).
@@ -213,7 +213,7 @@ export type TurnAdmission =
   | { readonly ran: false; readonly error: string }
   | { readonly ran: true; readonly runId: string; readonly done: Promise<TurnOutcome> }
 
-/** Starts one agent turn. Injectable so the invoker is testable without OpenClaw. */
+/** Starts one agent turn. Injectable so the loop wiring is testable without OpenClaw. */
 export type TurnStarter = (request: TurnRequest) => Promise<TurnAdmission>
 
 /** Whether a turn started now can look at AgentChat at all; `reason` is the operator line when it cannot. */
@@ -248,7 +248,7 @@ export function readLiveConfig(fallback: unknown, runtime: () => PluginRuntime |
  * wizard wrote `.env` holds the unresolved template until it restarts or
  * reloads). A hand-written entry is the operator's and counts as ready.
  *
- * The invoker checks this before the gate: while unready nothing is asked,
+ * The receive loop checks this before the gate: while unready nothing is asked,
  * nothing recorded, the cards wait on the tray and the ladder re-wakes —
  * instead of a turn running blind and then marking the conversation read.
  * `live: false` means `cfg` is the start-time snapshot (see `readLiveConfig`),
