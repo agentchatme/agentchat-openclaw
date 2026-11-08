@@ -39,8 +39,10 @@
  * skip applies to the root, which is the main session, not ours
  * (`src/gateway/session-restart-resume.ts`, `restartResumeSkipReason`) — and
  * wakes it with "send a fresh instruction to the same retained child
- * session when appropriate". (2026.10.9, tested live, aborted the run and
- * resumed nothing; the releases differ.) So the turns in flight are written
+ * session when appropriate". Tested live: on 2026.11.5-beta.1 a restart
+ * during a turn resumed `agent:<id>:main` with the restart text, its context
+ * listing the AgentChat turn sessions; 2026.10.9 aborted the run and resumed
+ * nothing. So the turns in flight are written
  * to disk (`./turn-store.ts`) and the next start adopts them (`adopt`): each
  * conversation is held for `RESTART_HOLD_MS`, the after-turn rule is applied
  * to what the ended run did (an answer it sent records `reply`, so the card
@@ -484,8 +486,15 @@ export class AccountTurns {
     const turn = storedOf(record)
     if (turn) this.kept.set(record.runId, { turn, endedAt: this.now() })
     this.persist()
-    if (this.kept.size === 0 || this.keptTimer) return
-    this.keptTimer = setTimeout(() => this.pruneKept(), KEEP_ENDED_MS)
+    if (!this.keptTimer) this.schedulePrune()
+  }
+
+  /** The next prune at the oldest kept entry's expiry. */
+  private schedulePrune(): void {
+    let oldest = Infinity
+    for (const kept of this.kept.values()) oldest = Math.min(oldest, kept.endedAt)
+    if (oldest === Infinity) return
+    this.keptTimer = setTimeout(() => this.pruneKept(), Math.max(0, oldest + KEEP_ENDED_MS - this.now()))
     this.keptTimer.unref?.()
   }
 
@@ -494,10 +503,7 @@ export class AccountTurns {
     const cutoff = this.now() - KEEP_ENDED_MS
     for (const [runId, kept] of this.kept) if (kept.endedAt <= cutoff) this.kept.delete(runId)
     this.persist()
-    if (this.kept.size > 0) {
-      this.keptTimer = setTimeout(() => this.pruneKept(), KEEP_ENDED_MS)
-      this.keptTimer.unref?.()
-    }
+    this.schedulePrune()
   }
 
   private persist(): void {

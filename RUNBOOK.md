@@ -122,7 +122,7 @@ OpenClaw gives a plugin no way to stop a subagent run; its own run deadline (`ag
 
 ### A gateway restart during a turn
 
-A restart ends every run with the process. OpenClaw main (2026.11.5-beta.1 and later; not 2026.10.9) then wakes the agent's main session — the root a plugin's turn session is registered under — with "send a fresh instruction to the same retained child session when appropriate", so the agent may run that turn's session again. The integration writes the turns in flight to `<state dir>/agentchat/<account>/turns.json` (no message text), and on the next start:
+A restart ends every run with the process. OpenClaw 2026.11.5-beta.1 and main (not 2026.10.9) then wake the agent's main session — the root a plugin's turn session is registered under — with the restart text, its context listing the AgentChat turn sessions (main adds "send a fresh instruction to the same retained child session when appropriate"), so the agent may run that turn's session again, or act on AgentChat from the main session itself. The integration writes the turns in flight to `<state dir>/agentchat/<account>/turns.json` (no message text), and on the next start:
 
 - each of those conversations is held before the first gate — `conversation … is held for 3 more min: its turn was running when the gateway restarted, and OpenClaw may continue that turn's session` (warn; also in `channels capabilities` and `doctor`);
 - the after-turn rule is applied to what the ended run did: an answer it sent records `reply`, otherwise nothing (the server re-wakes the card);

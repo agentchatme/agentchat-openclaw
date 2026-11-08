@@ -19,8 +19,12 @@ describe('runEndOf — a wait timeout is not an end', () => {
     expect(runEndOf(null, QUICK)).toEqual({ ended: false })
   })
 
+  it('OpenClaw main: a wait that elapses comes back bare ({ runId, status: timeout }, no snapshot) after the whole wait — not an end', () => {
+    expect(runEndOf({ runId: 'r', status: 'timeout' } as never, FULL)).toEqual({ ended: false })
+  })
+
   describe('with the wait metadata (OpenClaw ≥ 2026.10): OpenClaw’s own rule', () => {
-    it('a bare elapsed wait is not an end, however fast it came back (an elapsed wait only reports queue or gateway_draining)', () => {
+    it('a queued run and a lifecycle reset are not ends, however fast they came back', () => {
       expect(runEndOf({ status: 'timeout', timeoutPhase: 'queue' }, QUICK)).toEqual({ ended: false })
       expect(runEndOf({ status: 'timeout', timeoutPhase: 'queue', providerStarted: false }, FULL)).toEqual({ ended: false })
       expect(runEndOf({ status: 'timeout', timeoutPhase: 'gateway_draining' }, FULL)).toEqual({ ended: false })
@@ -106,7 +110,7 @@ describe('watchRunUntilEnded', () => {
     expect(slept).toEqual([1_000, 1_000])
   })
 
-  it('a run the gateway does not know is answered like an elapsed wait (timeout, queue): it is not an end — the account hands it off later', async () => {
+  it('a run the gateway does not know is answered like an elapsed wait: it is not an end — the account hands it off later', async () => {
     let clock = 0
     const fake = runtimeAnswering([{ status: 'timeout', timeoutPhase: 'queue', providerStarted: false }, { status: 'timeout', timeoutPhase: 'queue', providerStarted: false }, { status: 'ok' }])
     const still: number[] = []

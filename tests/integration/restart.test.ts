@@ -99,6 +99,24 @@ describe('what is written while turns run', () => {
     expect(store.load()).toEqual([])
   })
 
+  it('each ended entry leaves at its own expiry, not a window later', async () => {
+    vi.useFakeTimers()
+    const store = new TurnStore('default', dir)
+    const turns = new AccountTurns()
+    turns.configure({ store })
+    for (const [runId, id] of [['run_1', 'conv_a'], ['run_2', 'conv_b']] as const) {
+      turns.tracker.begin({ kind: 'reply', conversationId: id, anchor: `msg_${id}` })
+      turns.started(reply(runId, id))
+    }
+    await turns.ended('run_1', { status: 'completed', agentchatCalls: null })
+    vi.advanceTimersByTime(KEEP_ENDED_MS / 2)
+    await turns.ended('run_2', { status: 'completed', agentchatCalls: null })
+    vi.advanceTimersByTime(KEEP_ENDED_MS / 2)
+    expect(store.load().map((t) => t.runId)).toEqual(['run_2'])
+    vi.advanceTimersByTime(KEEP_ENDED_MS / 2)
+    expect(store.load()).toEqual([])
+  })
+
   it('a turn let go of, and a gate-off run, are not written', () => {
     const store = new TurnStore('default', dir)
     const turns = new AccountTurns({ now: () => 40 * 60_000 })
