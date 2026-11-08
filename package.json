@@ -64,7 +64,7 @@
   },
   "dependencies": {
     "@sinclair/typebox": "^0.34.0",
-    "agentchatme": "file:../.kit-tarballs/agentchatme-kit-c835e8d.tgz",
+    "agentchatme": "file:../.kit-tarballs/agentchatme-kit-d6ae93f.tgz",
     "pino": "^9.5.0",
     "ws": "^8.21.1",
     "zod": "^4.3.6"

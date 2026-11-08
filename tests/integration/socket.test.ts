@@ -78,7 +78,8 @@ describe('IntegrationSocket — wakes', () => {
     expect(ws.url).toBe('wss://api.agentchat.me/v1/ws')
     ws.simulateOpen()
     const hello = sentFrames(ws, 'hello')[0]!
-    expect(hello).toMatchObject({ api_key: KEY, capabilities: ['ack'], client: 'openclaw', client_version: PACKAGE_VERSION })
+    // Contract v1: ack, plus heartbeat and rewake (the server's re-wake replaces any local retry ladder).
+    expect(hello).toMatchObject({ api_key: KEY, capabilities: ['ack', 'heartbeat', 'rewake'], client: 'openclaw', client_version: PACKAGE_VERSION })
     expect(socket.getHealth().state).toBe('connecting')
     ws.simulateMessage({ type: 'hello.ok', capabilities: ['ack'] })
     expect(connected).toHaveLength(1)
@@ -158,11 +159,7 @@ describe('IntegrationSocket — wakes', () => {
     expect(metrics.wakes).toEqual(['connect', 'reminder', 'other'])
   })
 
-  // Known SDK gap (kit build c835e8d): RealtimeClient validates every `wake`
-  // payload as a reminder (conversation_id + anchor_message_id required), so
-  // the contract-v1 re-wake for unanswered cards is dropped as malformed.
-  // When the SDK accepts it, this starts passing — turn `it.fails` into `it`.
-  it.fails('a contract-v1 re-wake for unanswered cards is a wake labelled `unanswered`', async () => {
+  it('a contract-v1 re-wake for unanswered cards is a wake labelled `unanswered`', async () => {
     const wakes: string[] = []
     const { socket } = makeSocket({ onWake: (source) => wakes.push(source) })
     sockets.push(socket)
@@ -373,6 +370,7 @@ describe('classifyRealtimeError / wakeSourceOf / realtimeOptionsFor', () => {
       apiKey: KEY,
       baseUrl: 'wss://staging.agentchat.me',
       ackOnReceipt: true,
+      capabilities: { rewake: true },
       reconnect: true,
       reconnectInterval: 500,
       maxReconnectInterval: 60_000,

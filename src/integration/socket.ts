@@ -23,6 +23,10 @@
  *   - `group.invite.received`    → `onWake('invite')` — the invite itself is
  *                                   read from the tray (tray v1), like a card.
  *
+ * HELLO offers `ack`, `heartbeat` and `rewake`: while cards stay unanswered
+ * the server re-wakes this socket on its own durable ladder, so a cycle
+ * that could not finish needs no local retry.
+ *
  * `ackOnReceipt: true`: the SDK acknowledges every `message.new` the moment
  * the frame is parsed, before any handler runs — delivered means this
  * machine received it. Whether the agent looked is read state, recorded by
@@ -141,6 +145,10 @@ export function realtimeOptionsFor(config: AgentchatChannelConfig, extra: Pick<I
     baseUrl: config.apiBase.replace(/^http/, 'ws').replace(/\/+$/, ''),
     clientIdentity: AGENTCHAT_CLIENT_IDENTITY,
     ackOnReceipt: true,
+    // `rewake`: the server re-wakes this socket while cards stay unanswered
+    // (contract v1, D3) — the integration keeps no retry ladder of its own.
+    // `heartbeat` is offered by default (the idle watchdog's proof of life).
+    capabilities: { rewake: true },
     reconnect: true,
     reconnectInterval: config.reconnect.initialBackoffMs,
     maxReconnectInterval: config.reconnect.maxBackoffMs,
