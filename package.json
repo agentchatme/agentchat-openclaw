@@ -51,7 +51,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "test:smoke": "vitest run tests/smoke.live.test.ts",
+    "test:smoke": "AGENTCHAT_TEST_ALLOW_NETWORK=1 vitest run tests/smoke.live.test.ts",
     "test:install-source": "node scripts/verify-source-installs.mjs",
     "lint": "echo 'no lint configured yet'",
     "prepare": "node scripts/prepare.mjs",
