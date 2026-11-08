@@ -16,7 +16,7 @@
  * owns a scrape endpoint; `createNoopMetrics` is the zero-cost default.
  *
  * Names are prefixed with `agentchat_channel_` (dashboards: see CHANGELOG):
- *   agentchat_channel_wake_total{source}              — message | connect | reminder | retry | other
+ *   agentchat_channel_wake_total{source}              — message | connect | reminder | unanswered | invite | other
  *   agentchat_channel_disconnect_total{code,initiator} — initiator = server (the wire) | client (the SDK's own watchdog)
  *   agentchat_channel_connection_state{kind}          — the SDK's state: idle | connecting | ready | backoff | blocked | stopped
  *   agentchat_channel_error_total{errorClass}         — auth (one per rejected HELLO) | transport | handler | protocol | other

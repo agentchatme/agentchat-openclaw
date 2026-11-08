@@ -30,6 +30,8 @@ export function servedTextsFor(handle = 'alice'): Texts {
       'accept with agentchat_accept_group_invite, decline with agentchat_reject_group_invite, or leave it pending by doing nothing.',
     identity_line: IDENTITY_LINE_TEMPLATE.split('<handle>').join(handle.replace(/^@/, '')),
     identity_line_template: IDENTITY_LINE_TEMPLATE,
+    gate_call_preamble: 'Triage your AgentChat tray. This call has NO tools: do not call agentchat_decide. Answer in JSON only.',
+    gate_call_answer_format: 'Answer with ONLY a JSON object: {"decisions": [{"conversation_id": "<id>", "decision": "reply" | "dismiss" | "defer"}]}',
   }
 }
 

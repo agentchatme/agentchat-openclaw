@@ -1,97 +1,65 @@
 /**
- * Wake → gate → turn. The only path from the socket to the agent.
+ * Wake → tray → gate → one turn per reply → what actually happened.
+ * The only path from the socket to the agent (gate-call mode, contract v1).
  *
  * What happens on a wake
  * ──────────────────────
- * 1. **Coalesce.** Frames inside a short window become one wake
- *    (`WakeCoalescer`). A group waking up is one cycle, not twenty.
- * 2. **Read the tray.** `client.inbox.tray()` — the server's briefing cards
- *    and its gate question, as it built them.
- * 3. **Gate.** The SDK's gate helper renders the question and the cards,
- *    asks the agent's own model (`callModel`, a tool-free completion through
- *    `runtime.llm.complete`) and records `dismiss` / `defer` with the card's
- *    anchor. `reply` comes back as entries the invoker records itself.
- * 4. **Turn.** For every conversation decided `reply`, start ONE OpenClaw
- *    agent turn (`runtime.subagent.run`, `deliver: false`) with the served
- *    wake instruction and the conversation id. The `reply` verdict is
- *    recorded when the run has COMPLETED (`status: ok`) — never at its
- *    start: recorded at admission it marked the conversation read before
- *    the turn's own inbox call, which then waited on an empty tray, and a
- *    turn that crashed left the peer with a read receipt and no answer. A
- *    completed turn counts as read even if it chose not to send — unless
- *    the turn recorded a verdict for its conversation itself (the served
- *    texts tell the model to record `reply` after its send, or `dismiss`
- *    when it read and chose not to answer). One tray read after the run
- *    shows that: the card left the tray (read, or hidden by a defer) or its
- *    `your_last_decision` moved since the gate's tray. The host then
- *    records nothing more, so the agent's own last verdict stands and a
- *    reply is counted once. A failed read, or a card that may sit past a
- *    truncated tray, records `reply` as before (reading is forward-only). A turn
- *    OpenClaw refuses, or one that ends in error or on its own run deadline,
- *    records nothing: the conversation stays unread, the card stays on the
- *    tray, and the ladder re-wakes so it is gated again (one more gate
- *    call, no silent drop). The turn's final text is discarded — nothing is
- *    auto-routed anywhere.
+ * 1. **Coalesce.** Frames inside a short window become one cycle (the kit's
+ *    `WakeCoalescer`); a wake during a cycle earns exactly one more.
+ * 2. **Read the tray.** `client.inbox.tray()` — the server's cards, its gate
+ *    question, and the pending group invites (tray v1).
+ * 3. **Leave running turns alone.** A card or invite whose turn is still
+ *    running is that turn's: it is not gated again, so no second turn can
+ *    answer the same message. A turn runs until OpenClaw confirms its run
+ *    ended (`./run.ts`) — a wait that elapsed is not an end.
+ * 4. **Gate.** The kit's gate renders the served gate-call texts, the
+ *    question and the cards, asks the agent's own model (`callModel`, a
+ *    tool-free completion), and records `dismiss` / `defer` at once.
+ * 5. **Turn.** For every `reply`, one OpenClaw run with the served wake
+ *    instruction and the conversation id. For every pending invite, one run
+ *    with the served invite prompt. The cycle does not wait for the runs:
+ *    OpenClaw's lane serializes them.
+ * 6. **After the run ends,** the host records from what happened, never from
+ *    the runtime's "turn ok" (D5, the kit's `turnOutcome`): a fresh tray read
+ *    shows whether the turn recorded its own verdict, whether the answer
+ *    went out (then `reply` is recorded through the anchor the gate saw), or
+ *    whether it looked and did nothing (the second time for the same anchor
+ *    is a `dismiss`). The run's AgentChat calls, counted from its transcript,
+ *    tell a turn that could not look from one that chose silence. Invites
+ *    follow the same rule (`inviteOutcome`).
  *
- * One cycle at a time per account: a wake that lands while a cycle runs is
- * remembered and runs once the cycle ends (the tray is re-read, so whatever
- * the earlier wake announced is covered). A cycle ends when its turns are
- * ADMITTED, not when they finish: OpenClaw serializes the turns on the
- * account's lane (`integrationLane`), so the next cycle's turn simply queues
- * behind, and holding the wake loop for up to 15 minutes per turn would only
- * delay the next tray read. Completion is logged as it happens. A cycle
- * that could not complete — model unreachable, server error, turn refused —
- * re-wakes itself on a local ladder (1 m, 5 m, 30 m) because a connected
- * socket gets no re-wake from the server; the cards wait on the tray
- * meanwhile. One outage climbs the ladder one rung: a retry already on its
- * way is never replaced by a later one.
- *
- * Group invites are a second wake kind: not on the tray, not gated, one turn
- * each with the served invite prompt, serialized on the same worker. An
- * invite whose turn OpenClaw refused stays pending and is tried again on the
- * next wake; one that started is remembered on disk (`InviteLedger`) so a
- * restart never offers it twice.
+ * No retry ladder lives here. A cycle that could not finish (tray unread,
+ * model unreachable, texts missing, tools not ready) records nothing and
+ * leaves the cards on the tray; the server re-wakes unanswered cards on its
+ * own durable ladder (D3). A truncated tray, and cards skipped while a turn
+ * ran, earn one more cycle.
  */
 
-import { gate, type AgentChatClient, type GateReply, type InboxTray, type Texts } from 'agentchatme'
+import { gate, integration, type AgentChatClient, type GateReply, type InboxTray, type Texts, type TrayInvite } from 'agentchatme'
 
 import type { Logger } from '../log.js'
 import type { MetricsRecorder } from '../metrics.js'
 import { createNoopMetrics } from '../metrics.js'
-import { WakeCoalescer, DEFAULT_DEBOUNCE_MS } from './wake.js'
-import type { GateModelCall, TurnStarter, TurnOutcome, TurnAdmission, TurnReadiness } from './model.js'
-import type { GroupInvite } from './invites.js'
-import { OPENCLAW_TOOL_NAMER, integrationLane, inviteSessionKey, inviteTurnPrompt, wakeSessionKey, wakeTurnPrompt } from './turn.js'
-
-/**
- * Local re-wake ladder after a cycle that could not complete. Mirrors the
- * server's webhook ladder (1 m, 5 m, 30 m) — a connected socket never gets
- * that re-wake, so the integration carries it. After the last rung the cycle
- * waits for the next wake; the cards are still on the tray.
- */
-export const RETRY_LADDER_MS: readonly number[] = [60_000, 300_000, 1_800_000]
+import type { GateModelCall, TurnStarter, TurnOutcome as RunOutcome, TurnAdmission, TurnReadiness } from './model.js'
+import { RunningTurns, conversationKey, inviteKey, UNGATED_KEY, type RunningKind } from './running.js'
+import { OPENCLAW_TOOL_NAMER, integrationLane, inviteSessionKey, wakeSessionKey, wakeTurnPrompt, inviteTurnPrompt } from './turn.js'
 
 /**
  * Where a wake came from — a closed set, because it is a metric label:
- * `message` (a peer wrote), `connect` (an accepted HELLO), `reminder` (the
- * server's wake frame for a deferred conversation), `retry` (the local
- * ladder), `other` (a server wake with a reason this version does not know).
+ * `message` (a peer wrote), `connect` (an accepted HELLO), `reminder` (a
+ * deferred conversation came due), `unanswered` (the server's re-wake for
+ * cards still waiting), `invite` (a group invite arrived), `other` (a server
+ * wake with a reason this version does not know).
  */
-export type WakeSource = 'message' | 'connect' | 'reminder' | 'retry' | 'other'
+export type WakeSource = 'message' | 'connect' | 'reminder' | 'unanswered' | 'invite' | 'other'
 
-/** The two SDK resources a cycle uses; `AgentChatClient` satisfies it. */
-export type InvokerClient = Pick<AgentChatClient, 'inbox' | 'decisions'>
+/** The SDK resources a cycle uses; `AgentChatClient` satisfies it. */
+export type InvokerClient = Pick<AgentChatClient, 'inbox' | 'decisions' | 'groups'>
 
 /** The served texts as the invoker sees them: the current copy, or one attempt to get it. */
 export interface TextsSource {
   readonly current: Texts | null
   ensure(): Promise<Texts | null>
-}
-
-/** Which invites already got their turn (persisted across restarts). */
-export interface InviteStore {
-  isOffered(inviteId: string): boolean
-  markOffered(inviteId: string): void
 }
 
 export interface AgentInvokerOptions {
@@ -101,42 +69,41 @@ export interface AgentInvokerOptions {
   readonly callModel: GateModelCall
   readonly startTurn: TurnStarter
   readonly texts: TextsSource
-  readonly invites: InviteStore
   readonly logger: Logger
-  /** Counts the ladder's re-wakes (`agentchat_channel_wake_total{source="retry"}`). The socket counts the others. */
+  /** The account's running turns; shared with any later invoker for the same account (`runningTurnsFor`). */
+  readonly running?: RunningTurns
   readonly metrics?: MetricsRecorder
   /**
    * Whether a turn started now can have the hosted tools (`turnReadiness`).
-   * Checked before the gate: while unready nothing is gated — the cards
-   * stay on the tray, no model call is spent, no turn starts — and the
-   * ladder re-wakes. Default: always ready.
+   * Checked before the gate: while unready nothing is gated, no model call
+   * is spent, no turn starts. Default: always ready.
    */
   readonly readiness?: () => TurnReadiness
-  /** `false`: no gate step — one turn per cycle with the served wake instruction; the agent judges in-turn. */
+  /** `false`: no gate step — one turn per cycle with the served wake instruction; the agent judges in-turn and records its own verdicts. */
   readonly gateEnabled?: boolean
-  readonly debounceMs?: number
-  readonly retryLadderMs?: readonly number[]
+  readonly quietMs?: number
+  readonly maxMs?: number
   readonly now?: () => number
-  readonly setTimeout?: (fn: () => void, ms: number) => NodeJS.Timeout
-  readonly clearTimeout?: (handle: NodeJS.Timeout) => void
+  readonly setTimeout?: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>
+  readonly clearTimeout?: (handle: ReturnType<typeof setTimeout>) => void
 }
 
 export interface InvokerCounters {
   readonly cycles: number
   readonly turns: number
   readonly inviteTurns: number
-  /** Turns admitted whose run has not ended yet (OpenClaw's lane serializes them). */
+  /** Runs this account started that OpenClaw has not reported ended (any invoker). */
   readonly turnsInFlight: number
   readonly wakes: number
   readonly absorbed: number
-  readonly retryRung: number
-  readonly pendingInvites: number
+  /** What the host recorded after turns ended, by D5 reason. */
+  readonly outcomes: Readonly<Record<string, number>>
 }
 
 export type CycleOutcome =
-  /** The tray had no cards. */
+  /** Nothing new to decide: no cards, no invites (or only those with a turn running). */
   | 'empty'
-  /** The gate decided; turns were started for the replies. */
+  /** The gate decided; turns were started for the replies and invites. */
   | 'decided'
   /** The model failed or answered nothing usable; nothing recorded, no turn. */
   | 'fail_closed'
@@ -152,23 +119,28 @@ export type CycleOutcome =
 export interface CycleResult {
   readonly outcome: CycleOutcome
   readonly cards: number
+  readonly invites: number
   readonly reply: number
   readonly dismiss: number
   readonly defer: number
   readonly undecided: number
-  /** `dismiss` / `defer` the server took in this cycle. `reply` verdicts are recorded as their turns complete, after the cycle. */
+  /** `dismiss` / `defer` the server took in this cycle. */
   readonly recorded: number
   readonly recordFailures: number
   readonly turnsStarted: number
   readonly turnsRefused: number
-  /** Cards left out of this cycle because a reply turn for their conversation is still running. */
+  /** Cards and invites left out of this cycle because their turn is still running. */
   readonly skippedInFlight: number
   readonly truncated: boolean
   readonly latencyMs: number
   readonly failure: string | null
 }
 
-type RetryPlan = { readonly kind: 'armed'; readonly delayMs: number; readonly rung: number } | { readonly kind: 'pending' } | { readonly kind: 'exhausted' }
+/** Largest tray the server builds (`INBOX_TRAY_MAX_LIMIT`): the read after a turn asks for all of it. */
+const POST_TURN_TRAY_LIMIT = 50
+
+/** Silent-turn counts kept per anchor; a bound so a long-lived gateway does not grow it forever. */
+const MAX_SILENT_ENTRIES = 500
 
 export class AgentInvoker {
   private readonly accountId: string
@@ -177,37 +149,29 @@ export class AgentInvoker {
   private readonly callModel: GateModelCall
   private readonly startTurn: TurnStarter
   private readonly texts: TextsSource
-  private readonly invites: InviteStore
   private readonly logger: Logger
   private readonly metrics: MetricsRecorder
   private readonly readiness: () => TurnReadiness
   private readonly gateEnabled: boolean
-  private readonly ladder: readonly number[]
   private readonly now: () => number
-  private readonly coalescer: WakeCoalescer
+  private readonly running: RunningTurns
+  private readonly coalescer: integration.WakeCoalescer
+  private readonly unsubscribe: () => void
 
-  private cycleDue = false
-  private running: Promise<void> | null = null
   private stopped = false
-  private pendingInvites: GroupInvite[] = []
-  private invitesDirty = false
-  private retryRung = 0
-  private turnsInFlight = 0
-  /**
-   * Conversations whose reply turn is running. Their verdict is recorded
-   * only when the turn completes, so the card stays on the tray meanwhile
-   * and every wake in between would re-gate it and queue a second turn.
-   * Such cards are left out of the cycle; once the turn ends the tray is
-   * read again if any were.
-   */
-  private readonly replyTurnsInFlight = new Set<string>()
+  /** A cycle left a card or invite out because its turn was running; read the tray again when a turn ends. */
   private skippedWhileInFlight = false
   /** The reason the tools were last found unavailable; logged when it changes, not per wake. */
   private unreadyReason: string | null = null
+  /** Turns that looked and did nothing, per `conversation|anchor` or `invite:<id>` (D5: the second is a dismiss). */
+  private readonly silent = new Map<string, number>()
+  /** This invoker's own work: settled by `settled()` for tests and graceful stops. */
+  private readonly work = new Set<Promise<unknown>>()
 
   cycles = 0
   turns = 0
   inviteTurns = 0
+  private readonly outcomes: Record<string, number> = {}
 
   constructor(options: AgentInvokerOptions) {
     this.accountId = options.accountId
@@ -216,29 +180,34 @@ export class AgentInvoker {
     this.callModel = options.callModel
     this.startTurn = options.startTurn
     this.texts = options.texts
-    this.invites = options.invites
     this.logger = options.logger.child({ component: 'integration', accountId: options.accountId })
     this.metrics = options.metrics ?? createNoopMetrics()
     this.readiness = options.readiness ?? (() => ({ ready: true }))
     this.gateEnabled = options.gateEnabled ?? true
-    this.ladder = options.retryLadderMs ?? RETRY_LADDER_MS
     this.now = options.now ?? Date.now
-    this.coalescer = new WakeCoalescer({
-      onFire: () => this.onWakeFired(),
-      onDelayedWake: () => {
-        this.logger.debug({ source: 'retry' }, 'wake')
-        this.metrics.incWake({ source: 'retry' })
-      },
-      debounceMs: options.debounceMs ?? DEFAULT_DEBOUNCE_MS,
+    this.running = options.running ?? new RunningTurns()
+    this.coalescer = new integration.WakeCoalescer({
+      onCycle: () => this.track(this.runCycle()),
+      onError: (err) => this.logger.error({ err: describe(err) }, 'cycle failed with an unhandled error — the cards stay on the tray'),
+      ...(options.quietMs !== undefined ? { quietMs: options.quietMs } : {}),
+      ...(options.maxMs !== undefined ? { maxMs: options.maxMs } : {}),
       now: this.now,
       ...(options.setTimeout ? { setTimeout: options.setTimeout } : {}),
       ...(options.clearTimeout ? { clearTimeout: options.clearTimeout } : {}),
+    })
+    // A turn ending — this invoker's or one an earlier invoker for the same
+    // account started — frees its card; if a cycle skipped one, look again.
+    this.unsubscribe = this.running.onEnded(() => {
+      if (this.stopped || !this.skippedWhileInFlight) return
+      this.skippedWhileInFlight = false
+      this.logger.debug({}, 'a turn ended — re-reading the tray for the cards left out meanwhile')
+      this.coalescer.wake()
     })
   }
 
   // ─── wakes ──────────────────────────────────────────────────────────
 
-  /** A wake from the socket (a frame, a connect, a reminder) or any other source. Coalesced, then cycled. */
+  /** A wake from the socket (a frame, a connect, a server wake). Coalesced, then cycled. */
   wake(source: WakeSource): void {
     if (this.stopped) return
     this.logger.debug({ source }, 'wake')
@@ -246,94 +215,38 @@ export class AgentInvoker {
   }
 
   /**
-   * The second wake kind. An invite already offered (this process or an
-   * earlier one, per the ledger) or already pending is ignored, so an
-   * invite seen live and again on a connect-time catch-up is decided once.
-   * Returns true when newly queued.
+   * Stop starting work: no more cycles. Turns already running are not
+   * cancelled (they are OpenClaw's); their outcome is still recorded when
+   * they end, and they stay registered for the account until then.
    */
-  groupInvite(invite: GroupInvite, source: string): boolean {
-    if (this.stopped) return false
-    if (this.invites.isOffered(invite.inviteId)) return false
-    if (this.pendingInvites.some((pending) => pending.inviteId === invite.inviteId)) return false
-    this.logger.info(
-      { groupId: invite.groupId, groupName: invite.groupName, inviter: invite.inviterHandle, inviteId: invite.inviteId, source },
-      'group invite — queuing one invite turn',
-    )
-    this.pendingInvites.push(invite)
-    this.invitesDirty = true
-    this.schedule()
-    return true
-  }
-
-  /** Cancel timers; a cycle in flight finishes on its own. */
   stop(): void {
     this.stopped = true
     this.coalescer.stop()
+    this.unsubscribe()
   }
 
-  /** The promise of the work currently running, for tests and for graceful stops. */
-  settled(): Promise<void> {
-    return this.running ?? Promise.resolve()
+  /** Resolves when this invoker's running cycle and every outcome it is recording have settled. Test and shutdown seam. */
+  async settled(): Promise<void> {
+    await this.coalescer.settled()
+    while (this.work.size > 0) await Promise.allSettled([...this.work])
   }
 
   counters(): InvokerCounters {
+    const coalescer = this.coalescer.counters()
     return {
       cycles: this.cycles,
       turns: this.turns,
       inviteTurns: this.inviteTurns,
-      turnsInFlight: this.turnsInFlight,
-      wakes: this.coalescer.wakes,
-      absorbed: this.coalescer.absorbed,
-      retryRung: this.retryRung,
-      pendingInvites: this.pendingInvites.length,
-    }
-  }
-
-  // ─── worker ─────────────────────────────────────────────────────────
-
-  private onWakeFired(): void {
-    this.cycleDue = true
-    // A wake is also the moment to retry invites whose turn OpenClaw refused.
-    if (this.pendingInvites.length > 0) this.invitesDirty = true
-    this.schedule()
-  }
-
-  /** Run the worker if idle. One cycle at a time; work that lands mid-cycle runs afterwards. */
-  private schedule(): void {
-    if (this.running) return
-    this.running = this.drain().finally(() => {
-      this.running = null
-      if (!this.stopped && (this.cycleDue || this.invitesDirty)) this.schedule()
-    })
-  }
-
-  private async drain(): Promise<void> {
-    while (!this.stopped) {
-      if (this.invitesDirty) {
-        this.invitesDirty = false
-        await this.runInviteTurns()
-        continue
-      }
-      if (this.cycleDue) {
-        // Clear BEFORE the cycle: a wake landing during the cycle sets it
-        // again and earns one more cycle afterwards.
-        this.cycleDue = false
-        try {
-          await this.runCycle()
-        } catch (err) {
-          // Whatever escaped the cycle must not kill the worker. Re-wake on
-          // the ladder so the tray is read again.
-          this.logger.error({ err: describe(err), ...this.retry() }, 'cycle failed with an unhandled error — re-waking later')
-        }
-        continue
-      }
-      return
+      turnsInFlight: this.running.size,
+      wakes: coalescer.wakes,
+      absorbed: coalescer.absorbed,
+      outcomes: { ...this.outcomes },
     }
   }
 
   // ─── one cycle ──────────────────────────────────────────────────────
 
-  /** Read the tray, gate it, start a turn per reply. Public so tests can drive one cycle. */
+  /** Read the tray, gate it, start the turns. Public so tests can drive one cycle. */
   async runCycle(): Promise<CycleResult> {
     this.cycles += 1
     const started = this.now()
@@ -341,47 +254,39 @@ export class AgentInvoker {
     try {
       tray = await this.client.inbox.tray({ waitMs: 0 })
     } catch (err) {
-      this.logger.warn({ err: describe(err), ...this.retry() }, 'tray read failed — re-waking later')
-      return this.result('tray_failed', 0, false, started, describe(err))
+      this.logger.warn({ err: describe(err) }, 'tray read failed — the cards stay on the tray; the server re-wakes')
+      return this.result('tray_failed', started, { failure: describe(err) })
     }
 
+    const truncated = tray.truncated === true || tray.invites_truncated === true
     const allCards = gate.cardsOf(tray)
-    const truncated = tray.truncated === true
-    if (allCards.length === 0) {
-      this.logger.info({ deferred: tray.deferred ?? 0 }, 'tray empty — nothing to decide')
-      this.retryRung = 0
-      return this.result('empty', 0, truncated, started)
-    }
-
-    // A card whose reply turn is still running is that turn's to answer;
-    // gating it again would queue a second turn. It is left out here and
-    // the tray is read again once the turn ends (see `admitted`).
-    const cards = allCards.filter((card) => !this.replyTurnsInFlight.has(card.conversation_id))
-    const skippedInFlight = allCards.length - cards.length
+    const allInvites = invitesOf(tray)
+    const cards = allCards.filter((card) => !this.running.has(conversationKey(card.conversation_id)))
+    const invites = allInvites.filter((invite) => !this.running.has(inviteKey(invite.invite_id)))
+    const skippedInFlight = allCards.length - cards.length + (allInvites.length - invites.length)
     if (skippedInFlight > 0) this.skippedWhileInFlight = true
-    if (cards.length === 0) {
-      this.logger.info({ skippedInFlight }, 'every card on the tray has a reply turn running — nothing new to decide')
-      return { ...this.result('empty', 0, truncated, started), skippedInFlight }
+    const base = { cards: cards.length, invites: invites.length, skippedInFlight, truncated }
+
+    if (cards.length === 0 && invites.length === 0) {
+      if (skippedInFlight > 0) this.logger.info({ skippedInFlight }, 'every card on the tray has a turn running — nothing new to decide')
+      else this.logger.info({ deferred: tray.deferred ?? 0 }, 'tray empty — nothing to decide')
+      return this.result('empty', started, base)
     }
 
-    // The turn text is served, never bundled. Without it no turn can start,
-    // so nothing is gated either: the cards wait, and the next copy (retried
-    // by the texts store) or the next wake tries again.
+    // The turn texts and the gate-call texts are served, never bundled.
     const texts = await this.texts.ensure()
     if (!texts) {
-      this.logger.warn({ cards: cards.length, ...this.retry() }, 'served texts not available — not gating; the cards wait on the tray')
-      return { ...this.result('texts_missing', cards.length, truncated, started, 'texts missing'), skippedInFlight }
+      this.logger.warn(base, 'served texts not available — not gating; the cards wait on the tray')
+      return this.result('texts_missing', started, { ...base, failure: 'texts missing' })
     }
 
-    // A turn that cannot have the hosted tools is not worth a gate call:
-    // nothing is asked, nothing recorded, the cards wait, the ladder
-    // re-wakes. The reason is logged when it changes, not on every rung.
+    // A turn that cannot have the hosted tools is not worth a gate call.
     const readiness = this.readiness()
     if (!readiness.ready) {
       const changed = this.unreadyReason !== readiness.reason
       this.unreadyReason = readiness.reason
-      this.logger[changed ? 'warn' : 'debug']({ cards: cards.length, reason: readiness.reason, ...this.retry() }, 'AgentChat tools not available to a turn — not gating; the cards wait on the tray')
-      return { ...this.result('tools_unavailable', cards.length, truncated, started, readiness.reason), skippedInFlight }
+      this.logger[changed ? 'warn' : 'debug']({ ...base, reason: readiness.reason }, 'AgentChat tools not available to a turn — not gating; the cards wait on the tray')
+      return this.result('tools_unavailable', started, { ...base, failure: readiness.reason })
     }
     if (this.unreadyReason !== null) {
       this.unreadyReason = null
@@ -390,117 +295,234 @@ export class AgentInvoker {
 
     let result: CycleResult
     if (!this.gateEnabled) {
-      result = await this.runUngated(cards.length, texts, truncated, started)
+      result = await this.runUngated(texts, started, base)
     } else {
-      const trayToGate: InboxTray = skippedInFlight > 0 ? { ...tray, conversations: cards } : tray
-      result = await this.runGated(trayToGate, cards.length, texts, truncated, started, skippedInFlight)
+      const gated = cards.length > 0 ? await this.runGated({ ...tray, conversations: cards }, texts, started, base) : this.result('decided', started, base)
+      const inviteTurns = await this.startInviteTurns(invites, texts)
+      result = { ...gated, turnsStarted: gated.turnsStarted + inviteTurns.started, turnsRefused: gated.turnsRefused + inviteTurns.refused }
     }
-    if (skippedInFlight > 0) result = { ...result, skippedInFlight }
 
     if (truncated && result.outcome !== 'fail_closed') {
-      // More conversations are waiting than one tray shows.
+      // More conversations or invites are waiting than one tray shows.
       this.logger.info({}, 'tray truncated — waking again for the rest')
       this.coalescer.wake()
     }
     return result
   }
 
-  /** Gate off: the agent judges in-turn with the hosted tools. One turn, nothing recorded here. */
-  private async runUngated(cards: number, texts: Texts, truncated: boolean, started: number): Promise<CycleResult> {
-    this.logger.info({ cards }, 'gate off — starting one turn with the served wake instruction')
+  /** Gate off: the agent judges in-turn with the hosted tools and records its own verdicts (single-run behaviour). One turn at a time. */
+  private async runUngated(texts: Texts, started: number, base: Partial<CycleResult>): Promise<CycleResult> {
+    if (this.running.has(UNGATED_KEY)) {
+      this.skippedWhileInFlight = true
+      this.logger.info({}, 'gate off — the last turn is still running; this wake waits for it')
+      return this.result('gate_off', started, base)
+    }
+    this.logger.info({ cards: base.cards }, 'gate off — starting one turn with the served wake instruction')
     const sessionKey = wakeSessionKey(this.agentId, this.now())
-    this.logger.info({ sessionKey }, 'turn start')
     const admission = await this.startTurn({ sessionKey, prompt: wakeTurnPrompt(texts), lane: integrationLane(this.accountId) })
     if (!admission.ran) {
-      this.logger.warn({ sessionKey, error: admission.error, ...this.retry() }, 'turn not started — re-waking later')
-    } else {
-      this.admitted(sessionKey, admission, 'turn complete (final text discarded; the send is a hosted-tool call)')
-      this.retryRung = 0
+      this.logger.warn({ sessionKey, error: admission.error }, 'turn not started — the cards stay on the tray')
+      return this.result('gate_off', started, { ...base, turnsRefused: 1 })
     }
-    return {
-      ...this.result('gate_off', cards, truncated, started),
-      turnsStarted: admission.ran ? 1 : 0,
-      turnsRefused: admission.ran ? 0 : 1,
-    }
+    this.turns += 1
+    this.watch(UNGATED_KEY, 'ungated', sessionKey, admission, async () => undefined)
+    return this.result('gate_off', started, { ...base, turnsStarted: 1 })
   }
 
-  private async runGated(tray: InboxTray, cards: number, texts: Texts, truncated: boolean, started: number, skippedInFlight = 0): Promise<CycleResult> {
-    const decided = await gate.run({ tray, callModel: this.callModel, client: this.client, toolNamer: OPENCLAW_TOOL_NAMER })
+  private async runGated(tray: InboxTray, texts: Texts, started: number, base: Partial<CycleResult>): Promise<CycleResult> {
+    const decided = await gate.run({ tray, callModel: this.callModel, client: this.client, texts, toolNamer: OPENCLAW_TOOL_NAMER })
     const latencyMs = this.now() - started
     const counts = { reply: 0, dismiss: 0, defer: 0 }
     for (const verdict of decided.verdicts) counts[verdict.decision] += 1
 
     if (decided.outcome === 'fail_closed') {
-      // Nothing recorded, no turn. The cards stay on the tray; re-wake on
-      // the ladder so a transient provider outage does not leave peers
-      // unanswered until the next message happens to arrive. One line.
-      this.logger.warn({ cards, failure: decided.failure, latencyMs, ...this.retry() }, 'gate failed closed — nothing recorded, no turn started')
-      return { ...this.result('fail_closed', cards, truncated, started, decided.failure), undecided: cards, latencyMs }
+      // Nothing recorded, no turn. The cards stay on the tray; the server
+      // re-wakes unanswered cards (D3), so a provider outage is not a drop.
+      this.logger.warn({ cards: base.cards, failure: decided.failure, latencyMs }, 'gate failed closed — nothing recorded, no turn started')
+      return this.result('fail_closed', started, { ...base, undecided: base.cards ?? 0, failure: decided.failure ?? null })
     }
-    if (decided.outcome === 'empty') {
-      this.retryRung = 0
-      return this.result('empty', cards, truncated, started)
-    }
+    if (decided.outcome === 'empty') return this.result('empty', started, base)
 
-    // One turn per conversation decided reply. The verdict is recorded when
-    // the run has completed (see `admitted`) — never here, at its start: a
-    // refused, crashed or timed-out turn records nothing, the card stays on
-    // the tray, and the ladder re-wakes so it is gated again. The cycle does
-    // not wait for the runs to end: the lane serializes them.
     let turnsStarted = 0
     let turnsRefused = 0
-    const recordFailures = decided.recordFailures.length
-    const recorded = decided.recorded
-    for (const entry of decided.reply) {
-      if (this.replyTurnsInFlight.has(entry.conversationId)) {
-        // Its card was left out of the tray the gate saw; a verdict for it
-        // can only be the model naming a conversation it was not shown.
+    for (const reply of decided.reply) {
+      if (this.running.has(conversationKey(reply.conversationId))) {
+        // Its card was left out of the tray the gate saw: the model named a
+        // conversation it was not shown.
         this.skippedWhileInFlight = true
         continue
       }
       const sessionKey = wakeSessionKey(this.agentId, this.now())
-      this.logger.info({ sessionKey, conversationId: entry.conversationId }, 'turn start')
-      const admission = await this.startTurn({ sessionKey, prompt: wakeTurnPrompt(texts, entry.conversationId), lane: integrationLane(this.accountId) })
+      const turnStartedAt = new Date(this.now()).toISOString()
+      this.logger.info({ sessionKey, conversationId: reply.conversationId }, 'turn start')
+      const admission = await this.startTurn({ sessionKey, prompt: wakeTurnPrompt(texts, reply.conversationId), lane: integrationLane(this.accountId) })
       if (!admission.ran) {
         turnsRefused += 1
-        this.logger.warn({ sessionKey, conversationId: entry.conversationId, error: admission.error }, 'turn not started — reply not recorded; the conversation stays unread')
+        this.logger.warn({ sessionKey, conversationId: reply.conversationId, error: admission.error }, 'turn not started — nothing recorded; the card stays on the tray')
         continue
       }
       turnsStarted += 1
-      this.replyTurnsInFlight.add(entry.conversationId)
-      this.admitted(sessionKey, admission, 'turn complete (final text discarded; the send is a hosted-tool call)', entry)
+      this.turns += 1
+      this.watch(conversationKey(reply.conversationId), 'reply', sessionKey, admission, (outcome) => this.afterReplyTurn(sessionKey, reply, turnStartedAt, outcome))
     }
 
     const summary = {
-      cards,
+      ...base,
       reply: counts.reply,
       dismiss: counts.dismiss,
       defer: counts.defer,
       undecided: decided.undecided.length,
-      recorded,
-      recordFailures,
+      recorded: decided.recorded,
+      recordFailures: decided.recordFailures.length,
       turnsStarted,
       turnsRefused,
-      skippedInFlight,
       latencyMs,
     }
-    if (turnsRefused > 0) {
-      this.logger.warn({ ...summary, ...this.retry() }, 'gate — some turns were refused; re-waking later')
-    } else if (recordFailures > 0 || decided.undecided.length > 0) {
-      // Some cards were not settled (verdict rejected, or the model skipped
-      // them). They are still on the tray; look again later.
-      this.logger.warn({ ...summary, ...this.retry() }, 'gate — cards left on the tray; re-waking later')
-    } else {
-      this.retryRung = 0
-      this.logger.info(summary, 'gate')
-    }
-    return { ...this.result('decided', cards, truncated, started), ...summary }
+    const unsettled = turnsRefused > 0 || summary.recordFailures > 0 || summary.undecided > 0
+    this.logger[unsettled ? 'warn' : 'info'](summary, unsettled ? 'gate — some cards were left on the tray; the server re-wakes' : 'gate')
+    return { ...this.result('decided', started, base), ...summary }
   }
 
-  private result(outcome: CycleOutcome, cards: number, truncated: boolean, started: number, failure: string | null = null): CycleResult {
+  /** One turn per pending invite (tray v1). The agent answers it with the hosted tools, or leaves it pending. */
+  private async startInviteTurns(invites: readonly TrayInvite[], texts: Texts): Promise<{ started: number; refused: number }> {
+    let started = 0
+    let refused = 0
+    for (const invite of invites) {
+      if (this.stopped) break
+      const sessionKey = inviteSessionKey(this.agentId, invite.invite_id)
+      this.logger.info({ sessionKey, inviteId: invite.invite_id, groupId: invite.group?.id }, 'group-invite turn start')
+      let admission: TurnAdmission
+      try {
+        admission = await this.startTurn({ sessionKey, prompt: inviteTurnPrompt(texts), lane: integrationLane(this.accountId) })
+      } catch (err) {
+        admission = { ran: false, error: describe(err) }
+      }
+      if (!admission.ran) {
+        refused += 1
+        this.logger.warn({ sessionKey, inviteId: invite.invite_id, error: admission.error }, 'group-invite turn not started — the invite stays pending on the tray')
+        continue
+      }
+      started += 1
+      this.inviteTurns += 1
+      this.watch(inviteKey(invite.invite_id), 'invite', sessionKey, admission, (outcome) => this.afterInviteTurn(sessionKey, invite, outcome))
+    }
+    return { started, refused }
+  }
+
+  // ─── turns ──────────────────────────────────────────────────────────
+
+  /**
+   * Register an admitted run and handle its end whenever OpenClaw confirms
+   * it. The key stays registered — its card or invite is not gated again —
+   * until then. A run whose end was never confirmed (`gone`: the plugin
+   * runtime went away) stays registered: nothing in this process may start a
+   * second turn for it.
+   */
+  private watch(key: string, kind: RunningKind, sessionKey: string, admission: Extract<TurnAdmission, { ran: true }>, after: (outcome: RunOutcome) => Promise<void>): void {
+    this.running.add({ key, kind, runId: admission.runId, sessionKey, startedAt: this.now() })
+    // The wait itself is not tracked (`settled()` must not wait on a live
+    // run); the recording that follows the end is.
+    void admission.done.then((outcome) => this.track(this.ended(key, kind, sessionKey, outcome, after)))
+  }
+
+  /** The run ended (or the runtime is gone): log it, record what it calls for, free its key. */
+  private async ended(key: string, kind: RunningKind, sessionKey: string, outcome: RunOutcome, after: (outcome: RunOutcome) => Promise<void>): Promise<void> {
+    if (outcome.status === 'gone') {
+      this.logger.warn({ sessionKey, runId: outcome.runId }, 'turn end not confirmed: the plugin runtime is gone — its card stays reserved')
+      return
+    }
+    this.logger[outcome.status === 'ok' ? 'info' : 'warn'](
+      {
+        sessionKey,
+        runId: outcome.runId,
+        status: outcome.status,
+        ...(outcome.error ? { error: outcome.error } : {}),
+        ...(outcome.elapsedMs !== undefined ? { elapsedMs: outcome.elapsedMs } : {}),
+        agentchatCalls: outcome.agentchatCalls ?? null,
+      },
+      kind === 'invite' ? 'group-invite turn ended' : 'turn ended (final text discarded; the send is a hosted-tool call)',
+    )
+    try {
+      await after(outcome)
+    } catch (err) {
+      this.logger.warn({ sessionKey, err: describe(err) }, 'recording after the turn failed — the card stays on the tray; the server re-wakes')
+    } finally {
+      this.running.end(key)
+    }
+  }
+
+  /** D5: read the card again and record what the turn's effects call for. */
+  private async afterReplyTurn(sessionKey: string, reply: GateReply, turnStartedAt: string, outcome: RunOutcome): Promise<void> {
+    const freshTray = await this.freshTray(reply.conversationId)
+    const anchor = gate.anchorOf(reply.card) ?? ''
+    const silentKey = `${reply.conversationId}|${anchor}`
+    const decision = integration.turnOutcome({
+      turn: turnEndOf(outcome),
+      turnStartedAt,
+      gateCard: reply.card,
+      category: reply.category,
+      freshTray,
+      silentBefore: this.silent.get(silentKey) ?? 0,
+    })
+    this.count(decision.reason)
+    if (decision.reason === 'silent_first') this.noteSilent(silentKey)
+    if (decision.action !== 'none') this.silent.delete(silentKey)
+    const recorded = await integration.applyOutcome(this.client, decision)
+    this.logger.info(
+      { sessionKey, conversationId: reply.conversationId, action: decision.action, reason: decision.reason, ...(recorded ? { through: anchor || null } : {}) },
+      recorded ? `${decision.action === 'record_reply' ? 'reply' : 'dismiss'} recorded after the turn (${decision.reason})` : `nothing recorded after the turn (${decision.reason})`,
+    )
+  }
+
+  /** The same rule for an invite turn: an invite still pending after two turns that looked is dismissed (seen, left pending). */
+  private async afterInviteTurn(sessionKey: string, invite: TrayInvite, outcome: RunOutcome): Promise<void> {
+    const freshTray = await this.freshTray(null)
+    const silentKey = inviteKey(invite.invite_id)
+    const decision = integration.inviteOutcome({ turn: turnEndOf(outcome), invite, freshTray, silentBefore: this.silent.get(silentKey) ?? 0 })
+    this.count(`invite_${decision.reason}`)
+    if (decision.reason === 'silent_first') this.noteSilent(silentKey)
+    if (decision.action !== 'none') this.silent.delete(silentKey)
+    const dismissed = await integration.applyInviteOutcome(this.client, decision)
+    this.logger.info(
+      { sessionKey, inviteId: invite.invite_id, action: decision.action, reason: decision.reason },
+      dismissed ? 'invite dismissed after a second silent turn (left pending)' : `nothing recorded for the invite (${decision.reason})`,
+    )
+  }
+
+  /** The tray after a turn, whole; null when the read failed (D5 then records nothing). */
+  private async freshTray(conversationId: string | null): Promise<InboxTray | null> {
+    try {
+      return await this.client.inbox.tray({ waitMs: 0, limit: POST_TURN_TRAY_LIMIT })
+    } catch (err) {
+      this.logger.info({ conversationId, err: describe(err) }, 'tray re-read after the turn failed — nothing recorded; the card stays on the tray')
+      return null
+    }
+  }
+
+  private noteSilent(key: string): void {
+    this.silent.set(key, (this.silent.get(key) ?? 0) + 1)
+    if (this.silent.size > MAX_SILENT_ENTRIES) {
+      const oldest = this.silent.keys().next().value
+      if (oldest !== undefined) this.silent.delete(oldest)
+    }
+  }
+
+  private count(reason: string): void {
+    this.outcomes[reason] = (this.outcomes[reason] ?? 0) + 1
+  }
+
+  private track<T>(promise: Promise<T>): Promise<T> {
+    this.work.add(promise)
+    const remove = () => this.work.delete(promise)
+    promise.then(remove, remove)
+    return promise
+  }
+
+  private result(outcome: CycleOutcome, started: number, fields: Partial<CycleResult> = {}): CycleResult {
     return {
       outcome,
-      cards,
+      cards: 0,
+      invites: 0,
       reply: 0,
       dismiss: 0,
       defer: 0,
@@ -510,213 +532,29 @@ export class AgentInvoker {
       turnsStarted: 0,
       turnsRefused: 0,
       skippedInFlight: 0,
-      truncated,
+      truncated: false,
+      failure: null,
+      ...fields,
       latencyMs: this.now() - started,
-      failure,
-    }
-  }
-
-  /** Arm the next rung (or report why not). Returned as log fields so every caller writes ONE line. */
-  private retry(): { retry: RetryPlan } {
-    if (this.coalescer.delayedPending) {
-      // A retry is already on its way (a wake landed mid-outage and failed
-      // again). One outage climbs the ladder once; climbing per failed cycle
-      // would replace the sooner retry with a later one.
-      return { retry: { kind: 'pending' } }
-    }
-    if (this.retryRung >= this.ladder.length) {
-      return { retry: { kind: 'exhausted' } }
-    }
-    const delayMs = this.ladder[this.retryRung] ?? this.ladder[this.ladder.length - 1] ?? 60_000
-    this.retryRung += 1
-    this.coalescer.wakeAfter(delayMs)
-    return { retry: { kind: 'armed', delayMs, rung: this.retryRung } }
-  }
-
-  // ─── turns ──────────────────────────────────────────────────────────
-
-  /**
-   * Book an admitted turn and log its end whenever it comes. The cycle moves
-   * on at once; OpenClaw's lane keeps the runs of one account in order.
-   *
-   * For a reply turn the end is also when the `reply` verdict is recorded —
-   * only if the run completed (`status: ok`, no error): a turn that looked
-   * and chose not to send still counts as read. A run that ended in error
-   * or on its own deadline records nothing. `done` resolves only once
-   * OpenClaw confirmed the end (`./run.ts`), so the conversation stays in
-   * flight for as long as the run lives. A run that did not complete
-   * leaves the card on the tray and the ladder re-wakes so it is gated again.
-   */
-  private admitted(sessionKey: string, admission: Extract<TurnAdmission, { ran: true }>, completeLine: string, reply?: GateReply): void {
-    this.turns += 1
-    this.turnsInFlight += 1
-    void admission.done.then(
-      async (outcome: TurnOutcome) => {
-        this.turnsInFlight -= 1
-        if (outcome.status === 'gone') {
-          // The plugin runtime went away before OpenClaw confirmed an end:
-          // the gateway is going down. The conversation stays in flight —
-          // nothing in this process may start a second turn for it.
-          this.logger.warn({ sessionKey, runId: outcome.runId }, `${completeLine} — not confirmed: the plugin runtime is gone`)
-          return
-        }
-        const completed = outcome.ran && outcome.status === 'ok' && !outcome.error
-        this.logger[completed ? 'info' : 'warn'](
-          {
-            sessionKey,
-            runId: outcome.runId,
-            status: outcome.status,
-            ...(outcome.error ? { error: outcome.error } : {}),
-            ...(outcome.elapsedMs !== undefined ? { elapsedMs: outcome.elapsedMs } : {}),
-            ...(outcome.agentchatCalls !== undefined ? { agentchatCalls: outcome.agentchatCalls } : {}),
-          },
-          completeLine,
-        )
-        if (!reply) return
-        try {
-          if (!completed) {
-            this.logger.warn(
-              { sessionKey, conversationId: reply.conversationId, status: outcome.status, ...(outcome.error ? { error: outcome.error } : {}), ...this.retry() },
-              'turn did not complete — reply not recorded; the conversation stays unread and is gated again',
-            )
-            return
-          }
-          if (await this.decidedInTurn(reply)) {
-            this.logger.info(
-              { sessionKey, conversationId: reply.conversationId },
-              'the turn recorded its own verdict — reply not recorded again',
-            )
-            return
-          }
-          await this.recordReply(sessionKey, reply)
-        } finally {
-          this.replyTurnEnded(reply.conversationId)
-        }
-      },
-      async (err: unknown) => {
-        this.turnsInFlight -= 1
-        this.logger.warn({ sessionKey, runId: admission.runId, err: describe(err) }, `${completeLine} — the wait failed`)
-        if (reply) {
-          this.logger.warn(
-            { sessionKey, conversationId: reply.conversationId, err: describe(err), ...this.retry() },
-            'turn did not complete — reply not recorded; the conversation stays unread and is gated again',
-          )
-          this.replyTurnEnded(reply.conversationId)
-        }
-      },
-    )
-  }
-
-  /** The reply turn for `conversationId` is over: its card may be gated again, and a tray that held skipped cards is read once more. */
-  private replyTurnEnded(conversationId: string): void {
-    this.replyTurnsInFlight.delete(conversationId)
-    if (this.skippedWhileInFlight && !this.stopped) {
-      this.skippedWhileInFlight = false
-      this.logger.debug({ conversationId }, 'reply turn ended — re-reading the tray for the cards left out meanwhile')
-      this.coalescer.wake()
-    }
-  }
-
-  /**
-   * Whether the completed turn recorded a verdict for its conversation
-   * itself, seen on one fresh tray read. A card that left the tray was read
-   * (a verdict or a mark-read) or hidden by a `defer` — by the turn, since
-   * the host had recorded nothing for it. A card still there whose
-   * `your_last_decision` differs from the gate's copy got a verdict in the
-   * turn (a newer message keeps it on the tray). A card still there,
-   * unchanged, got nothing. A failed read, or a missing card past a
-   * truncated tray, claims nothing: `reply` is recorded as before.
-   */
-  private async decidedInTurn(reply: GateReply): Promise<boolean> {
-    let tray: InboxTray
-    try {
-      tray = await this.client.inbox.tray({ waitMs: 0, limit: POST_TURN_TRAY_LIMIT })
-    } catch (err) {
-      this.logger.info({ conversationId: reply.conversationId, err: describe(err) }, 'tray re-read after the turn failed — recording reply')
-      return false
-    }
-    const card = gate.cardsOf(tray).find((c) => c.conversation_id === reply.conversationId)
-    if (!card) return tray.truncated !== true
-    return lastDecisionAt(card) !== lastDecisionAt(reply.card)
-  }
-
-  /** The `reply` verdict for a completed turn. A record the server refuses leaves the conversation unread; the ladder re-wakes. */
-  private async recordReply(sessionKey: string, reply: GateReply): Promise<void> {
-    try {
-      await reply.record()
-      this.logger.info({ sessionKey, conversationId: reply.conversationId }, 'reply verdict recorded — turn completed')
-    } catch (err) {
-      this.logger.warn(
-        { sessionKey, conversationId: reply.conversationId, err: describe(err), ...this.retry() },
-        'reply verdict not recorded after the turn completed — the conversation stays unread; the next wake gates it again',
-      )
-    }
-  }
-
-  /**
-   * Every pending invite gets one attempt. An invite leaves the pending list
-   * only once its turn was admitted (and is then remembered in the ledger);
-   * a refused one stays there for the next wake. Invites that arrive while
-   * this runs are appended and get their pass on the next drain.
-   */
-  private async runInviteTurns(): Promise<void> {
-    const batch = [...this.pendingInvites]
-    if (batch.length > 0) {
-      // An invite turn needs the hosted tools as much as a reply turn.
-      const readiness = this.readiness()
-      if (!readiness.ready) {
-        const changed = this.unreadyReason !== readiness.reason
-        this.unreadyReason = readiness.reason
-        this.logger[changed ? 'warn' : 'debug']({ pending: batch.length, reason: readiness.reason, ...this.retry() }, 'AgentChat tools not available to a turn — invite turns wait; re-waking later')
-        return
-      }
-    }
-    let texts: Texts | null = null
-    let refused = 0
-    let waitingForTexts = 0
-    for (const invite of batch) {
-      if (this.stopped) return
-      texts ??= await this.texts.ensure()
-      if (!texts) {
-        waitingForTexts = batch.length
-        break
-      }
-      const sessionKey = inviteSessionKey(this.agentId, invite.inviteId)
-      this.logger.info({ sessionKey, groupId: invite.groupId, inviteId: invite.inviteId }, 'group-invite turn start')
-      let admission
-      try {
-        admission = await this.startTurn({ sessionKey, prompt: inviteTurnPrompt(texts), lane: integrationLane(this.accountId) })
-      } catch (err) {
-        admission = { ran: false as const, error: describe(err) }
-      }
-      if (!admission.ran) {
-        refused += 1
-        this.logger.warn({ sessionKey, inviteId: invite.inviteId, error: admission.error }, 'group-invite turn not started — the invite stays pending; retried on the next wake')
-        continue
-      }
-      this.inviteTurns += 1
-      this.invites.markOffered(invite.inviteId)
-      this.pendingInvites = this.pendingInvites.filter((pending) => pending.inviteId !== invite.inviteId)
-      this.admitted(sessionKey, admission, 'group-invite turn complete')
-    }
-    if (this.stopped) return
-    if (waitingForTexts > 0) {
-      this.logger.warn({ pending: waitingForTexts, ...this.retry() }, 'served texts not available — invite turns wait; re-waking later')
-    } else if (refused > 0) {
-      this.logger.warn({ pending: refused, ...this.retry() }, 'invite turns refused — re-waking later')
     }
   }
 }
 
-/** Largest tray the server builds (`INBOX_TRAY_MAX_LIMIT`): the post-turn read asks for all of it. */
-const POST_TURN_TRAY_LIMIT = 50
+/** What OpenClaw reported, as the kit's D5 rule reads it. `ok` is the only completed end. */
+export function turnEndOf(outcome: RunOutcome): integration.TurnEnd {
+  const agentchatCalls = outcome.agentchatCalls ?? null
+  if (outcome.status === 'ok' && !outcome.error) return { status: 'completed', agentchatCalls }
+  return { status: 'failed', agentchatCalls, ...(outcome.error ? { detail: outcome.error } : {}) }
+}
 
-/** When the card's `your_last_decision` was recorded (server time), or null. Compared only with the same server field. */
-function lastDecisionAt(card: { your_last_decision?: { at?: string } | null }): string | null {
-  const at = card.your_last_decision?.at
-  return typeof at === 'string' && at.length > 0 ? at : null
+/** The tray's pending invites (tray v1); none on a server that does not serve them. */
+function invitesOf(tray: InboxTray): TrayInvite[] {
+  const invites = (tray as { invites?: unknown }).invites
+  if (!Array.isArray(invites)) return []
+  return invites.filter((invite): invite is TrayInvite => typeof (invite as { invite_id?: unknown } | null)?.invite_id === 'string')
 }
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
+

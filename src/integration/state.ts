@@ -1,13 +1,10 @@
 /**
  * The plugin's own state on disk: `<OpenClaw state dir>/agentchat/<accountId>/`.
  *
- * Two small JSON files live there, both caches of facts that exist elsewhere:
- * the served texts (`texts.json`, so a gateway can start while the server is
- * unreachable) and the group invites already offered to the agent
- * (`invites.json`, so a restart never starts a second turn for an invite the
- * agent chose to leave pending). Nothing secret, nothing authoritative —
- * deleting the directory costs one texts fetch and, at worst, one repeated
- * invite turn.
+ * One small JSON file lives there: the served texts (`texts.json`), a cache
+ * of what the server serves, so a gateway can start while the server is
+ * unreachable. Nothing secret, nothing authoritative — deleting the
+ * directory costs one texts fetch.
  *
  * Writes are atomic (temp file + rename) so a crash mid-write leaves the
  * previous copy, never a truncated one.

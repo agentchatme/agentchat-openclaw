@@ -5,7 +5,7 @@
  *     frames are wakes; our own echo is not;
  *   - the delivery ack is on the wire before any wake handler — and before
  *     the gate's model call when a real invoker is wired in;
- *   - `group.invite.received` is handed on; malformed ones are dropped;
+ *   - `group.invite.received` is a wake (the invite is read from the tray);
  *   - the SDK's lifecycle is reported as it is: `ready` / `backoff` /
  *     `blocked` / `stopped` from its state, a rejected key from its
  *     `blocked` event (the SDK, not the plugin, tells it from a plain close
@@ -14,13 +14,9 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import * as fs from 'node:fs'
-import * as os from 'node:os'
-import * as path from 'node:path'
 
 import { parseChannelConfig } from '../../src/config-schema.js'
 import { AgentInvoker } from '../../src/integration/invoker.js'
-import { InviteLedger } from '../../src/integration/invites.js'
 import {
   IntegrationSocket,
   classifyRealtimeError,
@@ -113,41 +109,36 @@ describe('IntegrationSocket — wakes', () => {
   })
 
   it('ackOnReceipt before any gate call: with a real invoker wired in, the ack is sent before the model is asked', async () => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-socket-invoker-'))
-    try {
-      const { client, posts } = fakeClient({ trays: [tray([card('conv_1', 'msg_1')])] })
-      const acksAtModelCall: number[] = []
-      const invoker = new AgentInvoker({
-        accountId: 'default',
-        agentId: 'main',
-        client,
-        callModel: async () => {
-          acksAtModelCall.push(sentFrames(MockWebSocket.latest(), 'ack').length)
-          return '{"decisions":[{"conversation_id":"conv_1","decision":"dismiss"}]}'
-        },
-        startTurn: async () => ({ ran: false, error: 'not in this test' }),
-        texts: staticTexts(),
-        invites: new InviteLedger({ accountId: 'default', stateDir }),
-        logger: silentLogger,
-        debounceMs: 0,
-      })
-      const { socket } = makeSocket({ onWake: (source) => invoker.wake(source) })
-      sockets.push(socket)
-      await socket.start()
-      const ws = MockWebSocket.latest()
-      ws.simulateReady()
-      ws.simulateMessage(messageNew('conv_1', 1, { sender: '@bob' }))
-      await settle(30)
-      for (let i = 0; i < 10; i++) await invoker.settled()
-      expect(acksAtModelCall).toEqual([1])
-      expect(posts).toEqual([{ conversationId: 'conv_1', body: { decision: 'dismiss', through_message_id: 'msg_1' } }])
-      invoker.stop()
-    } finally {
-      fs.rmSync(stateDir, { recursive: true, force: true })
-    }
+    const { client, posts } = fakeClient({ trays: [tray([card('conv_1', 'msg_1')])] })
+    const acksAtModelCall: number[] = []
+    const invoker = new AgentInvoker({
+      accountId: 'default',
+      agentId: 'main',
+      client,
+      callModel: async () => {
+        acksAtModelCall.push(sentFrames(MockWebSocket.latest(), 'ack').length)
+        return '{"decisions":[{"conversation_id":"conv_1","decision":"dismiss"}]}'
+      },
+      startTurn: async () => ({ ran: false, error: 'not in this test' }),
+      texts: staticTexts(),
+      logger: silentLogger,
+      quietMs: 0,
+      maxMs: 0,
+    })
+    const { socket } = makeSocket({ onWake: (source) => invoker.wake(source) })
+    sockets.push(socket)
+    await socket.start()
+    const ws = MockWebSocket.latest()
+    ws.simulateReady()
+    ws.simulateMessage(messageNew('conv_1', 1, { sender: '@bob' }))
+    await settle(30)
+    for (let i = 0; i < 10; i++) await invoker.settled()
+    expect(acksAtModelCall).toEqual([1])
+    expect(posts).toEqual([{ conversationId: 'conv_1', body: { decision: 'dismiss', through_message_id: 'msg_1' } }])
+    invoker.stop()
   })
 
-  it('a server wake frame is one wake with the reminder as its source, never acked', async () => {
+  it('a server wake frame is one wake labelled by its reason, never acked', async () => {
     const wakes: Array<[string, unknown]> = []
     const { socket, metrics } = makeSocket({ onWake: (source, detail) => wakes.push([source, detail]) })
     sockets.push(socket)
@@ -167,19 +158,32 @@ describe('IntegrationSocket — wakes', () => {
     expect(metrics.wakes).toEqual(['connect', 'reminder', 'other'])
   })
 
-  it('group.invite.received is the second wake kind; malformed invites are dropped', async () => {
-    const invites: unknown[] = []
+  // Known SDK gap (kit build c835e8d): RealtimeClient validates every `wake`
+  // payload as a reminder (conversation_id + anchor_message_id required), so
+  // the contract-v1 re-wake for unanswered cards is dropped as malformed.
+  // When the SDK accepts it, this starts passing — turn `it.fails` into `it`.
+  it.fails('a contract-v1 re-wake for unanswered cards is a wake labelled `unanswered`', async () => {
     const wakes: string[] = []
-    const { socket } = makeSocket({ onGroupInvite: (i) => invites.push(i), onWake: (s) => wakes.push(s) })
+    const { socket } = makeSocket({ onWake: (source) => wakes.push(source) })
+    sockets.push(socket)
+    await socket.start()
+    const ws = MockWebSocket.latest()
+    ws.simulateReady()
+    ws.simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: ['conv_1', 'conv_2'], step: 1, at: '2026-11-08T00:00:00.000Z' } })
+    await settle()
+    expect(wakes).toEqual(['connect', 'unanswered'])
+  })
+
+  it('group.invite.received is a wake: the invite itself is read from the tray', async () => {
+    const wakes: string[] = []
+    const { socket } = makeSocket({ onWake: (s) => wakes.push(s) })
     sockets.push(socket)
     await socket.start()
     const ws = MockWebSocket.latest()
     ws.simulateReady()
     ws.simulateMessage({ type: 'group.invite.received', payload: { id: 'inv_1', group_id: 'grp_1', group_name: 'Ops', inviter_handle: '@bob', created_at: 'x' } })
-    ws.simulateMessage({ type: 'group.invite.received', payload: { group_name: 'no ids' } })
     await settle()
-    expect(invites).toEqual([{ inviteId: 'inv_1', groupId: 'grp_1', groupName: 'Ops', inviterHandle: 'bob' }])
-    expect(wakes).toEqual(['connect'])
+    expect(wakes).toEqual(['connect', 'invite'])
     expect(socket.getHealth().counters.invites).toBe(1)
   })
 
@@ -351,6 +355,7 @@ describe('classifyRealtimeError / wakeSourceOf / realtimeOptionsFor', () => {
 
   it('maps a server wake reason onto the fixed source set', () => {
     expect(wakeSourceOf('reminder')).toBe('reminder')
+    expect(wakeSourceOf('unanswered')).toBe('unanswered')
     expect(wakeSourceOf('digest')).toBe('other')
     expect(wakeSourceOf(undefined)).toBe('other')
   })

@@ -98,6 +98,8 @@ export function spellTextsForOpenClaw(texts: Texts): Texts {
     invite_prompt: spellToolsForOpenClaw(texts.invite_prompt),
     identity_line: spellToolsForOpenClaw(texts.identity_line),
     identity_line_template: spellToolsForOpenClaw(texts.identity_line_template),
+    ...(typeof texts.gate_call_preamble === 'string' ? { gate_call_preamble: spellToolsForOpenClaw(texts.gate_call_preamble) } : {}),
+    ...(typeof texts.gate_call_answer_format === 'string' ? { gate_call_answer_format: spellToolsForOpenClaw(texts.gate_call_answer_format) } : {}),
   }
 }
 

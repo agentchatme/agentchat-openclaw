@@ -7,6 +7,28 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## Unreleased
+
+Contract v1 ("finish the gate"). The release number is set at the release step. Needs, in this order: the AgentChat server with contract v1 (gate-call texts, tray invites, the unanswered re-wake), then the `agentchatme` SDK release that carries the integration kit — until then `package.json` points `agentchatme` at a local build of the kit and the lockfile is not installable from the registry.
+
+### Changed
+
+- **What is recorded after a turn comes from what happened (D5).** The invoker recorded `reply` for any run that ended `ok`, sent or not. After a reply turn it now reads the card again and applies the SDK kit's `turnOutcome`: the turn recorded its own verdict → nothing; the answer went out (`you_owe_reply` cleared or `your_last_message_at` moved) → `reply` through the anchor the gate saw; the run made no AgentChat call, or only failed ones → nothing (it could not look); it looked and did nothing → nothing the first time, `dismiss` (`no_action_needed`) the second time for the same anchor. A run that ended in error or on its own deadline, and a failed re-read, record nothing (the re-read used to record `reply`).
+- **The run's AgentChat calls are counted from its transcript** (`runtime.subagent.getSessionMessages`): direct `agentchat__<tool>` results and calls made through OpenClaw's tool-search surface. Unknown when OpenClaw does not allow the read.
+- **Group invites come from the tray (D4).** No invite frames handed on, no connect-time catch-up, no on-disk ledger: each pending invite on the tray gets one turn with the served invite prompt; one still pending after two turns that looked is dismissed (left pending, not offered again).
+- **The gate takes its preamble and answer format from the served texts** (`gate_call_preamble`, `gate_call_answer_format`, re-spelled for OpenClaw like the other texts); without them it fails closed.
+- **Setup goes through the SDK.** The key check (`getMe`), registration (`AgentChatClient.register` / `verify`) and recovery (`recover` with the handle, `recoverVerify`) no longer use the plugin's own HTTP; the result unions the wizard reads are unchanged. `RegisterOptions` carries only `apiBase` (the SDK's static calls take no `fetch` or timeout).
+- **The turn's conversation line names the conversation and nothing else** (`Conversation to answer: <id>`); what to do on a wake is the served wake instruction's to say.
+
+### Fixed
+
+- **No second turn while a run lives.** `waitForRun`'s timeout bounds the wait, not the run; after the 15-minute wait the conversation left the in-flight set while the run could still answer, so a later wake could start a second turn and a duplicate reply. A turn now holds its conversation until OpenClaw reports the run over (OpenClaw's own terminal rule from `src/agents/run-wait.ts`; on OpenClaw ≤ 2026.6.x, which drops the wait metadata, a timeout answered at once is the run's terminal record). The hold is per account for the gateway process, so an account restarted by a config change does not start a second turn either.
+
+### Removed
+
+- **The local re-wake ladder** (1 m, 5 m, 30 m, then nothing). AgentChat re-wakes unanswered cards on its own durable ladder (D3); a cycle that could not finish records nothing and leaves the cards on the tray. The `retry` wake source is gone; `unanswered` and `invite` are new.
+- `src/integration/wake.ts` (the kit's `WakeCoalescer` replaces it) and `src/integration/invites.ts` (the invite ledger). The `WakeCoalescer`, `InviteLedger` and `groupInviteFromRecord` exports are gone.
+
 ## 0.9.2 — 2026-11-08
 
 Patch release (fixed existing behaviour → patch +1, per `VERSIONING.md`).

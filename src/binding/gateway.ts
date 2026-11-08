@@ -33,8 +33,8 @@ import {
 import { multiAccountRefusal } from '../channel-account.js'
 import { registerIntegration, unregisterIntegration, getIntegration } from './runtime-registry.js'
 import { AgentInvoker } from '../integration/invoker.js'
-import { InviteLedger, groupInviteFromRecord } from '../integration/invites.js'
 import { TextsStore } from '../integration/texts.js'
+import { runningTurnsFor } from '../integration/running.js'
 import { refreshIdentityLine } from '../integration/placement.js'
 import {
   createRuntimeModelCall,
@@ -150,7 +150,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     }
     if (readLegacyReplyGateFailOpenFromEnv()) {
       ctx.log?.warn?.(
-        `[agentchat:${ctx.accountId}] ${LEGACY_REPLY_GATE_FAIL_OPEN_ENV} is set but no longer honoured — a gate that cannot run fails closed (nothing recorded, no turn) and re-wakes on the ladder`,
+        `[agentchat:${ctx.accountId}] ${LEGACY_REPLY_GATE_FAIL_OPEN_ENV} is set but no longer honoured — a gate that cannot run fails closed (nothing recorded, no turn); the server re-wakes the cards`,
       )
     }
 
@@ -198,13 +198,8 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       })
     }
     await texts.start()
-    const invites = new InviteLedger({
-      accountId: ctx.accountId,
-      onWriteError: (err) => ctx.log?.warn?.(`[agentchat:${ctx.accountId}] invite ledger could not be written: ${err instanceof Error ? err.message : String(err)}`),
-    })
 
-    // One recorder per account for the socket's counters and the ladder's
-    // retries. OpenClaw offers a plugin no Prometheus registry (see
+    // One recorder per account for the socket's counters. OpenClaw offers a plugin no Prometheus registry (see
     // `metrics.ts`), so the counters live here and the status probe reads
     // them: `openclaw channels capabilities --channel agentchat`.
     const metrics = createInMemoryMetrics()
@@ -237,7 +232,9 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
             return turnReadiness({ cfg: live.cfg, apiBase: config.apiBase, apiKey: config.apiKey, live: live.live })
           },
           texts,
-          invites,
+          // The account's running turns outlive this invoker: a config
+          // change restarts the account while its runs go on in OpenClaw.
+          running: runningTurnsFor(ctx.accountId),
           logger,
           metrics,
           gateEnabled: readReplyGateEnabledFromEnv(),
@@ -256,7 +253,6 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           texts,
           handlers: {
             onWake: (source) => invoker.wake(source),
-            onGroupInvite: (invite) => invoker.groupInvite(invite, 'live'),
             onConnected: (at) => {
               if (blocked) {
                 blocked = false
@@ -264,11 +260,6 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
               }
               ctx.log?.info?.(`[agentchat:${ctx.accountId}] connected at ${new Date(at).toISOString()} (agent ${agentId})`)
               ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: true, linked: true, statusState: 'linked', lastConnectedAt: at }, 'ready'))
-              // Invite frames are live-only (not part of any drain), so an
-              // invite that landed while the socket was down is fetched once
-              // per connect and handed to the invoker, which dedups by id
-              // against the ledger.
-              void catchUpInvites(ctx.accountId, client, invoker, logger)
             },
             onBlocked: (info) => {
               const close = `close ${info.code}${info.reason ? ` ${info.reason}` : ''}`
@@ -332,29 +323,6 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     await unregisterIntegration(ctx.accountId)
     ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false }, 'stopped'))
   },
-}
-
-async function catchUpInvites(
-  accountId: string,
-  client: ReturnType<typeof getClient>,
-  invoker: AgentInvoker,
-  logger: Logger,
-): Promise<void> {
-  try {
-    const invites: unknown = await client.listGroupInvites()
-    if (!Array.isArray(invites)) return
-    let surfaced = 0
-    for (const row of invites) {
-      const invite = groupInviteFromRecord(row)
-      if (invite && invoker.groupInvite(invite, 'catch-up')) surfaced += 1
-    }
-    if (surfaced > 0) logger.info({ accountId, surfaced }, 'pending group invites surfaced on connect')
-  } catch (err) {
-    logger.warn(
-      { accountId, err: err instanceof Error ? err.message : String(err) },
-      'pending-invite catch-up failed — live invite frames are unaffected and the agent can still list invites with the hosted tools',
-    )
-  }
 }
 
 export { getIntegration }

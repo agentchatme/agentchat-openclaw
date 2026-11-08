@@ -16,11 +16,12 @@
  *                                   looked at; the agent reads it through the
  *                                   hosted tools inside its turn.
  *   - `wake`                     → `onWake(reason)` — the server's content-free
- *                                   wake (a deferred conversation's reminder).
+ *                                   wake (a deferred conversation's reminder,
+ *                                   or cards still unanswered).
  *   - every successful HELLO     → `onWake('connect')` — whatever landed while
  *                                   the socket was down is on the tray.
- *   - `group.invite.received`    → `onGroupInvite(invite)` — the second wake
- *                                   kind; not on the tray, not gated.
+ *   - `group.invite.received`    → `onWake('invite')` — the invite itself is
+ *                                   read from the tray (tray v1), like a card.
  *
  * `ackOnReceipt: true`: the SDK acknowledges every `message.new` the moment
  * the frame is parsed, before any handler runs — delivered means this
@@ -54,12 +55,13 @@ import type { Logger } from '../log.js'
 import type { MetricsRecorder } from '../metrics.js'
 import { createNoopMetrics } from '../metrics.js'
 import { AGENTCHAT_CLIENT_IDENTITY } from '../client-identity.js'
-import { groupInviteFromRecord, type GroupInvite } from './invites.js'
 import type { WakeSource } from './invoker.js'
 
 /** A server wake frame's `reason` → the fixed wake-source set (the metric label must stay bounded). */
 export function wakeSourceOf(reason: unknown): WakeSource {
-  return reason === 'reminder' ? 'reminder' : 'other'
+  if (reason === 'reminder') return 'reminder'
+  if (reason === 'unanswered') return 'unanswered'
+  return 'other'
 }
 
 /**
@@ -88,8 +90,6 @@ export interface WakeDetail {
 export interface SocketHandlers {
   /** A wake: the tray may have changed. `source` is for the log line and the metric label only. */
   onWake?: (source: WakeSource, detail: WakeDetail) => void
-  /** The second wake kind. */
-  onGroupInvite?: (invite: GroupInvite) => void
   /** Once per accepted HELLO (initial + every reconnect), before the connect wake. */
   onConnected?: (at: number) => void
   /** Every socket close the SDK reports (never for our own `stop()`). The state that follows says what comes next. */
@@ -306,21 +306,20 @@ export class IntegrationSocket {
 
   private onWakeFrame(frame: WakeFrame): void {
     this.frames += 1
-    const reason: unknown = frame.payload?.reason
-    const detail: WakeDetail = { conversationId: frame.payload.conversation_id }
-    this.logger.info({ ...detail, reason, step: frame.payload.step }, 'wake — server wake frame')
-    this.wake(wakeSourceOf(reason), detail)
+    const payload = (frame.payload ?? {}) as { reason?: unknown; conversation_id?: unknown; conversation_ids?: unknown; step?: unknown }
+    const detail: WakeDetail = typeof payload.conversation_id === 'string' ? { conversationId: payload.conversation_id } : {}
+    const conversations = Array.isArray(payload.conversation_ids) ? payload.conversation_ids.length : undefined
+    this.logger.info({ ...detail, reason: payload.reason, step: payload.step, ...(conversations !== undefined ? { conversations } : {}) }, 'wake — server wake frame')
+    this.wake(wakeSourceOf(payload.reason), detail)
   }
 
   private onInvite(message: WsMessage): void {
     this.frames += 1
-    const invite = groupInviteFromRecord(message.payload)
-    if (!invite) {
-      this.logger.warn({ keys: Object.keys(message.payload ?? {}).sort() }, 'group.invite.received without ids — dropped')
-      return
-    }
     this.invites += 1
-    this.guard('onGroupInvite', () => this.handlers.onGroupInvite?.(invite))
+    // Only the ids for the log line; the invite itself is read from the tray.
+    const payload = (message.payload ?? {}) as { id?: unknown; group_id?: unknown }
+    this.logger.debug({ inviteId: payload.id, groupId: payload.group_id }, 'wake — group.invite.received')
+    this.wake('invite', {})
   }
 
   private wake(source: WakeSource, detail: WakeDetail): void {

@@ -66,8 +66,8 @@ in OpenClaw's state-dir `.env` (`~/.openclaw/.env`, mode `0600`), which
 OpenClaw reads at start as its global environment fallback. That file is
 the one place the plugin writes a secret; the writer lives in
 `src/integration/placement.ts` and performs only local filesystem I/O. The
-plugin's other files on disk — the served-texts cache and the invite
-ledger under `<state dir>/agentchat/<accountId>/` — hold no secret.
+plugin's other file on disk — the served-texts cache under
+`<state dir>/agentchat/<accountId>/` — holds no secret.
 
 The separation is structural, not stylistic. Single-purpose modules
 are easier to audit, easier to fuzz, and easier to reason about in

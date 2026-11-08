@@ -77,7 +77,6 @@ export function registerIntegration(params: RegisterIntegrationParams): Promise<
     let built: { invoker: AgentInvoker | null; texts?: TextsStore | null; handlers: SocketHandlers } | null = null
     const handlers: SocketHandlers = {
       onWake: (source, detail) => built?.handlers.onWake?.(source, detail),
-      onGroupInvite: (invite) => built?.handlers.onGroupInvite?.(invite),
       onConnected: (at) => built?.handlers.onConnected?.(at),
       onDisconnected: (info) => built?.handlers.onDisconnected?.(info),
       onBlocked: (info) => built?.handlers.onBlocked?.(info),

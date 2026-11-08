@@ -26,10 +26,8 @@ export { IntegrationSocket, realtimeOptionsFor } from './integration/socket.js'
 export type { SocketHandlers, SocketHealth, SocketState, SocketDisconnect, SocketBlocked, IntegrationSocketOptions } from './integration/socket.js'
 export { AgentInvoker } from './integration/invoker.js'
 export type { AgentInvokerOptions, CycleResult, CycleOutcome, WakeSource } from './integration/invoker.js'
-export { WakeCoalescer } from './integration/wake.js'
+export { RunningTurns, runningTurnsFor } from './integration/running.js'
 export { TextsStore, loadTexts, loadIdentityLine } from './integration/texts.js'
-export { InviteLedger, groupInviteFromRecord } from './integration/invites.js'
-export type { GroupInvite } from './integration/invites.js'
 export {
   wakeTurnPrompt,
   inviteTurnPrompt,
