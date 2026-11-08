@@ -81,22 +81,23 @@ describe('agents-anchor', () => {
   })
 
   describe('writeAgentsAnchor', () => {
-    it('creates the workspace dir when it does not exist (first-run install) and writes the text it was given, fenced', () => {
+    it('creates the workspace dir when it does not exist (first-run install) and writes the text it was given, fenced with the kit handle line', () => {
       const workspace = path.join(tmpDir, 'workspace-fresh')
       expect(fs.existsSync(workspace)).toBe(false)
       writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
       const file = path.join(workspace, 'AGENTS.md')
       expect(fs.existsSync(file)).toBe(true)
       const content = fs.readFileSync(file, 'utf-8')
-      expect(content).toBe(`<!-- agentchat:start -->\n${IDENTITY_LINE}\n<!-- agentchat:end -->\n`)
+      expect(content).toBe(`<!-- agentchat:start -->\n<!-- agentchat:handle alice -->\n${IDENTITY_LINE}\n<!-- agentchat:end -->\n`)
       expect(readAgentsAnchor({ cfg: cfgFor(workspace) })).toEqual({ present: true, text: IDENTITY_LINE, path: file })
     })
 
-    it('verifies the handle landed (the served text names it) and refuses an empty handle or text', () => {
+    it('refuses a text that does not name the handle (nothing written), an empty handle or an empty text', () => {
       const workspace = path.join(tmpDir, 'workspace')
       expect(() => writeAgentsAnchor({ cfg: cfgFor(workspace), handle: '', text: IDENTITY_LINE })).toThrow(/handle is empty/u)
       expect(() => writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: '   ' })).toThrow(/identity line is empty/u)
-      expect(() => writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'carol', text: IDENTITY_LINE })).toThrow(/@carol did not land/u)
+      expect(() => writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'carol', text: IDENTITY_LINE })).toThrow(/no served identity text names @carol/u)
+      expect(fs.existsSync(path.join(workspace, 'AGENTS.md'))).toBe(false)
     })
 
     it('preserves pre-existing AGENTS.md content (does not clobber)', () => {

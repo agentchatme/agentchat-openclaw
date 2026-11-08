@@ -28,6 +28,7 @@ Contract v1 ("finish the gate"). The release number is set at the release step. 
 - **The receive cycle is the SDK kit's `ReceiveLoop`** (gate-call mode): the socket's wakes and the echo filter, one cycle per burst, the tray, the gate, the hold on cards whose turn runs, the composed turn prompts (`conversation_id: …` / `invite_id: …` after the served text), and the after-turn rule. The plugin plugs in the gate call, the OpenClaw run, readiness and its log lines; `AGENTCHAT_REPLY_GATE_ENABLED=0` is the kit's single-run mode.
 - **The served texts are the kit's `TextsCache`** (file copy at start, daily refresh, back-off after a failure, a failed refresh keeps the last copy), spelled for OpenClaw on the way out. The cache file format is the kit's; an older `texts.json` is ignored and rewritten on the first fetch.
 - **The hosted-tools check is the kit's `probeHostedTools`** (status, doctor): `initialize` and `tools/list` with the key, not ok when the tools a turn needs are missing (it only checked `initialize`).
+- **The identity block in `AGENTS.md` is rendered and found by the kit's `anchor` functions**: the block gains a handle line (`<!-- agentchat:handle <handle> -->`); blocks written by earlier releases (unmarked, or with the legacy `agentchat-skill` fences) are recognised and replaced; a text that does not name the handle is refused before anything is written.
 - **Invite turns get a fresh OpenClaw session each**, so a second turn for the same invite does not see the first one's history.
 
 ### Removed
