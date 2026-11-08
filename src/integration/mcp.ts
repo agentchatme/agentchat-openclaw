@@ -32,16 +32,15 @@
  *   2,000 characters per server.
  */
 
-import { AGENTCHAT_CLIENT_HEADERS } from '../client-identity.js'
+import { integration } from 'agentchatme'
+
+import { AGENTCHAT_CLIENT_IDENTITY } from '../client-identity.js'
 import { API_KEY_ENV } from '../credentials/read-env.js'
 import { MCP_SERVER_NAME } from './turn.js'
 
 export const MCP_PATH = '/mcp'
 export const AUTH_HEADER_TEMPLATE = `Bearer \${${API_KEY_ENV}}`
 export const DEFAULT_API_BASE = 'https://api.agentchat.me'
-
-/** The MCP protocol revision this probe speaks; the server answers with the one it serves. */
-const MCP_PROTOCOL_VERSION = '2025-06-18'
 
 export function hostedMcpUrl(apiBase: string = DEFAULT_API_BASE): string {
   return `${apiBase.replace(/\/+$/, '')}${MCP_PATH}`
@@ -160,17 +159,20 @@ export interface McpProbeResult {
   readonly serverName?: string
   readonly serverVersion?: string
   readonly protocolVersion?: string
-  /** Whether the server published `instructions` (OpenClaw injects them into the system prompt). */
-  readonly hasInstructions?: boolean
+  /** Every tool the server listed for this key (bare names). */
+  readonly tools?: readonly string[]
+  /** Tools a turn needs that the server did not list. */
+  readonly missing?: readonly string[]
   readonly error?: string
 }
 
 /**
- * Doctor check: is the hosted MCP server reachable with this key? Sends one
- * MCP `initialize` over Streamable HTTP with the bearer key — the same
- * request OpenClaw makes on connect — and reads the server's answer. A
- * `401` means the key does not authenticate; a transport error means the
- * endpoint is not reachable from here.
+ * Doctor and status check: can this key list the hosted tools? The SDK
+ * kit's `probeHostedTools` — one MCP `initialize` and one `tools/list` over
+ * Streamable HTTP with the bearer key, the requests OpenClaw makes on
+ * connect. A `401` means the key does not authenticate; a transport error
+ * means the endpoint is not reachable from here; a list without the tools a
+ * turn needs means a turn could not look.
  */
 export async function probeHostedMcp(params: {
   apiKey: string
@@ -178,68 +180,22 @@ export async function probeHostedMcp(params: {
   timeoutMs?: number
   fetch?: typeof fetch
 }): Promise<McpProbeResult> {
-  const fetchImpl = params.fetch ?? fetch
-  const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), params.timeoutMs ?? 10_000)
-  try {
-    const res = await fetchImpl(hostedMcpUrl(params.apiBase ?? DEFAULT_API_BASE), {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${params.apiKey}`,
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
-        ...AGENTCHAT_CLIENT_HEADERS,
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: {
-          protocolVersion: MCP_PROTOCOL_VERSION,
-          capabilities: {},
-          clientInfo: { name: '@agentchatme/openclaw doctor', version: '0' },
-        },
-      }),
-      signal: controller.signal,
-    })
-    if (!res.ok) {
-      return { ok: false, status: res.status, error: res.status === 401 ? 'the key does not authenticate against the hosted MCP server' : `HTTP ${res.status}` }
-    }
-    const text = await res.text()
-    const result = readInitializeResult(text)
-    if (!result) return { ok: false, status: res.status, error: 'no initialize result in the answer' }
-    const serverInfo = (result.serverInfo ?? {}) as Record<string, unknown>
-    return {
-      ok: true,
-      status: res.status,
-      serverName: typeof serverInfo.name === 'string' ? serverInfo.name : undefined,
-      serverVersion: typeof serverInfo.version === 'string' ? serverInfo.version : undefined,
-      protocolVersion: typeof result.protocolVersion === 'string' ? result.protocolVersion : undefined,
-      hasInstructions: typeof result.instructions === 'string' && result.instructions.trim().length > 0,
-    }
-  } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) }
-  } finally {
-    clearTimeout(timer)
+  const result = await integration.probeHostedTools({
+    apiBase: params.apiBase ?? DEFAULT_API_BASE,
+    apiKey: params.apiKey,
+    clientIdentity: AGENTCHAT_CLIENT_IDENTITY,
+    ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
+    ...(params.fetch ? { fetch: params.fetch } : {}),
+  })
+  const missing = result.missing ?? []
+  return {
+    ok: result.ok,
+    ...(result.status !== undefined ? { status: result.status } : {}),
+    ...(result.serverName ? { serverName: result.serverName } : {}),
+    ...(result.serverVersion ? { serverVersion: result.serverVersion } : {}),
+    ...(result.protocolVersion ? { protocolVersion: result.protocolVersion } : {}),
+    ...(result.tools ? { tools: result.tools } : {}),
+    ...(missing.length > 0 ? { missing } : {}),
+    ...(result.error ? { error: result.error } : !result.ok && missing.length > 0 ? { error: `the server lists no ${missing.join(', ')} for this key` } : {}),
   }
-}
-
-/** The initialize result from a JSON body or an SSE body (`data: {...}` lines). */
-function readInitializeResult(text: string): Record<string, unknown> | null {
-  const candidates: string[] = []
-  const trimmed = text.trim()
-  if (trimmed.startsWith('{')) candidates.push(trimmed)
-  for (const line of text.split(/\r?\n/)) {
-    if (line.startsWith('data:')) candidates.push(line.slice(5).trim())
-  }
-  for (const candidate of candidates) {
-    try {
-      const parsed = JSON.parse(candidate) as Record<string, unknown>
-      const result = parsed.result
-      if (result && typeof result === 'object' && !Array.isArray(result)) return result as Record<string, unknown>
-    } catch {
-      // not JSON — try the next candidate
-    }
-  }
-  return null
 }

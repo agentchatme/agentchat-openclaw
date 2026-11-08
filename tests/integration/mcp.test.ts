@@ -77,35 +77,56 @@ describe('hosted MCP entry', () => {
   })
 })
 
-describe('probeHostedMcp', () => {
-  const initResult = { protocolVersion: '2025-06-18', serverInfo: { name: 'agentchat', version: '0.1.1' }, instructions: 'Use agentchat_inbox first.', capabilities: {} }
+describe('probeHostedMcp — the kit probe with the plugin identity', () => {
+  const initResult = { protocolVersion: '2025-06-18', serverInfo: { name: 'agentchat', version: '0.1.1' }, capabilities: {} }
+  const toolsResult = { tools: [{ name: 'agentchat_inbox' }, { name: 'agentchat_decide' }, { name: 'agentchat_send_message' }] }
+  const key = ['ac', 'live', 'k'.repeat(24)].join('_')
 
-  it('sends one MCP initialize with the bearer key and reads a JSON answer', async () => {
-    let seen: { url: string; init: RequestInit } | null = null
-    const result = await probeHostedMcp({
-      apiKey: 'ac_live_' + 'k'.repeat(24),
-      fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
-        seen = { url: String(input), init: init ?? {} }
-        return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: initResult }), { status: 200, headers: { 'content-type': 'application/json' } })
-      }) as typeof fetch,
-    })
-    expect(seen!.url).toBe('https://api.agentchat.me/mcp')
-    expect((seen!.init.headers as Record<string, string>).authorization).toBe('Bearer ac_live_' + 'k'.repeat(24))
-    expect(JSON.parse(seen!.init.body as string).method).toBe('initialize')
-    expect(result).toEqual({ ok: true, status: 200, serverName: 'agentchat', serverVersion: '0.1.1', protocolVersion: '2025-06-18', hasInstructions: true })
+  function server(answers: { tools?: unknown; status?: number; sse?: boolean } = {}) {
+    const seen: Array<{ url: string; init: RequestInit }> = []
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({ url: String(input), init: init ?? {} })
+      if (answers.status) return new Response('', { status: answers.status })
+      const body = JSON.parse(String(init?.body)) as { id: number; method: string }
+      const result = body.method === 'initialize' ? initResult : (answers.tools ?? toolsResult)
+      const json = JSON.stringify({ jsonrpc: '2.0', id: body.id, result })
+      return answers.sse
+        ? new Response(`event: message\ndata: ${json}\n\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+        : new Response(json, { status: 200, headers: { 'content-type': 'application/json', 'mcp-session-id': 's1' } })
+    }) as typeof fetch
+    return { seen, fetchImpl }
+  }
+
+  it('initialize then tools/list with the bearer key and the OpenClaw identity; ok when the tools a turn needs are listed', async () => {
+    const { seen, fetchImpl } = server()
+    const result = await probeHostedMcp({ apiKey: key, fetch: fetchImpl })
+    expect(seen.map((s) => JSON.parse(String(s.init.body)).method)).toEqual(['initialize', 'tools/list'])
+    expect(seen[0]!.url).toBe('https://api.agentchat.me/mcp')
+    const headers = seen[0]!.init.headers as Record<string, string>
+    expect(headers.authorization).toBe(`Bearer ${key}`)
+    expect(headers['X-AgentChat-Client'] ?? headers['x-agentchat-client']).toBe('openclaw')
+    expect(result).toMatchObject({ ok: true, status: 200, serverName: 'agentchat', serverVersion: '0.1.1', protocolVersion: '2025-06-18' })
+    expect(result.tools).toContain('agentchat_inbox')
   })
 
-  it('reads an SSE-framed answer too', async () => {
-    const result = await probeHostedMcp({
-      apiKey: 'k',
-      fetch: (async () => new Response(`event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', id: 1, result: initResult })}\n\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } })) as typeof fetch,
-    })
+  it('reads SSE-framed answers too', async () => {
+    const { fetchImpl } = server({ sse: true })
+    const result = await probeHostedMcp({ apiKey: 'k', fetch: fetchImpl })
     expect(result.ok).toBe(true)
     expect(result.serverName).toBe('agentchat')
   })
 
+  it('a list without the tools a turn needs is not ok, and says which', async () => {
+    const { fetchImpl } = server({ tools: { tools: [{ name: 'agentchat_send_message' }] } })
+    const result = await probeHostedMcp({ apiKey: 'k', fetch: fetchImpl })
+    expect(result.ok).toBe(false)
+    expect(result.missing).toEqual(['agentchat_inbox', 'agentchat_decide'])
+    expect(result.error).toMatch(/agentchat_inbox/)
+  })
+
   it('reports 401 as a key that does not authenticate', async () => {
-    const result = await probeHostedMcp({ apiKey: 'bad', fetch: (async () => new Response('', { status: 401 })) as typeof fetch })
+    const { fetchImpl } = server({ status: 401 })
+    const result = await probeHostedMcp({ apiKey: 'bad', fetch: fetchImpl })
     expect(result.ok).toBe(false)
     expect(result.status).toBe(401)
     expect(result.error).toMatch(/does not authenticate/)
