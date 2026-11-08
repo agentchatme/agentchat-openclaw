@@ -25,7 +25,7 @@ import {
 } from '../../src/integration/socket.js'
 import type { MetricsRecorder } from '../../src/metrics.js'
 import { PACKAGE_VERSION } from '../../src/version.js'
-import { MockWebSocket, MockWebSocketCtor, messageNew, sentFrames, settle, wakeFrame } from '../helpers/mock-websocket.js'
+import { MockWebSocket, MockWebSocketCtor, messageNew, sentFrames, flushAsync, wakeFrame } from '../helpers/mock-websocket.js'
 import { silentLogger } from '../helpers/logger.js'
 import { testKey } from '../helpers/keys.js'
 
@@ -115,7 +115,7 @@ describe('IntegrationSocket — HELLO and wake frames', () => {
     ws.simulateMessage(wakeFrame('conv_9', 2))
     ws.simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: ['conv_1', 'conv_2'], step: 1, at: '2026-11-08T00:00:00.000Z' } })
     ws.simulateMessage({ ...wakeFrame('conv_10'), payload: { ...(wakeFrame('conv_10').payload as object), reason: 'something-new' } })
-    await settle()
+    await flushAsync()
     expect(metrics.wakes).toEqual(['connect', 'reminder', 'unanswered', 'other'])
     expect(sentFrames(ws, 'ack')).toEqual([])
     expect(socket.getHealth().counters.wakeFrames).toBe(3)
@@ -128,7 +128,7 @@ describe('IntegrationSocket — HELLO and wake frames', () => {
     const ws = MockWebSocket.latest()
     ws.simulateReady()
     ws.simulateMessage(messageNew('conv_1', 1, { sender: '@bob' }))
-    await settle()
+    await flushAsync()
     expect(sentFrames(ws, 'ack')).toEqual([])
   })
 
@@ -141,7 +141,7 @@ describe('IntegrationSocket — HELLO and wake frames', () => {
     sockets.push(socket)
     await start(socket)
     MockWebSocket.latest().simulateReady()
-    await settle()
+    await flushAsync()
     expect(socket.getHealth().state).toBe('ready')
   })
 })
@@ -260,7 +260,7 @@ describe('IntegrationSocket — the SDK lifecycle, reported as it is', () => {
     expect(socket.getHealth().state).toBe('stopped')
     expect(ws.closed).not.toBeNull()
     ws.simulateClose(1000, 'bye')
-    await settle()
+    await flushAsync()
     expect(events).toEqual(['state:connecting', 'state:ready', 'connected', 'state:stopped'])
     expect(metrics.states.at(-1)).toBe('stopped')
     stop(socket) // idempotent

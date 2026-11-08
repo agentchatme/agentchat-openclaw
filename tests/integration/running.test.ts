@@ -15,6 +15,8 @@ import {
   OPENCLAW_DEFAULT_RUN_TIMEOUT_SECONDS,
   TURN_OVERDUE_MS,
   accountTurns,
+  accountsWithTurns,
+  findAccountTurns,
   hungTurnsReason,
   overdueTurnLine,
   overdueTurnLines,
@@ -87,7 +89,7 @@ describe('a run that never ends', () => {
   })
 
   it('the operator’s release lets go of a hung hold, or of a turn the kit still holds', () => {
-    const turns = new AccountTurns()
+    const turns = new AccountTurns({ now: () => 45 * 60_000 })
     let wakes = 0
     turns.setLive('loop#1', () => void (wakes += 1))
     heldByKit(turns, record('run_1', 'conv_a'))
@@ -174,8 +176,137 @@ describe('a release that comes in through a gateway RPC', () => {
     const seenOnRelease: Array<string | undefined> = []
     turns.tracker.onRelease(() => seenOnRelease.push(scope.getStore()))
     // …the operator's release arrives inside a gateway request's context.
-    scope.run('gateway-rpc', () => turns.release('conv_a'))
+    scope.run('gateway-rpc', () => turns.release('conv_a', { force: true }))
     expect(seenOnRelease).toEqual(['account-task'])
     expect(seenOnWake).toEqual(['account-task'])
+  })
+})
+
+describe('a release sticks (the old run never touches the next turn)', () => {
+  it('released after the hand-off: later "still running" reports hand nothing off again, and the next turn for the conversation stays held', () => {
+    let clock = 35 * 60_000
+    const turns = new AccountTurns({ now: () => clock })
+    heldByKit(turns, record('run_1', 'conv_a'))
+    expect(turns.handOff('run_1')).not.toBeNull()
+    expect(turns.release('conv_a')).toMatchObject({ released: true, what: 'hung', runId: 'run_1' })
+    expect(turns.stateOf('run_1')).toBe('released')
+    // The conversation gets a new turn…
+    const next = heldByKit(turns, record('run_2', 'conv_a', { startedAt: clock }))
+    const lane = turns.laneGeneration
+    // …and the old run keeps reporting "still running" every 5 minutes.
+    for (let i = 0; i < 6; i += 1) {
+      clock += 5 * 60_000
+      expect(turns.handOff('run_1')).toBeNull()
+    }
+    expect(turns.tracker.holds(next!)).toBe(true)
+    expect(turns.laneGeneration).toBe(lane)
+    expect(turns.hungCount).toBe(0)
+    expect(turns.runningRuns().map((r) => r.runId)).toEqual(['run_2']) // the released run holds nothing: not reported
+  })
+
+  it('released while the kit held it (--force): reaching 30 minutes later hands nothing off', () => {
+    let clock = 10 * 60_000
+    const turns = new AccountTurns({ now: () => clock })
+    heldByKit(turns, record('run_1', 'conv_a'))
+    expect(turns.release('conv_a', { force: true })).toMatchObject({ released: true, what: 'running', runId: 'run_1' })
+    const next = heldByKit(turns, record('run_2', 'conv_a', { startedAt: clock }))
+    clock = 31 * 60_000
+    expect(turns.handOff('run_1')).toBeNull()
+    expect(turns.tracker.holds(next!)).toBe(true)
+  })
+
+  it('a run that was let go of records nothing when it ends', async () => {
+    const recorded: string[] = []
+    const turns = new AccountTurns({ now: () => 45 * 60_000 })
+    turns.configure({ recorder: async (rec) => void recorded.push(rec.runId) })
+    heldByKit(turns, record('run_1', 'conv_a'))
+    turns.handOff('run_1')
+    turns.release('conv_a')
+    await turns.ended('run_1', { status: 'completed', agentchatCalls: { made: 2, failed: 0 } })
+    expect(recorded).toEqual([])
+  })
+})
+
+describe('the release command refuses a young turn without --force', () => {
+  it('under 30 minutes: refused, saying a second reply is possible; with force: released', () => {
+    const turns = new AccountTurns({ now: () => 12 * 60_000 })
+    heldByKit(turns, record('run_1', 'conv_a'))
+    const refused = turns.release('conv_a')
+    expect(refused.released).toBe(false)
+    expect(refused).toMatchObject({ reason: expect.stringMatching(/^the turn for conversation conv_a has run 12 min — under 30 min it is most likely still working, .*two replies.*--force$/) })
+    expect(turns.tracker.conversationRunning('conv_a')).toBe(true)
+    expect(turns.release('conv_a', { force: true })).toMatchObject({ released: true, what: 'running' })
+  })
+
+  it('a kit hold with no run behind it yet follows the same rule', () => {
+    const turns = new AccountTurns({ now: () => 0 })
+    turns.tracker.begin({ kind: 'reply', conversationId: 'conv_a', anchor: 'msg_1' })
+    expect(turns.release('conv_a').released).toBe(false)
+    expect(turns.release('conv_a', { force: true })).toMatchObject({ released: true, what: 'running', runId: null })
+  })
+})
+
+describe('a handed-off turn gets the after-turn rule when it ends', () => {
+  it('the recorder runs with the record (the gate card) and the end, while the conversation is still held; then the hold drops and the loop wakes', async () => {
+    const turns = new AccountTurns({ now: () => 35 * 60_000 })
+    const seen: Array<{ runId: string; status: string; held: boolean; card: string | undefined }> = []
+    turns.configure({
+      recorder: async (rec, end) => void seen.push({ runId: rec.runId, status: end.status, held: turns.tracker.conversationRunning(rec.id), card: rec.card?.conversation_id }),
+    })
+    let wakes = 0
+    turns.setLive('loop#1', () => void (wakes += 1))
+    const gateCard = { conversation_id: 'conv_a' } as never
+    heldByKit(turns, record('run_1', 'conv_a', { card: gateCard }))
+    turns.handOff('run_1')
+    await turns.ended('run_1', { status: 'completed', agentchatCalls: { made: 3, failed: 0 } })
+    expect(seen).toEqual([{ runId: 'run_1', status: 'completed', held: true, card: 'conv_a' }])
+    expect(turns.tracker.conversationRunning('conv_a')).toBe(false)
+    expect(wakes).toBe(2) // the hand-off, then the end
+  })
+
+  it('a turn the kit still holds is the kit’s to record: the recorder is not called', async () => {
+    const recorded: string[] = []
+    const turns = new AccountTurns()
+    turns.configure({ recorder: async (rec) => void recorded.push(rec.runId) })
+    heldByKit(turns, record('run_1', 'conv_a'))
+    await turns.ended('run_1', { status: 'completed', agentchatCalls: null })
+    expect(recorded).toEqual([])
+  })
+})
+
+describe('gate off: the one run a cycle waits on', () => {
+  it('handed off after 30 minutes: the cycle is let go of (the run goes on), it counts as hung, its end drops it', async () => {
+    const turns = new AccountTurns({ now: () => 31 * 60_000 })
+    let letGo = 0
+    let wakes = 0
+    turns.setLive('loop#1', () => void (wakes += 1))
+    turns.started({ runId: 'run_1', kind: 'run', id: 'run_1', anchor: null, sessionKey: 's', startedAt: 0, owner: 'loop#1' }, { letGo: () => void (letGo += 1) })
+    expect(turns.handOff('run_1')).toMatchObject({ kind: 'run' })
+    expect(letGo).toBe(1)
+    expect(turns.hungCount).toBe(1)
+    expect(turns.laneGeneration).toBe(1)
+    expect(turns.handOff('run_1')).toBeNull()
+    expect(overdueTurnLine({ kind: 'run', id: 'run_1', elapsedMs: 31 * 60_000 }, {})).toMatch(/^the gate-off run run_1 has run 31 min — the loop went on without it/)
+    await turns.ended('run_1')
+    expect(turns.hungCount).toBe(0)
+    expect(wakes).toBe(2)
+  })
+
+  it('the release command lets go of it by run id (refused under 30 minutes without --force)', () => {
+    const turns = new AccountTurns({ now: () => 5 * 60_000 })
+    let letGo = 0
+    turns.started({ runId: 'run_1', kind: 'run', id: 'run_1', anchor: null, sessionKey: 's', startedAt: 0, owner: 'loop#1' }, { letGo: () => void (letGo += 1) })
+    expect(turns.release('run_1').released).toBe(false)
+    expect(turns.release('run_1', { force: true })).toMatchObject({ released: true, what: 'running', key: 'run:run_1', runId: 'run_1' })
+    expect(letGo).toBe(1)
+  })
+})
+
+describe('lookups never create account state', () => {
+  it('findAccountTurns is undefined for an account with no turns; accountTurns creates', () => {
+    expect(findAccountTurns('nobody')).toBeUndefined()
+    accountTurns('somebody')
+    expect(findAccountTurns('somebody')).toBe(accountTurns('somebody'))
+    expect(accountsWithTurns()).toEqual(['somebody'])
   })
 })

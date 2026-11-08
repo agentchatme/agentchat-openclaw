@@ -22,10 +22,16 @@
  *   - `timeout` with `endedAt`, `stopReason` or `livenessState` → ended (the run's own deadline)
  *   - `timeout` that is a hard timeout → ended: a `timeoutPhase` of
  *     preflight / provider / tool_execution / post_turn, or `providerStarted`
- *     without a restart stop (`resolveAgentRunTerminalFacts`); an elapsed
- *     wait only ever reports `queue` or `gateway_draining`
+ *     without a restart stop (`resolveAgentRunTerminalFacts`)
  *   - `timeout` with an `error`          → ended
  *   - any other `timeout`                → running (the wait elapsed)
+ *
+ * On OpenClaw main a wait that elapses comes back bare — `{ runId, status:
+ * 'timeout' }`, no snapshot (`src/gateway/agent-turn/agent-wait.ts`) — a
+ * queued run as `pending` with `timeoutPhase: 'queue'`, and a gateway
+ * lifecycle reset as `timeout` with `timeoutPhase: 'gateway_draining'`. A
+ * bare `timeout` carries none of the metadata keys, so it is read by the
+ * timing rule below: one that took the whole wait is asked again.
  *
  * Older OpenClaw lines (2026.6 and 2026.7, e.g. 2026.6.10 and 2026.7.35)
  * hand a plugin only `{ status, error }` (the wait metadata is dropped on the
@@ -156,9 +162,10 @@ export interface RunWatchOptions {
  *
  * A wait call that fails is not an end either (the gateway did not answer;
  * the run is OpenClaw's): the watch backs off and asks again. A run the
- * gateway does not know is answered like a wait that elapsed (`timeout`,
- * `timeoutPhase: 'queue'` — OpenClaw has no "not found" for `agent.wait`), so
- * it is watched until the account lets go of it (`./hung.ts`).
+ * gateway does not know is answered like a wait that elapsed (a bare
+ * `{ status: 'timeout' }` after the whole wait — OpenClaw has no "not found"
+ * for `agent.wait`), so it is watched until the turn is handed off and let
+ * go of (`./running.ts`).
  */
 export async function watchRunUntilEnded(options: RunWatchOptions): Promise<RunWatchResult> {
   const chunkMs = options.chunkMs ?? DEFAULT_RUN_WAIT_CHUNK_MS

@@ -76,7 +76,7 @@ export function sentFrames(ws: MockWebSocket, type: string): Array<Record<string
 }
 
 /** Let a handful of macrotask ticks run so async settlement completes. Real timers only. */
-export async function settle(ticks = 10): Promise<void> {
+export async function flushAsync(ticks = 10): Promise<void> {
   for (let i = 0; i < ticks; i++) {
     await new Promise((r) => setTimeout(r, 0))
   }

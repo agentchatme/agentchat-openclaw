@@ -30,7 +30,7 @@ import {
 } from '../channel-account.js'
 import { validateApiKey } from '../setup-client.js'
 import { getIntegration, listActiveAccounts } from './runtime-registry.js'
-import { accountTurns, hungTurnsReason, overdueTurnLines } from '../integration/running.js'
+import { findAccountTurns, hungTurnsReason, overdueTurnLines, restartHoldLines } from '../integration/running.js'
 import { cycleTroubleLine } from '../integration/loop.js'
 import { checkPlacement, resolvePlacementAgentId, restoreIdentityLine } from '../integration/placement.js'
 import { DEFAULT_API_BASE, withHostedMcpEntry } from '../integration/mcp.js'
@@ -66,15 +66,18 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
         )
       }
     }
-    // A turn the running integration (this process) has held past 30 minutes.
+    // A turn the running integration (this process) has held past 30 minutes,
+    // or a conversation held after a gateway restart.
     // And cycles that decided nothing several times in a row.
     for (const accountId of listActiveAccounts()) {
       const status = getIntegration(accountId)?.loop?.loop.status()
       if (!status) continue
-      const turns = accountTurns(accountId)
-      const hung = hungTurnsReason(turns, cfg)
-      if (hung) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${hung}`)
-      for (const line of overdueTurnLines(turns.runningRuns(), cfg)) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${line}`)
+      const turns = findAccountTurns(accountId)
+      if (turns) {
+        const hung = hungTurnsReason(turns, cfg)
+        if (hung) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${hung}`)
+        for (const line of [...overdueTurnLines(turns.runningRuns(), cfg), ...restartHoldLines(turns)]) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${line}`)
+      }
       const trouble = cycleTroubleLine(status.recentCycles ?? [])
       if (trouble) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${trouble}`)
     }

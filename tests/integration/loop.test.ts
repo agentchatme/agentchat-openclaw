@@ -15,11 +15,12 @@ import { parseChannelConfig } from '../../src/config-schema.js'
 import { CYCLE_TROUBLE_RUN, createIntegrationLoop, cycleTroubleLine, type IntegrationLoop } from '../../src/integration/loop.js'
 import type { TurnOutcome, TurnReadiness, TurnRequest, TurnStarter } from '../../src/integration/model.js'
 import { AccountTurns } from '../../src/integration/running.js'
+import { createAfterTurnRecorder } from '../../src/integration/after-turn.js'
 import { IntegrationSocket } from '../../src/integration/socket.js'
 import { turnEndOf } from '../../src/integration/turns.js'
 import { card, invite, tray } from '../helpers/fake-client.js'
 import { capturingLogger } from '../helpers/logger.js'
-import { MockWebSocket, MockWebSocketCtor, messageNew, sentFrames, settle } from '../helpers/mock-websocket.js'
+import { MockWebSocket, MockWebSocketCtor, messageNew, sentFrames, flushAsync } from '../helpers/mock-websocket.js'
 import { SERVED_TEXTS, staticTexts } from '../helpers/texts.js'
 
 const KEY = ['ac', 'live', 'w'.repeat(24)].join('_')
@@ -122,7 +123,7 @@ async function start(opts: { paceMs?: number; turns?: AccountTurns; server?: Ret
   await integration.loop.start()
   const ws = MockWebSocket.latest()
   ws.simulateReady(['ack', 'heartbeat', 'rewake'])
-  await settle(20)
+  await flushAsync(20)
   const h = { server, runs, modelCalls, logger, socket, integration, ws, turns }
   live.push(h)
   return h
@@ -131,7 +132,7 @@ async function start(opts: { paceMs?: number; turns?: AccountTurns; server?: Ret
 async function message(h: Harness, conversationId: string, seq: number, text = 'hello', sender = '@bob'): Promise<void> {
   h.server.cards.set(conversationId, card(conversationId, `msg_${conversationId}_${seq}`, { preview: { message_id: `msg_${conversationId}_${seq}`, sender, text, at: '2026-11-08T00:00:00.000Z' } }))
   h.ws.simulateMessage(messageNew(conversationId, seq, { sender, id: `msg_${conversationId}_${seq}` }))
-  await settle(30)
+  await flushAsync(30)
 }
 
 beforeEach(() => MockWebSocket.reset())
@@ -153,7 +154,7 @@ describe('the loop on the SDK socket', () => {
     expect(h.runs.requests).toHaveLength(0)
 
     h.ws.simulateMessage(messageNew('conv_a', 2, { sender: '@Alice', id: 'msg_echo' }))
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.reads()).toBe(readsAfterConnect + 1)
   })
 
@@ -184,7 +185,7 @@ describe('a reply turn is one OpenClaw run', () => {
     await message(h, 'conv_a', 1)
     h.server.cards.set('conv_a', card('conv_a', 'msg_conv_a_1', { you_owe_reply: false, your_last_message_at: '2026-11-08T00:01:00.000Z' }))
     h.runs.end(0)
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.posts).toEqual(['conv_a:reply:msg_conv_a_1'])
     expect(h.logger.at('info').some((l) => /reply recorded after the turn \(answer_sent\)/.test(l.msg ?? ''))).toBe(true)
   })
@@ -193,7 +194,7 @@ describe('a reply turn is one OpenClaw run', () => {
     const h = await start()
     await message(h, 'conv_a', 1)
     h.runs.end(0)
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.posts).toEqual([])
     expect(h.logger.at('info').some((l) => /nothing recorded after the turn \(silent_first\)/.test(l.msg ?? ''))).toBe(true)
   })
@@ -203,10 +204,10 @@ describe('a reply turn is one OpenClaw run', () => {
     await message(h, 'conv_a', 1)
     await message(h, 'conv_a', 2)
     h.ws.simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: ['conv_a'], step: 1, at: '2026-11-08T00:00:00.000Z' } })
-    await settle(30)
+    await flushAsync(30)
     expect(h.runs.requests).toHaveLength(1)
     h.runs.end(0, { status: 'error', error: 'model crashed' })
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.posts).toEqual([])
   })
 
@@ -214,7 +215,7 @@ describe('a reply turn is one OpenClaw run', () => {
     const h = await start()
     await message(h, 'conv_a', 1)
     h.runs.end(0, { status: 'gone' })
-    await settle(30)
+    await flushAsync(30)
     await message(h, 'conv_a', 2)
     expect(h.runs.requests).toHaveLength(1)
     expect(h.server.posts).toEqual([])
@@ -239,7 +240,7 @@ describe('an account restart while a run lives (OpenClaw restarts the channel ta
 
     server.cards.set('conv_a', card('conv_a', 'msg_conv_a_2', { you_owe_reply: false, your_last_message_at: '2026-11-08T00:01:00.000Z' }))
     first.runs.end(0)
-    await settle(30)
+    await flushAsync(30)
     expect(server.posts).toEqual(['conv_a:reply:msg_conv_a_1'])
     expect(turns.tracker.size).toBe(0)
   })
@@ -260,7 +261,7 @@ describe('an account restart while a run lives (OpenClaw restarts the channel ta
 
     first.runs.end(0) // looked, sent nothing: the card (now msg 2) stays
     await new Promise((resolve) => setTimeout(resolve, 400))
-    await settle(30)
+    await flushAsync(30)
     expect(second.modelCalls.length).toBeGreaterThan(gateCallsBefore)
     expect(second.runs.requests).toHaveLength(1)
     expect(second.runs.requests[0]!.prompt).toContain('conv_a')
@@ -277,7 +278,7 @@ describe('a run that never ends does not freeze the account', () => {
 
     const runId = h.turns.runningRuns()[0]!.runId
     expect(h.turns.handOff(runId)).not.toBeNull() // what the run watch does past 30 minutes
-    await settle(30)
+    await flushAsync(30)
     expect(h.runs.requests).toHaveLength(2)
     expect(h.runs.requests[1]!.prompt).toContain('conv_b')
     // …on the next OpenClaw lane: the hung run would block its own.
@@ -288,9 +289,50 @@ describe('a run that never ends does not freeze the account', () => {
     expect(h.runs.requests.filter((r) => r.prompt.includes('conv_a'))).toHaveLength(1)
 
     h.runs.end(0) // OpenClaw finally ends it: nothing recorded for it, the card is gated again
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.posts.filter((p) => p.startsWith('conv_a'))).toEqual([])
     expect(h.turns.hungCount).toBe(0)
+  })
+})
+
+describe('a handed-off turn that ends (item: no lost after-turn recording)', () => {
+  it('an answer sent at minute 35 records reply, and the card is not gated again', async () => {
+    const turns = new AccountTurns()
+    const h = await start({ turns })
+    turns.configure({ recorder: createAfterTurnRecorder({ client: h.server.client, logger: h.logger }) })
+    await message(h, 'conv_a', 1)
+    const runId = h.turns.runningRuns()[0]!.runId
+    expect(h.turns.handOff(runId)).not.toBeNull()
+    await flushAsync(30)
+    // The run sends its answer at minute 35, then ends.
+    h.server.cards.set('conv_a', card('conv_a', 'msg_conv_a_1', { you_owe_reply: false, your_last_message_at: '2026-11-08T00:35:00.000Z' }))
+    h.runs.end(0)
+    await flushAsync(50)
+    expect(h.server.posts).toEqual(['conv_a:reply:msg_conv_a_1'])
+    expect(h.runs.requests).toHaveLength(1) // no second turn for it
+    expect(h.turns.hungCount).toBe(0)
+  })
+
+  it('a release sticks through the loop: the old run’s later reports leave the new turn for the conversation alone', async () => {
+    let clock = 0
+    const turns = new AccountTurns({ now: () => clock })
+    const h = await start({ turns })
+    await message(h, 'conv_a', 1)
+    const oldRun = h.turns.runningRuns()[0]!.runId
+    clock = 31 * 60_000
+    h.turns.handOff(oldRun)
+    expect(h.turns.release('conv_a')).toMatchObject({ released: true, what: 'hung' })
+    await message(h, 'conv_a', 2) // gated again: a new turn
+    expect(h.runs.requests).toHaveLength(2)
+    clock = 41 * 60_000
+    expect(h.turns.handOff(oldRun)).toBeNull() // what the next "still running" report does
+    expect(h.turns.tracker.conversationRunning('conv_a')).toBe(true) // the new turn still holds it
+    await message(h, 'conv_a', 3)
+    expect(h.runs.requests).toHaveLength(2)
+    h.server.cards.set('conv_a', card('conv_a', 'msg_conv_a_3', { you_owe_reply: false, your_last_message_at: '2026-11-08T00:42:00.000Z' }))
+    h.runs.end(1)
+    await flushAsync(30)
+    expect(h.server.posts).toEqual(['conv_a:reply:msg_conv_a_2']) // the new turn's own outcome, recorded by the kit
   })
 })
 
@@ -300,7 +342,7 @@ describe('D5 rules of the kit, as recorded through this plugin', () => {
     await message(h, 'conv_a', 1)
     h.server.cards.set('conv_a', card('conv_a', 'msg_conv_a_1', { you_owe_reply: false, your_last_message_at: '2026-11-08T00:01:00.000Z' }))
     h.runs.end(0, { status: 'error', error: 'the run crashed after the send' })
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.posts).toEqual(['conv_a:reply:msg_conv_a_1'])
   })
 
@@ -308,13 +350,13 @@ describe('D5 rules of the kit, as recorded through this plugin', () => {
     const h = await start({ paceMs: 0 })
     await message(h, 'conv_a', 1)
     h.runs.end(0, { agentchatCalls: null })
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.posts).toEqual([])
     h.ws.simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: ['conv_a'], step: 1, at: '2026-11-08T00:00:00.000Z' } })
-    await settle(30)
+    await flushAsync(30)
     expect(h.runs.requests).toHaveLength(2)
     h.runs.end(1, { agentchatCalls: null })
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.posts).toEqual(['conv_a:defer:msg_conv_a_1'])
   })
 
@@ -322,11 +364,11 @@ describe('D5 rules of the kit, as recorded through this plugin', () => {
     const h = await start({ paceMs: 0 })
     await message(h, 'conv_a', 1)
     h.runs.end(0)
-    await settle(30)
+    await flushAsync(30)
     h.ws.simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: ['conv_a'], step: 1, at: '2026-11-08T00:00:00.000Z' } })
-    await settle(30)
+    await flushAsync(30)
     h.runs.end(1)
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.posts).toEqual(['conv_a:dismiss:msg_conv_a_1'])
   })
 })
@@ -336,7 +378,7 @@ describe('invites from the tray', () => {
     const h = await start()
     h.server.invites.set('inv_1', invite('inv_1'))
     h.ws.simulateMessage({ type: 'group.invite.received', payload: { id: 'inv_1', group_id: 'grp_inv_1' } })
-    await settle(30)
+    await flushAsync(30)
     expect(h.modelCalls).toHaveLength(0)
     expect(h.runs.requests).toHaveLength(1)
     const first = h.runs.requests[0]!
@@ -344,15 +386,15 @@ describe('invites from the tray', () => {
     expect(first.prompt.startsWith(SERVED_TEXTS.invite_prompt)).toBe(true)
     expect(first.prompt).toContain('inv_1')
     h.runs.end(0)
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.dismissed).toEqual([])
 
     h.ws.simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: [], step: 1, at: '2026-11-08T00:00:00.000Z' } })
-    await settle(30)
+    await flushAsync(30)
     expect(h.runs.requests).toHaveLength(2)
     expect(h.runs.requests[1]!.sessionKey).not.toBe(first.sessionKey)
     h.runs.end(1)
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.dismissed).toEqual(['inv_1'])
   })
 })
@@ -378,8 +420,28 @@ describe('OpenClaw-side switches', () => {
     expect(h.runs.requests).toHaveLength(1)
     expect(h.runs.requests[0]!.prompt).toBe(SERVED_TEXTS.wake_instruction)
     h.runs.end(0)
-    await settle(30)
+    await flushAsync(30)
     expect(h.server.posts).toEqual([])
+  })
+
+  it('gate off: a run still going after 30 minutes is handed off — the cycle ends, the next run goes to a fresh lane', async () => {
+    const h = await start({ gateEnabled: false })
+    await message(h, 'conv_a', 1)
+    expect(h.runs.requests).toHaveLength(1)
+    await message(h, 'conv_b', 1) // the cycle still waits on the first run
+    expect(h.runs.requests).toHaveLength(1)
+    const runId = h.turns.runningRuns()[0]!.runId
+    expect(h.turns.handOff(runId)).toMatchObject({ kind: 'run' })
+    await flushAsync(30)
+    await message(h, 'conv_b', 2)
+    expect(h.runs.requests).toHaveLength(2)
+    expect(h.runs.requests[1]!.lane).toBe('agentchat-integration:default:1')
+    h.server.cards.clear() // the runs answered everything
+    h.runs.end(0)
+    h.runs.end(1)
+    await flushAsync(30)
+    expect(h.turns.hungCount).toBe(0)
+    for (let i = 2; i < h.runs.requests.length; i += 1) h.runs.end(i)
   })
 
   it('no gate-call texts (an older server): the gate uses the SDK’s 1.2 wording (lead decision) and works', async () => {

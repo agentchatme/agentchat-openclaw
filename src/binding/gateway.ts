@@ -37,12 +37,18 @@ import { multiAccountRefusal } from '../channel-account.js'
 import { registerIntegration, unregisterIntegration, getIntegration } from './runtime-registry.js'
 import { createIntegrationLoop } from '../integration/loop.js'
 import { OpenClawTexts, createTextsCache, spellTextsForOpenClaw } from '../integration/texts.js'
-import { TURN_OVERDUE_MS, accountTurns, hungTurnsReason, overdueTurnLine } from '../integration/running.js'
+import { TURN_OVERDUE_MS, accountTurns, hungTurnsReason, overdueTurnLine, restartHoldLines } from '../integration/running.js'
+import { createAfterTurnRecorder } from '../integration/after-turn.js'
+import { TurnStore } from '../integration/turn-store.js'
+import { turnEndOf } from '../integration/turns.js'
+import { readAgentChatCalls } from '../integration/run.js'
+import { getPluginRuntime } from '../integration/runtime-holder.js'
 import { removeOldStateFiles } from '../integration/state.js'
 import { refreshIdentityLine } from '../integration/placement.js'
 import {
   createRuntimeModelCall,
   createRuntimeTurnStarter,
+  createRunWatcher,
   resolveIntegrationAgentId,
   resolveGateAgent,
   readLlmAgentOverrideOptIn,
@@ -187,6 +193,36 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     const overdueWarned = new Map<string, number>()
     /** The account's turns for this process (shared with any later loop for the account). */
     const turns = accountTurns(ctx.accountId)
+    /** The "still running" report for a run, past 30 minutes: a warn line at each 30-minute mark. */
+    const reportOverdue = (runId: string, kind: 'reply' | 'invite' | 'run', id: string, elapsedMs: number, handed: boolean) => {
+      const mark = Math.floor(elapsedMs / TURN_OVERDUE_MS)
+      if (!handed && overdueWarned.get(runId) === mark) return
+      overdueWarned.set(runId, mark)
+      ctx.log?.warn?.(`[agentchat:${ctx.accountId}] ${overdueTurnLine({ kind, id, elapsedMs }, readLiveConfig(ctx.cfg).cfg)}`)
+    }
+    // A turn that ends outside the kit's watch (handed off, or after a
+    // restart) gets the after-turn rule here; the turns in flight are
+    // written to disk for the next start (`integration/turn-store.ts`).
+    const watchRun = createRunWatcher({
+      onStillRunning: ({ runId, elapsedMs }) => {
+        const held = turns.restartHolds().find((hold) => hold.watching === runId)
+        if (held && elapsedMs >= TURN_OVERDUE_MS) reportOverdue(runId, held.record.kind, held.record.id, elapsedMs, false)
+      },
+    })
+    turns.configure({
+      recorder: createAfterTurnRecorder({ client, logger }),
+      store: new TurnStore(ctx.accountId),
+      watch: async (record) => {
+        const outcome = await watchRun(record)
+        return outcome ? turnEndOf(outcome) : null
+      },
+      readCalls: (sessionKey, runId) => readAgentChatCalls(getPluginRuntime(), sessionKey, runId),
+      logger,
+    })
+    // Turns the last process left in flight (a gateway restart): held before
+    // the first gate, in case OpenClaw continues their sessions.
+    turns.adopt()
+    for (const line of restartHoldLines(turns)) ctx.log?.warn?.(`[agentchat:${ctx.accountId}] ${line}`)
 
     // The served texts: the kit's cache — the file copy at once, one fetch,
     // then daily (backing off after a failure). Unreachable with nothing
@@ -239,20 +275,22 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           startRun: createRuntimeTurnStarter({
             onStillRunning: ({ runId, sessionKey, elapsedMs }) => {
               const run = turns.run(runId)
+              const state = turns.stateOf(runId)
+              if (state === 'released') {
+                // Let go of by the operator: it holds nothing, and is never handed off again.
+                logger.debug({ runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000) }, 'released turn still running in OpenClaw — it holds nothing')
+                return
+              }
               logger.info(
-                { runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000), ...(run ? { [run.kind === 'reply' ? 'conversationId' : 'inviteId']: run.id } : {}) },
+                { runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000), ...(run ? { [run.kind === 'reply' ? 'conversationId' : run.kind === 'invite' ? 'inviteId' : 'run']: run.id } : {}) },
                 'turn still running — its conversation stays in flight until OpenClaw reports the run ended',
               )
               if (!run || elapsedMs < TURN_OVERDUE_MS) return
-              // Past 30 minutes the turn is handed off: the account gets its
-              // turn slot back, this conversation stays held until the run
-              // ends. Reported then, and every further 30 minutes.
-              const handed = turns.handOff(runId)
-              const half = Math.floor(elapsedMs / TURN_OVERDUE_MS)
-              if (handed || overdueWarned.get(runId) !== half) {
-                overdueWarned.set(runId, half)
-                ctx.log?.warn?.(`[agentchat:${ctx.accountId}] ${overdueTurnLine({ kind: run.kind, id: run.id, elapsedMs }, readLiveConfig(ctx.cfg).cfg)}`)
-              }
+              // Past 30 minutes the turn is handed off, once: the account
+              // gets its turn slot back, this conversation stays held until
+              // the run ends. Reported then, and every further 30 minutes.
+              const handed = turns.handOff(runId) !== null
+              reportOverdue(runId, run.kind, run.id, elapsedMs, handed)
             },
             onWaitError: ({ runId, sessionKey, error, attempt, retryInMs }) =>
               logger[attempt === 1 ? 'warn' : 'debug']({ runId, sessionKey, error, attempt, retryInMs }, 'waiting for the turn to end failed — asking OpenClaw again'),

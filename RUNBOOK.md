@@ -107,17 +107,28 @@ The SDK socket reconnects with exponential backoff (`reconnect.initialBackoffMs`
 - A wake that lands during a cycle runs one more cycle afterwards (the tray is re-read), never a parallel one.
 - The same group burst is one wake: the window restarts on every wake (the cycle fires 2 s after the last message) and is capped at 6 s after the first, so a slow burst 1–2 s apart is still one cycle and a steady trickle cannot starve the gate.
 - One turn per conversation decided reply; the turns run on one OpenClaw lane per account (`agentchat-integration:<account>`), so they never overlap each other or the agent's main lane. A cycle ends when its turns are admitted, not when they finish — the next wake is serviced while earlier turns still run (`integration ready — … turns N` counts admitted turns; the gate line's `turnsStarted` too).
-- A turn holds its conversation until OpenClaw reports the run ended (`waitForRun` is asked again after every 5-minute wait), and that hold outlives an account restart in the same gateway process — so a long run is never joined by a second turn for the same message. A gateway restart ends the runs with the process.
+- A turn holds its conversation until OpenClaw reports the run ended (`waitForRun` is asked again after every 5-minute wait), and that hold outlives an account restart in the same gateway process — so a long run is never joined by a second turn for the same message. A gateway restart ends the runs with the process; see "A gateway restart during a turn".
 - An invite is offered once per turn that can look at it; one still pending after two such turns is dismissed on the server (left pending, not shown again).
 
 ### A turn that never ends
 
 OpenClaw gives a plugin no way to stop a subagent run; its own run deadline (`agents.defaults.timeoutSeconds`, 48 h by default; `0` = none) is what ends one. Until then:
 
-- After 30 minutes the turn is **handed off**: the log says `a turn for conversation … has run N min — that conversation stays held (no second reply) until the run ends; …`, the account's turn slot is released, and new turns run on a fresh OpenClaw lane (`agentchat-integration:<account>:<n>`) so they do not queue behind the hung run. Other conversations are answered as usual; that one is not gated again until OpenClaw reports the run ended. Then it is gated again at once (nothing is recorded for the hung run; if it did answer, the card no longer owes a reply).
+- After 30 minutes the turn is **handed off**, once: the log says `a turn for conversation … has run N min — that conversation stays held (no second reply) until the run ends; …`, the account's turn slot is released, and new turns run on a fresh OpenClaw lane (`agentchat-integration:<account>:<n>`) so they do not queue behind the hung run. Other conversations are answered as usual; that one is not gated again until OpenClaw reports the run ended. Then the after-turn rule is applied to it (`after-turn rule applied (turn ended outside the loop's watch)` with `action=…`): an answer it sent records `reply`; a silent end records nothing and the card is gated again.
+- With the gate off (`AGENTCHAT_REPLY_GATE_ENABLED=0`) the one run a cycle waits on is handed off the same way: `gate off — the run is still going; the loop goes on without it (a later run may overlap it)`.
 - With **two** hung turns held the account stops gating: `openclaw channels capabilities` and `openclaw doctor` show `2 turns are hung in OpenClaw (…) — no gate calls until one ends, so other cards are waiting on the tray; …`.
-- `openclaw agentchat release <conversation_id>` (add `--account <id>` for another account) lets go of one: its conversation may be gated again at once, and new turns move to a fresh lane. The run is **not** stopped — if it answers later, the peer can get a second reply. Restarting the gateway ends every run (and OpenClaw does not resume them).
+- `openclaw agentchat release <conversation_id>` (add `--account <id>` for another account; a gate-off run by its run id) lets go of one: its conversation may be gated again at once, and new turns move to a fresh lane. The run is **not** stopped — if it answers later, the peer can get a second reply. A turn under 30 minutes is refused (`nothing released: the turn for conversation … has run N min — under 30 min it is most likely still working, …; wait, or repeat with --force`); `--force` releases it anyway. A release sticks: the old run's later reports never touch the next turn for that conversation, and nothing is recorded for it when it ends.
 - Lower `agents.defaults.timeoutSeconds` if turns should end sooner.
+
+### A gateway restart during a turn
+
+A restart ends every run with the process. OpenClaw main (2026.11.5-beta.1 and later; not 2026.10.9) then wakes the agent's main session — the root a plugin's turn session is registered under — with "send a fresh instruction to the same retained child session when appropriate", so the agent may run that turn's session again. The integration writes the turns in flight to `<state dir>/agentchat/<account>/turns.json` (no message text), and on the next start:
+
+- each of those conversations is held before the first gate — `conversation … is held for 3 more min: its turn was running when the gateway restarted, and OpenClaw may continue that turn's session` (warn; also in `channels capabilities` and `doctor`);
+- the after-turn rule is applied to what the ended run did: an answer it sent records `reply`, otherwise nothing (the server re-wakes the card);
+- a run OpenClaw starts in that turn's session keeps the hold until it ends (`OpenClaw continued a turn session after the restart — its conversation stays held until that run ends`), then gets the after-turn rule too; with none, the hold ends after 3 minutes and the conversation is gated again.
+
+`openclaw agentchat release <conversation_id>` lets go of such a hold at once. Deleting `turns.json` while the gateway is stopped turns the defense off for that restart.
 
 ### A config change while a turn runs
 

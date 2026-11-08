@@ -21,7 +21,7 @@ import { getClient } from './sdk-client.js'
 import { probeHostedMcp } from '../integration/mcp.js'
 import { checkPlacement, resolvePlacementAgentId, type PlacementCheck } from '../integration/placement.js'
 import { cachedIdentityLine } from '../integration/texts.js'
-import { accountTurns, hungTurnsReason, overdueTurnLines } from '../integration/running.js'
+import { findAccountTurns, hungTurnsReason, overdueTurnLines, restartHoldLines } from '../integration/running.js'
 import { cycleTroubleLine } from '../integration/loop.js'
 import type { SocketState } from '../integration/socket.js'
 import type { MetricsSnapshot } from '../metrics.js'
@@ -116,8 +116,9 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
           turns: loopStatus.counters.turnsStarted + loopStatus.counters.inviteTurnsStarted + loopStatus.counters.runsStarted,
         }
       : undefined
-    const turnsHere = live ? accountTurns(account.accountId) : null
-    const overdue = turnsHere ? [...(hungTurnsReason(turnsHere, cfg) ? [hungTurnsReason(turnsHere, cfg)!] : []), ...overdueTurnLines(turnsHere.runningRuns(), cfg)] : []
+    const turnsHere = live ? (findAccountTurns(account.accountId) ?? null) : null
+    const hungReason = turnsHere ? hungTurnsReason(turnsHere, cfg) : null
+    const overdue = turnsHere ? [...(hungReason ? [hungReason] : []), ...overdueTurnLines(turnsHere.runningRuns(), cfg), ...restartHoldLines(turnsHere)] : []
     const trouble = loopStatus ? cycleTroubleLine(loopStatus.recentCycles ?? []) : null
     const servedFrom = live?.texts?.source
     const textsSource: 'server' | 'cache' | 'missing' | undefined = live ? (servedFrom === 'server' || servedFrom === 'cache' ? servedFrom : 'missing') : undefined

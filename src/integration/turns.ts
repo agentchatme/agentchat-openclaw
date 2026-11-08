@@ -21,7 +21,8 @@
  * 30 minutes the turn is handed off (`AccountTurns.handOff`): the kit's slot
  * is freed so other conversations get turns, while that one stays held until
  * OpenClaw reports the run ended (its run deadline,
- * `agents.defaults.timeoutSeconds`).
+ * `agents.defaults.timeoutSeconds`) — then the after-turn rule is applied
+ * to it there, with the card the gate saw, which the record carries.
  */
 
 import type { integration } from 'agentchatme'
@@ -61,6 +62,9 @@ export function createLoopTurnStarter(options: LoopTurnStarterOptions): integrat
       sessionKey: admission.sessionKey,
       startedAt: now(),
       owner: options.owner,
+      // What the after-turn rule compares when the turn ends outside the
+      // kit's watch (handed off, or after a restart).
+      ...(request.kind === 'reply' ? { card: request.card, category: request.category } : { invite: request.invite }),
     })
     options.logger.info(
       { kind: request.kind, sessionKey, runId: admission.runId, ...(request.kind === 'reply' ? { conversationId: id } : { inviteId: id }) },
@@ -71,7 +75,8 @@ export function createLoopTurnStarter(options: LoopTurnStarterOptions): integrat
         options.logger.warn({ sessionKey, runId: outcome.runId }, 'turn end not confirmed: the plugin runtime is gone — its card stays held')
         return { status: 'still_running', detail: 'the plugin runtime is gone' }
       }
-      options.turns.ended(admission.runId)
+      const end = turnEndOf(outcome)
+      void options.turns.ended(admission.runId, end)
       options.logger[outcome.status === 'ok' ? 'info' : 'warn'](
         {
           sessionKey,
@@ -83,7 +88,7 @@ export function createLoopTurnStarter(options: LoopTurnStarterOptions): integrat
         },
         request.kind === 'reply' ? 'turn ended (final text discarded; the send is a hosted-tool call)' : 'group-invite turn ended',
       )
-      return turnEndOf(outcome)
+      return end
     })
     return { started: true, done }
   }

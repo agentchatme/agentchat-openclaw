@@ -356,3 +356,28 @@ export function createRuntimeTurnStarter(params: {
     return { ran: true, runId, sessionKey, done }
   }
 }
+
+/**
+ * Watches a run this process did not start — one OpenClaw's restart resume
+ * started in a turn's session — until OpenClaw reports it ended, and what
+ * AgentChat calls it made. Resolves null only when the plugin runtime is
+ * gone. Never rejects.
+ */
+export function createRunWatcher(params: {
+  runtime?: () => PluginRuntime | null
+  onStillRunning?: (info: { runId: string; sessionKey: string; elapsedMs: number }) => void
+  waitChunkMs?: number
+} = {}): (run: { runId: string; sessionKey: string }) => Promise<TurnOutcome | null> {
+  const getRuntime = params.runtime ?? getPluginRuntime
+  return async ({ runId, sessionKey }) => {
+    const watched = await watchRunUntilEnded({
+      runtime: getRuntime,
+      runId,
+      ...(params.waitChunkMs !== undefined ? { chunkMs: params.waitChunkMs } : {}),
+      ...(params.onStillRunning ? { onStillRunning: (elapsedMs: number) => params.onStillRunning?.({ runId, sessionKey, elapsedMs }) } : {}),
+    })
+    if (!watched.ended) return null
+    const agentchatCalls = await readAgentChatCalls(getRuntime(), sessionKey, runId)
+    return { ran: true, runId, status: watched.status, ...(watched.error ? { error: watched.error } : {}), agentchatCalls, elapsedMs: watched.elapsedMs }
+  }
+}

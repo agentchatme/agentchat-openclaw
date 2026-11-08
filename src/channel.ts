@@ -56,6 +56,7 @@ import {
 } from './config-schema.js'
 import { validateApiKey } from './setup-client.js'
 import { registerReleaseCli, registerReleaseGatewayMethod } from './binding/release.js'
+import { registerRunObserver } from './binding/run-observer.js'
 
 import {
   agentchatGatewayAdapter,
@@ -567,7 +568,10 @@ export const agentchatChannelEntry: ReturnType<
   // registered for every CLI (parse-time metadata), the gateway half only
   // where the integration runs.
   registerCliMetadata: (api) => registerReleaseCli(api),
-  registerFull: (api) => registerReleaseGatewayMethod(api),
+  registerFull: (api) => {
+    registerReleaseGatewayMethod(api)
+    registerRunObserver(api)
+  },
 })
 
 export default agentchatChannelEntry

@@ -94,7 +94,7 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
     client: options.client,
     texts: options.texts,
     mode: gateEnabled ? 'gateCall' : 'singleRun',
-    ...(gateEnabled ? { callModel: options.callModel, startTurn } : { startRun: singleRunStarter(options, logger, now) }),
+    ...(gateEnabled ? { callModel: options.callModel, startTurn } : { startRun: singleRunStarter(options, owner, logger, now) }),
     socket: options.socket,
     ...(options.handle ? { handle: options.handle } : {}),
     toolNamer: OPENCLAW_TOOL_NAMER,
@@ -132,16 +132,36 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
   }
 }
 
-/** Single-run mode: one OpenClaw run with the served text; the cycle waits for its confirmed end. */
-function singleRunStarter(options: IntegrationLoopOptions, logger: Logger, now: () => number): integration.RunStarter {
+/**
+ * Single-run mode: one OpenClaw run with the served text; the cycle waits for
+ * its confirmed end. The run is recorded with the account's turns, so a run
+ * still going after 30 minutes is handed off like a turn — the cycle is let
+ * go of (the run goes on; new runs move to a fresh lane), so it cannot stall
+ * the loop — and `openclaw agentchat release <run id>` works on it.
+ */
+function singleRunStarter(options: IntegrationLoopOptions, owner: string, logger: Logger, now: () => number): integration.RunStarter {
   return async (request) => {
     const sessionKey = wakeSessionKey(options.agentId, now())
     logger.info({ sessionKey, cards: request.cards, invites: request.invites }, 'gate off — one run with the served wake instruction')
     const admission = await options.startRun({ sessionKey, prompt: request.prompt, lane: integrationLane(options.accountId, options.turns.laneGeneration) })
     if (!admission.ran) return { status: 'not_started', detail: admission.error }
-    const outcome = await admission.done
-    logger[outcome.status === 'ok' ? 'info' : 'warn']({ sessionKey, runId: outcome.runId, status: outcome.status, agentchatCalls: outcome.agentchatCalls ?? null }, 'gate off — run ended')
-    return outcome.status === 'ok' && !outcome.error ? { status: 'completed' } : { status: 'failed', detail: outcome.error ?? `run ended: ${outcome.status ?? 'unknown'}` }
+    let letGo: () => void = () => {}
+    const handedOff = new Promise<'let_go'>((resolve) => {
+      letGo = () => resolve('let_go')
+    })
+    const { runId } = admission
+    options.turns.started({ runId, kind: 'run', id: runId, anchor: null, sessionKey: admission.sessionKey, startedAt: now(), owner }, { letGo })
+    const ended = admission.done.then((outcome) => {
+      if (outcome.status !== 'gone') void options.turns.ended(runId)
+      logger[outcome.status === 'ok' ? 'info' : 'warn']({ sessionKey, runId, status: outcome.status, agentchatCalls: outcome.agentchatCalls ?? null }, 'gate off — run ended')
+      return outcome
+    })
+    const first = await Promise.race([ended, handedOff])
+    if (first === 'let_go') {
+      logger.warn({ sessionKey, runId }, 'gate off — the run is still going; the loop goes on without it (a later run may overlap it)')
+      return { status: 'failed', detail: 'the run was handed off while still going' }
+    }
+    return first.status === 'ok' && !first.error ? { status: 'completed' } : { status: 'failed', detail: first.error ?? `run ended: ${first.status ?? 'unknown'}` }
   }
 }
 

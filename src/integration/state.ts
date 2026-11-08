@@ -1,13 +1,17 @@
 /**
  * The plugin's own state on disk: `<OpenClaw state dir>/agentchat/<accountId>/`.
  *
- * One small JSON file lives there: the served texts (`texts.json`), a cache
+ * Two small JSON files live there: the served texts (`texts.json`), a cache
  * of what the server serves, so a gateway can start while the server is
- * unreachable. Files earlier releases kept here are removed on start
- * (`removeOldStateFiles`). Nothing secret, nothing authoritative — deleting the
- * directory costs one texts fetch.
+ * unreachable; and the turns in flight (`turns.json`, `./turn-store.ts`), so
+ * the next start after a gateway restart holds their conversations. Files
+ * earlier releases kept here are removed on start (`removeOldStateFiles`).
+ * Nothing secret, nothing authoritative — deleting the directory costs one
+ * texts fetch (and, while the gateway is stopped, the restart defense for
+ * that one restart).
  *
- * The SDK kit's cache writes it atomically (temp file + fsync + rename).
+ * Both are written atomically (temp file + rename; the kit's cache also
+ * fsyncs).
  */
 
 import * as fs from 'node:fs'

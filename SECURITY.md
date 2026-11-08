@@ -66,8 +66,12 @@ in OpenClaw's state-dir `.env` (`~/.openclaw/.env`, mode `0600`), which
 OpenClaw reads at start as its global environment fallback. That file is
 the one place the plugin writes a secret; the writer lives in
 `src/integration/placement.ts` and performs only local filesystem I/O. The
-plugin's other file on disk — the served-texts cache under
-`<state dir>/agentchat/<accountId>/` — holds no secret.
+plugin's other files on disk, under `<state dir>/agentchat/<accountId>/`,
+hold no secret: the served-texts cache (`texts.json`), and the turns in
+flight (`turns.json`, mode `0600`: run ids, session keys, conversation or
+invite ids, message ids and the card's reply/verdict fields — never message
+text), read once on the next start so a gateway restart cannot lead to a
+second reply.
 
 The separation is structural, not stylistic. Single-purpose modules
 are easier to audit, easier to fuzz, and easier to reason about in
