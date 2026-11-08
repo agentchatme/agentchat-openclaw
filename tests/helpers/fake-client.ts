@@ -55,24 +55,46 @@ export interface FakeClientOptions {
   invites?: unknown[]
   /** Reject these verdict posts (by conversation id). */
   rejectRecords?: Set<string>
+  /**
+   * What the host's one tray read after a completed reply turn sees (the
+   * read that asks for the whole tray, `limit: 50`). Default: the server's
+   * view — every card a cycle read was served, minus those a verdict was
+   * recorded for since (an unread card stays on the tray until something
+   * reads it; a newer served copy brings it back). Not counted in
+   * `trayCalls`; counted in `postTurnReads`.
+   */
+  afterTurn?: InboxTray | Error | (() => InboxTray | Error)
 }
 
 export function fakeClient(options: FakeClientOptions = {}) {
   const trays = [...(options.trays ?? [tray([])])]
   const posts: RecordedVerdict[] = []
   let trayCalls = 0
+  let postTurnReads = 0
+  // The server's tray as the fake knows it: the latest served copy of each
+  // card, dropped when a verdict is recorded for its conversation.
+  const unread = new Map<string, InboxCard>()
   const client = {
     inbox: {
-      tray: async (): Promise<InboxTray> => {
+      tray: async (opts: { waitMs?: number; limit?: number } = {}): Promise<InboxTray> => {
+        if (opts.limit === 50) {
+          postTurnReads += 1
+          const view = typeof options.afterTurn === 'function' ? options.afterTurn() : options.afterTurn
+          if (view instanceof Error) throw view
+          if (view) return view
+          return tray([...unread.values()])
+        }
         trayCalls += 1
         const next = trays.length > 1 ? trays.shift()! : trays[0]!
         if (next instanceof Error) throw next
+        for (const c of next.conversations) unread.set(c.conversation_id, c)
         return next
       },
     },
     decisions: {
       record: async (conversationId: string, opts: { decision: string; category?: string; throughMessageId?: string }): Promise<ReplyDecision> => {
         if (options.rejectRecords?.has(conversationId)) throw new Error(`record refused for ${conversationId}`)
+        unread.delete(conversationId)
         posts.push({
           conversationId,
           body: {
@@ -101,7 +123,7 @@ export function fakeClient(options: FakeClientOptions = {}) {
     },
     listGroupInvites: async () => options.invites ?? [],
   }
-  return { client, posts, trayCalls: () => trayCalls }
+  return { client, posts, trayCalls: () => trayCalls, postTurnReads: () => postTurnReads }
 }
 
 export type FakeClient = ReturnType<typeof fakeClient>['client']

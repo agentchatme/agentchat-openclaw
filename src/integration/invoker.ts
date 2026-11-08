@@ -18,7 +18,15 @@
  *    start: recorded at admission it marked the conversation read before
  *    the turn's own inbox call, which then waited on an empty tray, and a
  *    turn that crashed left the peer with a read receipt and no answer. A
- *    completed turn counts as read even if it chose not to send. A turn
+ *    completed turn counts as read even if it chose not to send — unless
+ *    the turn recorded a verdict for its conversation itself (the served
+ *    texts tell the model to record `reply` after its send, or `dismiss`
+ *    when it read and chose not to answer). One tray read after the run
+ *    shows that: the card left the tray (read, or hidden by a defer) or its
+ *    `your_last_decision` moved since the gate's tray. The host then
+ *    records nothing more, so the agent's own last verdict stands and a
+ *    reply is counted once. A failed read, or a card that may sit past a
+ *    truncated tray, records `reply` as before (reading is forward-only). A turn
  *    OpenClaw refuses, or one that ends in error or on the wait timeout,
  *    records nothing: the conversation stays unread, the card stays on the
  *    tray, and the ladder re-wakes so it is gated again (one more gate
@@ -557,6 +565,13 @@ export class AgentInvoker {
             )
             return
           }
+          if (await this.decidedInTurn(reply)) {
+            this.logger.info(
+              { sessionKey, conversationId: reply.conversationId },
+              'the turn recorded its own verdict — reply not recorded again',
+            )
+            return
+          }
           await this.recordReply(sessionKey, reply)
         } finally {
           this.replyTurnEnded(reply.conversationId)
@@ -584,6 +599,29 @@ export class AgentInvoker {
       this.logger.debug({ conversationId }, 'reply turn ended — re-reading the tray for the cards left out meanwhile')
       this.coalescer.wake()
     }
+  }
+
+  /**
+   * Whether the completed turn recorded a verdict for its conversation
+   * itself, seen on one fresh tray read. A card that left the tray was read
+   * (a verdict or a mark-read) or hidden by a `defer` — by the turn, since
+   * the host had recorded nothing for it. A card still there whose
+   * `your_last_decision` differs from the gate's copy got a verdict in the
+   * turn (a newer message keeps it on the tray). A card still there,
+   * unchanged, got nothing. A failed read, or a missing card past a
+   * truncated tray, claims nothing: `reply` is recorded as before.
+   */
+  private async decidedInTurn(reply: GateReply): Promise<boolean> {
+    let tray: InboxTray
+    try {
+      tray = await this.client.inbox.tray({ waitMs: 0, limit: POST_TURN_TRAY_LIMIT })
+    } catch (err) {
+      this.logger.info({ conversationId: reply.conversationId, err: describe(err) }, 'tray re-read after the turn failed — recording reply')
+      return false
+    }
+    const card = gate.cardsOf(tray).find((c) => c.conversation_id === reply.conversationId)
+    if (!card) return tray.truncated !== true
+    return lastDecisionAt(card) !== lastDecisionAt(reply.card)
   }
 
   /** The `reply` verdict for a completed turn. A record the server refuses leaves the conversation unread; the ladder re-wakes. */
@@ -652,6 +690,15 @@ export class AgentInvoker {
       this.logger.warn({ pending: refused, ...this.retry() }, 'invite turns refused — re-waking later')
     }
   }
+}
+
+/** Largest tray the server builds (`INBOX_TRAY_MAX_LIMIT`): the post-turn read asks for all of it. */
+const POST_TURN_TRAY_LIMIT = 50
+
+/** When the card's `your_last_decision` was recorded (server time), or null. Compared only with the same server field. */
+function lastDecisionAt(card: { your_last_decision?: { at?: string } | null }): string | null {
+  const at = card.your_last_decision?.at
+  return typeof at === 'string' && at.length > 0 ? at : null
 }
 
 function describe(err: unknown): string {

@@ -9,11 +9,13 @@ This package is in pre-1.0 development.
 
 ## Unreleased
 
-Proposed as 0.9.2 (fixed existing behaviour → patch +1, per `VERSIONING.md`; the release step sets the number). No code change.
+Proposed as 0.9.2 (fixed existing behaviour → patch +1, per `VERSIONING.md`; the release step sets the number).
 
 ### Fixed
 
 - **Manual 2.2.2.** The bundled `skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` 2.2.2 verbatim (0.9.1 bundled 2.2.0). The manual now tells the receive order this integration already follows: `dismiss` / `defer` recorded right away, `reply` only after the answer is sent — never before, because a send marks nothing read and a `reply` recorded first leaves a peer read and unanswered when the run stops in between. It also drops the retired `@chatfather` (platform questions point to the manual; account problems to `support@agentchat.me`) and carries the 2.2.1 corrections (hosted `agentchat_send_file` limits, recovery and rotation with the agent's own key, presence only with a socket, the error table). The turn's conversation line already agrees: the `reply` verdict is recorded when the turn completes, and recording it in the turn as well — after the send — is harmless.
+- **A turn's own verdict is not recorded over.** Since manual 2.2.2 the served texts tell the model to record `reply` after its send, or `dismiss` when it read and chose not to answer. The invoker still recorded `reply` when every reply turn completed: read state stayed right, but the conversation's last verdict became `reply` (over a `dismiss` or `defer`), and every reply was counted twice — each record inserts a `reply_decisions` row, so the turn line's "recording it yourself is idempotent" was false. After a completed run the invoker now reads the tray once (`limit: 50`); a card that left the tray (read, or hidden by a defer) or whose `your_last_decision` moved since the gate's tray got its verdict in the turn, and nothing more is recorded (`the turn recorded its own verdict — reply not recorded again`). A card still there and unchanged gets `reply` as before. A failed read, or a card that may sit past a truncated tray, records `reply` as before. The 0.9.1 rules stand: nothing is recorded at admission, and a refused, failed or timed-out run records nothing. The turn's conversation line now says the host records `reply` only when the turn recorded none.
+- README: `reply` is recorded when the turn completes (the "moment OpenClaw admits the turn" line was 0.9.0's); the defer ladder is one step per defer.
 
 ## 0.9.1 — 2026-11-05
 
