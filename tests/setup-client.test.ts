@@ -1,7 +1,8 @@
 /**
- * Tests for the setup HTTP client (P7).
+ * Tests for the setup calls made through the agentchatme SDK.
  *
- * All network calls are stubbed via a fetch mock. We cover:
+ * All network calls are stubbed via a fetch mock (the key check takes it as
+ * an option; registration and recovery use the runtime's fetch). We cover:
  *   - validateApiKey: success, 401/403/410/5xx, network/timeout, bad shape
  *   - registerAgentStart: success, 409 HANDLE_TAKEN, the per-email policy
  *     rejections (EMAIL_LIMIT_REACHED / EMAIL_EXHAUSTED quoting
@@ -19,7 +20,7 @@
  *   - assertApiKeyValid throws AgentChatChannelError with the right class
  */
 
-import { describe, it, expect } from 'vitest'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { AgentChatChannelError } from '../src/errors.js'
 import { PACKAGE_VERSION } from '../src/version.js'
 import {
@@ -60,6 +61,20 @@ function makeFetch(responses: StubResponse[] | ((url: string, init?: RequestInit
 }
 
 const VALID_KEY = 'ac_' + 'x'.repeat(40)
+
+/**
+ * The SDK's registration and recovery calls (`AgentChatClient.register`,
+ * `.verify`, `.recover`, `.recoverVerify`) take no `fetch` of their own:
+ * they use the runtime's. Those tests stub the global for one call.
+ */
+function via(stub: ReturnType<typeof makeFetch>): Record<string, never> {
+  vi.stubGlobal('fetch', stub)
+  return {}
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+})
 
 describe('validateApiKey', () => {
   it('returns ok:true with agent identity on 200', async () => {
@@ -193,7 +208,7 @@ describe('registerAgentStart', () => {
     const fetchStub = makeFetch([{ status: 200, body: { pending_id: 'pnd_abc123' } }])
     const res = await registerAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(true)
     if (res.ok) expect(res.pendingId).toBe('pnd_abc123')
@@ -208,7 +223,7 @@ describe('registerAgentStart', () => {
     ])
     const res = await registerAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.reason).toBe('handle-taken')
@@ -227,7 +242,7 @@ describe('registerAgentStart', () => {
     ])
     const res = await registerAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -251,7 +266,7 @@ describe('registerAgentStart', () => {
     ])
     const res = await registerAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -272,7 +287,7 @@ describe('registerAgentStart', () => {
     ])
     const res = await registerAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -300,7 +315,7 @@ describe('registerAgentStart', () => {
       ])
       const res = await registerAgentStart(
         { email: 'alice@example.com', handle: 'alice' },
-        { fetch: fetchStub },
+        via(fetchStub),
       )
       expect(res.ok).toBe(false)
       if (!res.ok) {
@@ -318,7 +333,7 @@ describe('registerAgentStart', () => {
     ])
     const res = await registerAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.reason).not.toBe('email-limit-reached')
@@ -334,7 +349,7 @@ describe('registerAgentStart', () => {
     ])
     const res = await registerAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -347,7 +362,7 @@ describe('registerAgentStart', () => {
     const fetchStub = makeFetch([{ status: 500, body: { code: 'OTP_FAILED' } }])
     const res = await registerAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.reason).toBe('otp-failed')
@@ -357,7 +372,7 @@ describe('registerAgentStart', () => {
     const fetchStub = makeFetch(() => new Error('ECONNRESET'))
     const res = await registerAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.reason).toBe('network-error')
@@ -382,7 +397,7 @@ describe('registerAgentVerify', () => {
     ])
     const res = await registerAgentVerify(
       { pendingId: 'pnd_abc', code: '123456' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(true)
     if (res.ok) {
@@ -395,7 +410,7 @@ describe('registerAgentVerify', () => {
     const fetchStub = makeFetch([{ status: 400, body: { code: 'EXPIRED', message: 'expired' } }])
     const res = await registerAgentVerify(
       { pendingId: 'pnd_abc', code: '123456' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.reason).toBe('expired')
@@ -405,7 +420,7 @@ describe('registerAgentVerify', () => {
     const fetchStub = makeFetch([{ status: 400, body: { code: 'INVALID_CODE' } }])
     const res = await registerAgentVerify(
       { pendingId: 'pnd_abc', code: 'bad' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.reason).toBe('invalid-code')
@@ -426,7 +441,7 @@ describe('registerAgentVerify', () => {
     ])
     const res = await registerAgentVerify(
       { pendingId: 'pnd_abc', code: '123456' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.reason).toBe('unexpected-shape')
@@ -436,7 +451,7 @@ describe('registerAgentVerify', () => {
     const fetchStub = makeFetch([{ status: 409, body: { code: 'HANDLE_TAKEN' } }])
     const res = await registerAgentVerify(
       { pendingId: 'pnd_abc', code: '123456' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.reason).toBe('handle-taken')
@@ -451,7 +466,7 @@ describe('registerAgentVerify', () => {
     ])
     const res = await registerAgentVerify(
       { pendingId: 'pnd_abc', code: '123456' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -469,7 +484,7 @@ describe('registerAgentVerify', () => {
     ])
     const res = await registerAgentVerify(
       { pendingId: 'pnd_abc', code: '123456' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -484,7 +499,7 @@ describe('registerAgentVerify', () => {
     ])
     const res = await registerAgentVerify(
       { pendingId: 'pnd_abc', code: '123456' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -507,7 +522,7 @@ describe('recoverAgentStart', () => {
     ])
     const res = await recoverAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(true)
     if (res.ok) {
@@ -530,7 +545,7 @@ describe('recoverAgentStart', () => {
     const fetchStub = makeFetch([{ status: 200, body: { pending_id: 'pnd_x', message: 'ok' } }])
     await recoverAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub, apiBase: 'https://stage.agentchat.me/' },
+      { ...via(fetchStub), apiBase: 'https://stage.agentchat.me/' },
     )
     expect(fetchStub.calls[0]?.url).toBe('https://stage.agentchat.me/v1/agents/recover')
   })
@@ -541,7 +556,7 @@ describe('recoverAgentStart', () => {
     ])
     const res = await recoverAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -557,7 +572,7 @@ describe('recoverAgentStart', () => {
     ])
     const res = await recoverAgentStart(
       { email: 'not-an-email', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -576,7 +591,7 @@ describe('recoverAgentStart', () => {
     ])
     const res = await recoverAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -589,7 +604,7 @@ describe('recoverAgentStart', () => {
     const fetchStub = makeFetch([{ status: 503, body: { message: 'maintenance' } }])
     const res = await recoverAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -602,14 +617,14 @@ describe('recoverAgentStart', () => {
   it('returns network-error on fetch throw and on timeout', async () => {
     const thrown = await recoverAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: makeFetch(() => new Error('ECONNRESET')) },
+      via(makeFetch(() => new Error('ECONNRESET'))),
     )
     expect(thrown.ok).toBe(false)
     if (!thrown.ok) expect(thrown.reason).toBe('network-error')
 
     const aborted = await recoverAgentStart(
       { email: 'alice@example.com', handle: 'alice' },
-      { fetch: makeFetch(() => Object.assign(new Error('aborted'), { name: 'AbortError' })) },
+      via(makeFetch(() => Object.assign(new Error('aborted'), { name: 'AbortError' }))),
     )
     expect(aborted.ok).toBe(false)
     if (!aborted.ok) {
@@ -626,7 +641,7 @@ describe('recoverAgentVerify', () => {
     ])
     const res = await recoverAgentVerify(
       { pendingId: 'pnd_rec1', code: '123456' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(true)
     if (res.ok) {
@@ -642,7 +657,7 @@ describe('recoverAgentVerify', () => {
     for (const body of [{ handle: 'alice' }, { api_key: 'ac_' + 'z'.repeat(40) }, {}]) {
       const res = await recoverAgentVerify(
         { pendingId: 'pnd_rec1', code: '123456' },
-        { fetch: makeFetch([{ status: 200, body }]) },
+        via(makeFetch([{ status: 200, body }])),
       )
       expect(res.ok).toBe(false)
       if (!res.ok) expect(res.reason).toBe('unexpected-shape')
@@ -652,7 +667,7 @@ describe('recoverAgentVerify', () => {
   it('classifies EXPIRED and INVALID_CODE', async () => {
     const expired = await recoverAgentVerify(
       { pendingId: 'pnd_rec1', code: '123456' },
-      { fetch: makeFetch([{ status: 400, body: { code: 'EXPIRED', message: 'expired' } }]) },
+      via(makeFetch([{ status: 400, body: { code: 'EXPIRED', message: 'expired' } }])),
     )
     expect(expired.ok).toBe(false)
     if (!expired.ok) expect(expired.reason).toBe('expired')
@@ -661,7 +676,7 @@ describe('recoverAgentVerify', () => {
     // the server deliberately makes it indistinguishable from a typo.
     const invalid = await recoverAgentVerify(
       { pendingId: 'pnd_decoy', code: '123456' },
-      { fetch: makeFetch([{ status: 400, body: { code: 'INVALID_CODE', message: 'Invalid or expired verification code' } }]) },
+      via(makeFetch([{ status: 400, body: { code: 'INVALID_CODE', message: 'Invalid or expired verification code' } }])),
     )
     expect(invalid.ok).toBe(false)
     if (!invalid.ok) expect(invalid.reason).toBe('invalid-code')
@@ -680,7 +695,7 @@ describe('recoverAgentVerify', () => {
     ])
     const res = await recoverAgentVerify(
       { pendingId: 'pnd_amb', code: '123456' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -695,7 +710,7 @@ describe('recoverAgentVerify', () => {
     for (const details of [undefined, null, {}, { handles: 'alice' }, { handles: [1, null, { h: 'x' }] }]) {
       const res = await recoverAgentVerify(
         { pendingId: 'pnd_amb', code: '123456' },
-        { fetch: makeFetch([{ status: 409, body: { code: 'HANDLE_REQUIRED', message: 'ambiguous', details } }]) },
+        via(makeFetch([{ status: 409, body: { code: 'HANDLE_REQUIRED', message: 'ambiguous', details } }])),
       )
       expect(res.ok).toBe(false)
       if (!res.ok) {
@@ -706,11 +721,11 @@ describe('recoverAgentVerify', () => {
     // Mixed lists keep only the strings.
     const mixed = await recoverAgentVerify(
       { pendingId: 'pnd_amb', code: '123456' },
-      {
-        fetch: makeFetch([
+      via(
+        makeFetch([
           { status: 409, body: { code: 'HANDLE_REQUIRED', message: 'ambiguous', details: { handles: ['alice', 7, '', 'bob'] } } },
         ]),
-      },
+      ),
     )
     expect(mixed.ok).toBe(false)
     if (!mixed.ok) expect(mixed.handles).toEqual(['alice', 'bob'])
@@ -726,7 +741,7 @@ describe('recoverAgentVerify', () => {
     ])
     const res = await recoverAgentVerify(
       { pendingId: 'pnd_rec1', code: '000000' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -739,7 +754,7 @@ describe('recoverAgentVerify', () => {
     const fetchStub = makeFetch([{ status: 404, body: { code: 'AGENT_NOT_FOUND', message: 'Account not found' } }])
     const res = await recoverAgentVerify(
       { pendingId: 'pnd_rec1', code: '123456' },
-      { fetch: fetchStub },
+      via(fetchStub),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) {
@@ -752,7 +767,7 @@ describe('recoverAgentVerify', () => {
   it('returns network-error on fetch throw', async () => {
     const res = await recoverAgentVerify(
       { pendingId: 'pnd_rec1', code: '123456' },
-      { fetch: makeFetch(() => new Error('ECONNREFUSED')) },
+      via(makeFetch(() => new Error('ECONNREFUSED'))),
     )
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.reason).toBe('network-error')
