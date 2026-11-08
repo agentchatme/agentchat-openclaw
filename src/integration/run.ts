@@ -20,11 +20,16 @@
  *   - `pending`                          → running (a normal non-terminal observation)
  *   - `timeout` with `pendingError`      → running (a failed attempt may still recover)
  *   - `timeout` with `endedAt`, `stopReason` or `livenessState` → ended (the run's own deadline)
+ *   - `timeout` that is a hard timeout → ended: a `timeoutPhase` of
+ *     preflight / provider / tool_execution / post_turn, or `providerStarted`
+ *     without a restart stop (`resolveAgentRunTerminalFacts`); an elapsed
+ *     wait only ever reports `queue` or `gateway_draining`
  *   - `timeout` with an `error`          → ended
  *   - any other `timeout`                → running (the wait elapsed)
  *
- * OpenClaw releases up to 2026.6.x hand a plugin only `{ status, error }`
- * (the wait metadata is dropped on the way out). There a terminal timeout
+ * Older OpenClaw lines (2026.6 and 2026.7, e.g. 2026.6.10 and 2026.7.35)
+ * hand a plugin only `{ status, error }` (the wait metadata is dropped on the
+ * way out). There a terminal timeout
  * is told apart by when it arrives: the gateway answers from the run's
  * terminal record as soon as there is one, while an elapsed wait (and a
  * failed attempt that may still recover) is answered when the wait's own
@@ -100,7 +105,7 @@ export function runEndOf(wait: RunWaitObservation | null | undefined, timing: { 
   const ended = { ended: true as const, status: 'timeout' as const, ...(error ? { error } : {}) }
   const hasMetadata = wait !== null && wait !== undefined && METADATA_KEYS.some((key) => key in wait)
   if (!hasMetadata) {
-    // Metadata dropped (OpenClaw ≤ 2026.6.x): only the timing tells. The
+    // Metadata dropped (OpenClaw 2026.6 / 2026.7 lines): only the timing tells. The
     // gateway answers from the run's terminal record as soon as there is
     // one; an elapsed wait — and a failed attempt that may still recover —
     // is answered when the wait's own timer fires.
@@ -108,7 +113,22 @@ export function runEndOf(wait: RunWaitObservation | null | undefined, timing: { 
   }
   if (wait.pendingError === true) return { ended: false }
   if (typeof wait.endedAt === 'number' || nonEmpty(wait.stopReason) || nonEmpty(wait.livenessState)) return ended
+  if (isHardTimeout(wait)) return ended
   return error ? ended : { ended: false }
+}
+
+/** Timeout phases only a run's own deadline reports (OpenClaw `HARD_TIMEOUT_PHASES`). */
+const HARD_TIMEOUT_PHASES: ReadonlySet<string> = new Set(['preflight', 'provider', 'tool_execution', 'post_turn'])
+
+/**
+ * OpenClaw's `hard_timeout` reading of a `timeout` snapshot (the third leg of
+ * `isTerminalAgentWaitTimeout`): a phase only the run's own deadline reports,
+ * or a timeout after the provider started that was not a restart stop.
+ */
+export function isHardTimeout(wait: RunWaitObservation): boolean {
+  const phase = typeof wait.timeoutPhase === 'string' ? wait.timeoutPhase.trim() : ''
+  if (HARD_TIMEOUT_PHASES.has(phase)) return true
+  return wait.status === 'timeout' && wait.providerStarted === true && nonEmpty(wait.stopReason) !== 'restart'
 }
 
 /** What the watch reports. `gone`: the plugin runtime disappeared before OpenClaw confirmed an end. */
@@ -135,9 +155,10 @@ export interface RunWatchOptions {
  * plugin runtime is gone.
  *
  * A wait call that fails is not an end either (the gateway did not answer;
- * the run is OpenClaw's): the watch backs off and asks again. One answer
- * ends it early — the gateway saying it does not know the run (it can then
- * not be running).
+ * the run is OpenClaw's): the watch backs off and asks again. A run the
+ * gateway does not know is answered like a wait that elapsed (`timeout`,
+ * `timeoutPhase: 'queue'` — OpenClaw has no "not found" for `agent.wait`), so
+ * it is watched until the account lets go of it (`./hung.ts`).
  */
 export async function watchRunUntilEnded(options: RunWatchOptions): Promise<RunWatchResult> {
   const chunkMs = options.chunkMs ?? DEFAULT_RUN_WAIT_CHUNK_MS
@@ -155,9 +176,6 @@ export async function watchRunUntilEnded(options: RunWatchOptions): Promise<RunW
       observation = (await runtime.subagent.waitForRun({ runId: options.runId, timeoutMs: chunkMs })) as RunWaitObservation
     } catch (err) {
       const message = describe(err)
-      if (/\b(?:not found|unknown run)\b/i.test(message)) {
-        return { ended: true, status: 'error', error: message, elapsedMs: now() - started }
-      }
       const delay = retryMs[Math.min(failures, retryMs.length - 1)] ?? 60_000
       failures += 1
       options.onWaitError?.(message, failures, delay)

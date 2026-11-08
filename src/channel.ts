@@ -55,6 +55,7 @@ import {
   type AgentchatChannelConfig,
 } from './config-schema.js'
 import { validateApiKey } from './setup-client.js'
+import { registerReleaseCli, registerReleaseGatewayMethod } from './binding/release.js'
 
 import {
   agentchatGatewayAdapter,
@@ -562,6 +563,11 @@ export const agentchatChannelEntry: ReturnType<
   // The integration reads `runtime.llm.complete` (the gate on the agent's own
   // model) and `runtime.subagent.run` (one turn, `deliver: false`) from it.
   setRuntime: (runtime) => setPluginRuntime(runtime),
+  // `openclaw agentchat release <conversation_id>`: the CLI half is
+  // registered for every CLI (parse-time metadata), the gateway half only
+  // where the integration runs.
+  registerCliMetadata: (api) => registerReleaseCli(api),
+  registerFull: (api) => registerReleaseGatewayMethod(api),
 })
 
 export default agentchatChannelEntry

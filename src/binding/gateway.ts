@@ -36,8 +36,9 @@ import {
 import { multiAccountRefusal } from '../channel-account.js'
 import { registerIntegration, unregisterIntegration, getIntegration } from './runtime-registry.js'
 import { createIntegrationLoop } from '../integration/loop.js'
-import { createTextsCache } from '../integration/texts.js'
-import { TURN_OVERDUE_MS, overdueTurnLine, runLabel, trackerFor } from '../integration/running.js'
+import { OpenClawTexts, createTextsCache, spellTextsForOpenClaw } from '../integration/texts.js'
+import { TURN_OVERDUE_MS, accountTurns, hungTurnsReason, overdueTurnLine } from '../integration/running.js'
+import { removeOldStateFiles } from '../integration/state.js'
 import { refreshIdentityLine } from '../integration/placement.js'
 import {
   createRuntimeModelCall,
@@ -184,12 +185,17 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     const gateTimeoutMs = readReplyGateTimeoutMsFromEnv()
     /** Which 30-minute mark each long run was last reported at. */
     const overdueWarned = new Map<string, number>()
+    /** The account's turns for this process (shared with any later loop for the account). */
+    const turns = accountTurns(ctx.accountId)
 
     // The served texts: the kit's cache — the file copy at once, one fetch,
     // then daily (backing off after a failure). Unreachable with nothing
     // cached → the integration starts anyway; nothing is gated until the
     // first copy arrives.
+    // Upgrade cleanup: the invite ledger and an old-shape texts cache.
+    for (const file of removeOldStateFiles(ctx.accountId)) logger.info({ file }, 'removed a file an earlier release kept (no longer used)')
     const textsCache = createTextsCache({ client, accountId: ctx.accountId, logger })
+    const texts = new OpenClawTexts(textsCache)
     const first = await textsCache.start()
     if (first) logger.info({ version: first.version, manual: first.manual?.version, source: textsCache.source }, 'served texts in hand')
     else logger.warn({ err: textsCache.lastError }, 'served texts not available yet (AgentChat unreachable, nothing cached) — nothing is gated until the first copy arrives')
@@ -201,7 +207,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       // every copy that changes. An absent line is the wizard's / doctor's
       // to place.
       const refresh = (copy: Texts) => {
-        const refreshed = refreshIdentityLine(ctx.cfg, ctx.accountId, handle, copy.identity_line)
+        const refreshed = refreshIdentityLine(ctx.cfg, ctx.accountId, handle, spellTextsForOpenClaw(copy).identity_line)
         if (refreshed.outcome === 'updated') ctx.log?.info?.(`[agentchat:${ctx.accountId}] identity line refreshed from the served texts in ${refreshed.path}`)
         else if (refreshed.outcome === 'failed') ctx.log?.warn?.(`[agentchat:${ctx.accountId}] identity line could not be refreshed in ${refreshed.path}: ${refreshed.detail ?? 'unknown error'}`)
       }
@@ -224,7 +230,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           accountId: ctx.accountId,
           agentId,
           client,
-          texts: textsCache,
+          texts,
           socket: socket.realtime,
           handle: config.agentHandle,
           callModel: createRuntimeModelCall({ agentIdOverride, ...(gateTimeoutMs !== undefined ? { timeoutMs: gateTimeoutMs } : {}) }),
@@ -232,18 +238,20 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           // ended; a wait that elapses is asked again (`integration/run.ts`).
           startRun: createRuntimeTurnStarter({
             onStillRunning: ({ runId, sessionKey, elapsedMs }) => {
-              const label = runLabel(runId)
+              const run = turns.run(runId)
               logger.info(
-                { runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000), ...(label ? { [label.kind === 'reply' ? 'conversationId' : 'inviteId']: label.id } : {}) },
+                { runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000), ...(run ? { [run.kind === 'reply' ? 'conversationId' : 'inviteId']: run.id } : {}) },
                 'turn still running — its conversation stays in flight until OpenClaw reports the run ended',
               )
-              // Past 30 minutes, once per further 30: the operator line naming
-              // the conversation and what ends the run (a hung run keeps its
-              // card held; there is no abort for it).
+              if (!run || elapsedMs < TURN_OVERDUE_MS) return
+              // Past 30 minutes the turn is handed off: the account gets its
+              // turn slot back, this conversation stays held until the run
+              // ends. Reported then, and every further 30 minutes.
+              const handed = turns.handOff(runId)
               const half = Math.floor(elapsedMs / TURN_OVERDUE_MS)
-              if (label && half >= 1 && overdueWarned.get(runId) !== half) {
+              if (handed || overdueWarned.get(runId) !== half) {
                 overdueWarned.set(runId, half)
-                ctx.log?.warn?.(`[agentchat:${ctx.accountId}] ${overdueTurnLine({ kind: label.kind, id: label.id, elapsedMs }, readLiveConfig(ctx.cfg).cfg)}`)
+                ctx.log?.warn?.(`[agentchat:${ctx.accountId}] ${overdueTurnLine({ kind: run.kind, id: run.id, elapsedMs }, readLiveConfig(ctx.cfg).cfg)}`)
               }
             },
             onWaitError: ({ runId, sessionKey, error, attempt, retryInMs }) =>
@@ -255,12 +263,16 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           // otherwise spends a gate call and runs a turn that cannot look.
           readiness: () => {
             const live = readLiveConfig(ctx.cfg)
+            // Too many hung turns: stop gating (each would only add a turn
+            // that waits behind them); status and doctor say why.
+            const hung = hungTurnsReason(turns, live.cfg)
+            if (hung) return { ready: false, reason: hung }
             return turnReadiness({ cfg: live.cfg, apiBase: config.apiBase, apiKey: config.apiKey, live: live.live })
           },
           // The account's runs outlive this loop: a config change restarts
           // the account while its runs go on in OpenClaw, so every loop for
-          // the account holds the same tracker.
-          tracker: trackerFor(ctx.accountId),
+          // the account shares the same turns (and the kit tracker in them).
+          turns,
           logger,
           metrics,
           gateEnabled: readReplyGateEnabledFromEnv(),
@@ -276,7 +288,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
         let blocked = false
         return {
           loop,
-          texts: textsCache,
+          texts,
           textsCache,
           handlers: {
             onConnected: (at) => {

@@ -4,11 +4,13 @@
  *
  * No text lives here. What a turn starts with — the served wake instruction
  * or invite prompt and the id it is about — is composed by the SDK kit's
- * receive loop from `GET /v1/texts?runtime=openclaw`, which the server
- * already spells the way OpenClaw exposes the hosted tools
- * (`agentchat__<tool>`). The one place the plugin still names a tool is the
- * tray's gate question (`GET /v1/inbox` serves bare names): the kit's gate
- * re-spells it with `OPENCLAW_TOOL_NAMER`.
+ * receive loop from `GET /v1/texts?runtime=openclaw`, which the server spells
+ * the way OpenClaw exposes the hosted tools (`agentchat__<tool>`). The plugin
+ * still re-spells served text on the way out (`spellToolsForOpenClaw`): it
+ * is a no-op on `agentchat__…`, and it keeps the tool names right if a
+ * server that serves bare names comes back (a rolled-back deploy). The tray's
+ * gate question (`GET /v1/inbox` serves bare names) is spelled by the kit's
+ * gate with `OPENCLAW_TOOL_NAMER`.
  *
  * OpenClaw exposes an MCP server's tools to the model as `<server>__<tool>`:
  * the tool-policy pipeline builds the namespace prefix as
@@ -41,6 +43,17 @@ export function mcpToolName(tool: string): string {
  * OpenClaw spelling itself is not prefixed twice.
  */
 export const OPENCLAW_TOOL_NAMER: ToolNamer = (tool) => (tool.startsWith(MCP_TOOL_PREFIX) ? tool : mcpToolName(tool))
+
+// A bare hosted tool name: `agentchat_` followed by the tool, never a second
+// underscore (the already-prefixed form) and never inside a longer word —
+// `agentchat__agentchat_inbox` matches nowhere (the inner `agentchat_` has
+// no word boundary before it), and `api.agentchat.me` has no underscore.
+const HOSTED_TOOL_TOKEN = /\bagentchat_(?!_)[a-z0-9_]+\b/g
+
+/** Re-spell every bare hosted tool name in a served text the way OpenClaw exposes it. Pure, idempotent; a no-op on text the server already spelled. */
+export function spellToolsForOpenClaw(text: string): string {
+  return text.replace(HOSTED_TOOL_TOKEN, (token) => OPENCLAW_TOOL_NAMER(token))
+}
 
 /**
  * A fresh OpenClaw session per wake turn, in the shape OpenClaw's own

@@ -25,6 +25,7 @@ import { createNoopMetrics } from '../metrics.js'
 import type { GateModelCall, TurnReadiness, TurnStarter as RuntimeTurnStarter } from './model.js'
 import { OPENCLAW_TOOL_NAMER, integrationLane, wakeSessionKey } from './turn.js'
 import { createLoopTurnStarter } from './turns.js'
+import type { AccountTurns } from './running.js'
 
 export interface IntegrationLoopOptions {
   readonly accountId: string
@@ -37,13 +38,15 @@ export interface IntegrationLoopOptions {
   readonly handle?: string | undefined
   readonly callModel: GateModelCall
   readonly startRun: RuntimeTurnStarter
-  /** The account's tracker, shared with every loop for the account in this process (`trackerFor`). */
-  readonly tracker: integration.TurnTracker
+  /** The account's turns, shared with every loop for the account in this process (`accountTurns`). */
+  readonly turns: AccountTurns
   readonly logger: Logger
   readonly metrics?: MetricsRecorder
   readonly readiness?: () => TurnReadiness
   /** `false`: single-run mode (no gate call). */
   readonly gateEnabled?: boolean
+  /** D5 pacing window (the kit's default 60 s); tests shorten it. */
+  readonly paceMs?: number
   readonly quietMs?: number
   readonly maxMs?: number
   readonly now?: () => number
@@ -57,10 +60,14 @@ export interface IntegrationLoop {
   stop(): Promise<void>
 }
 
+let generation = 0
+
 export function createIntegrationLoop(options: IntegrationLoopOptions): IntegrationLoop {
   const logger = options.logger.child({ component: 'integration', accountId: options.accountId })
   const metrics = options.metrics ?? createNoopMetrics()
   const now = options.now ?? Date.now
+  generation += 1
+  const owner = `${options.accountId}#${generation}`
   const gateEnabled = options.gateEnabled ?? true
 
   let unreadyReason: string | null = null
@@ -79,7 +86,7 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
       }
     : undefined
 
-  const startTurn = createLoopTurnStarter({ accountId: options.accountId, agentId: options.agentId, startRun: options.startRun, logger, now })
+  const startTurn = createLoopTurnStarter({ accountId: options.accountId, agentId: options.agentId, startRun: options.startRun, turns: options.turns, owner, logger, now })
 
   const loop = new integration.ReceiveLoop({
     client: options.client,
@@ -92,8 +99,9 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
     // One account's turns run on one OpenClaw lane anyway; one slot keeps
     // the rest held out of the gate (no second model call decides them).
     maxConcurrentTurns: 1,
-    tracker: options.tracker,
+    tracker: options.turns.tracker,
     ...(readiness ? { readiness } : {}),
+    ...(options.paceMs !== undefined ? { paceMs: options.paceMs } : {}),
     ...(options.quietMs !== undefined ? { quietMs: options.quietMs } : {}),
     ...(options.maxMs !== undefined ? { maxMs: options.maxMs } : {}),
     now,
@@ -102,9 +110,14 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
     onEvent: (event) => logEvent(event, logger, metrics),
   })
 
+  // The account's live loop: a held run that ends (hung, or started by an
+  // earlier loop) wakes it, so what arrived meanwhile is gated at once.
+  options.turns.setLive(owner, () => loop.wake())
+
   return {
     loop,
     async stop() {
+      options.turns.clearLive(owner)
       await loop.stop()
     },
   }
@@ -175,8 +188,8 @@ function logEvent(event: integration.ReceiveLoopEvent, logger: Logger, metrics: 
           logger.warn(fields, 'cycle abandoned — it ran past its deadline; nothing more is done for it, the next wake starts a new one')
           return
         default: {
-          const unsettled = s.turnsRefused > 0 || s.recordFailures > 0 || s.undecided > 0
-          logger[unsettled ? 'warn' : 'info'](fields, unsettled ? 'gate — some cards were left on the tray; the server re-wakes' : 'gate')
+          const incomplete = s.turnsRefused > 0 || s.recordFailures > 0 || s.undecided > 0
+          logger[incomplete ? 'warn' : 'info'](fields, incomplete ? 'gate — some cards were left on the tray; the server re-wakes' : 'gate')
           return
         }
       }

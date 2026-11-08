@@ -16,17 +16,19 @@
  *                                   keeps the conversation, nothing in this process
  *                                   starts a second turn for it
  *
- * A run that never ends keeps holding its card: the loop cannot end a turn,
- * and the plugin runtime offers no abort for a subagent run. OpenClaw's own
- * run deadline (`agents.defaults.timeoutSeconds`) is what ends it; status and
- * the log say so once a turn has run for 30 minutes.
+ * A run that never ends keeps holding its conversation: the loop cannot end
+ * a turn, and the plugin runtime offers no abort for a subagent run. After
+ * 30 minutes the turn is handed off (`AccountTurns.handOff`): the kit's slot
+ * is freed so other conversations get turns, while that one stays held until
+ * OpenClaw reports the run ended (its run deadline,
+ * `agents.defaults.timeoutSeconds`).
  */
 
 import type { integration } from 'agentchatme'
 
 import type { Logger } from '../log.js'
 import type { TurnOutcome, TurnStarter as RuntimeTurnStarter } from './model.js'
-import { forgetRun, labelRun } from './running.js'
+import type { AccountTurns } from './running.js'
 import { integrationLane, inviteSessionKey, wakeSessionKey } from './turn.js'
 
 export interface LoopTurnStarterOptions {
@@ -35,6 +37,10 @@ export interface LoopTurnStarterOptions {
   readonly agentId: string
   /** Starts one OpenClaw run and reports its confirmed end (`createRuntimeTurnStarter`). */
   readonly startRun: RuntimeTurnStarter
+  /** The account's turns (`accountTurns`): every run is recorded there until OpenClaw reports it ended. */
+  readonly turns: AccountTurns
+  /** The loop this starter belongs to. */
+  readonly owner: string
   readonly logger: Logger
   readonly now?: () => number
 }
@@ -47,7 +53,15 @@ export function createLoopTurnStarter(options: LoopTurnStarterOptions): integrat
     const sessionKey = request.kind === 'reply' ? wakeSessionKey(options.agentId, now()) : inviteSessionKey(options.agentId, id, now())
     const admission = await options.startRun({ sessionKey, prompt: request.prompt, lane: integrationLane(options.accountId) })
     if (!admission.ran) return { started: false, error: admission.error }
-    labelRun(admission.runId, { kind: request.kind, id, sessionKey })
+    options.turns.started({
+      runId: admission.runId,
+      kind: request.kind,
+      id,
+      anchor: request.kind === 'reply' ? request.anchor : null,
+      sessionKey: admission.sessionKey,
+      startedAt: now(),
+      owner: options.owner,
+    })
     options.logger.info(
       { kind: request.kind, sessionKey, runId: admission.runId, ...(request.kind === 'reply' ? { conversationId: id } : { inviteId: id }) },
       request.kind === 'reply' ? 'turn start' : 'group-invite turn start',
@@ -57,7 +71,7 @@ export function createLoopTurnStarter(options: LoopTurnStarterOptions): integrat
         options.logger.warn({ sessionKey, runId: outcome.runId }, 'turn end not confirmed: the plugin runtime is gone — its card stays held')
         return { status: 'still_running', detail: 'the plugin runtime is gone' }
       }
-      forgetRun(admission.runId)
+      options.turns.ended(admission.runId)
       options.logger[outcome.status === 'ok' ? 'info' : 'warn'](
         {
           sessionKey,

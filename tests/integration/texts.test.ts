@@ -11,13 +11,17 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import {
+  OpenClawTexts,
   TEXTS_RUNTIME,
+  spellTextsForOpenClaw,
   cachedIdentityLine,
   createTextsCache,
   isTexts,
   loadIdentityLine,
   textsCachePath,
 } from '../../src/integration/texts.js'
+import { spellToolsForOpenClaw } from '../../src/integration/turn.js'
+import { removeOldStateFiles } from '../../src/integration/state.js'
 import { SERVED_TEXTS, textsClient } from '../helpers/texts.js'
 
 const dirs: string[] = []
@@ -105,5 +109,48 @@ describe('the identity line outside the gateway', () => {
     expect(cachedIdentityLine('default', dir)).toBeNull()
     fs.writeFileSync(textsCachePath('default', dir), 'not json')
     expect(cachedIdentityLine('default', dir)).toBeNull()
+  })
+})
+
+describe('the re-speller stays (a rolled-back server serves bare names again)', () => {
+  const bare = 'call agentchat_inbox first, then agentchat_decide; see api.agentchat.me'
+  const spelled = 'call agentchat__agentchat_inbox first, then agentchat__agentchat_decide; see api.agentchat.me'
+
+  it('bare names are spelled the way OpenClaw exposes the tools; the server’s spelling is left as it is', () => {
+    expect(spellToolsForOpenClaw(bare)).toBe(spelled)
+    expect(spellToolsForOpenClaw(spelled)).toBe(spelled)
+  })
+
+  it('the loop’s texts come through it: served bare → spelled; served spelled → unchanged; the stored copy is verbatim', async () => {
+    const dir = stateDir()
+    const bareTexts = { ...SERVED_TEXTS, wake_instruction: bare, runtime: undefined }
+    const client = textsClient({ texts: bareTexts as never })
+    const cache = createTextsCache({ client, accountId: 'default', stateDir: dir })
+    await cache.start()
+    cache.stop()
+    expect(new OpenClawTexts(cache).current()!.wake_instruction).toBe(spelled)
+    expect((JSON.parse(fs.readFileSync(textsCachePath('default', dir), 'utf8')) as { texts: { wake_instruction: string } }).texts.wake_instruction).toBe(bare)
+
+    const spelledCache = createTextsCache({ client: textsClient(), accountId: 'other', stateDir: dir })
+    await spelledCache.start()
+    spelledCache.stop()
+    expect(new OpenClawTexts(spelledCache).current()).toEqual(SERVED_TEXTS)
+    expect(spellTextsForOpenClaw(SERVED_TEXTS)).toEqual(SERVED_TEXTS)
+  })
+})
+
+describe('upgrade cleanup on start', () => {
+  it('removes the old invite ledger and an old-shape texts cache; keeps the kit’s own file', async () => {
+    const dir = stateDir()
+    const accountDir = path.join(dir, 'agentchat', 'default')
+    fs.mkdirSync(accountDir, { recursive: true })
+    fs.writeFileSync(path.join(accountDir, 'invites.json'), '{"offered":{}}')
+    fs.writeFileSync(path.join(accountDir, 'texts.json'), JSON.stringify({ fetched_at: 'x', texts: SERVED_TEXTS }))
+    expect(removeOldStateFiles('default', dir).map((f) => path.basename(f)).sort()).toEqual(['invites.json', 'texts.json'])
+    const cache = createTextsCache({ client: textsClient(), accountId: 'default', stateDir: dir })
+    await cache.start()
+    cache.stop()
+    expect(removeOldStateFiles('default', dir)).toEqual([])
+    expect(fs.existsSync(path.join(accountDir, 'texts.json'))).toBe(true)
   })
 })

@@ -219,7 +219,7 @@ export interface TurnOutcome {
  */
 export type TurnAdmission =
   | { readonly ran: false; readonly error: string }
-  | { readonly ran: true; readonly runId: string; readonly done: Promise<TurnOutcome> }
+  | { readonly ran: true; readonly runId: string; readonly sessionKey: string; readonly done: Promise<TurnOutcome> }
 
 /** Starts one agent turn. Injectable so the loop wiring is testable without OpenClaw. */
 export type TurnStarter = (request: TurnRequest) => Promise<TurnAdmission>
@@ -231,16 +231,23 @@ export type TurnReadiness = { readonly ready: true } | { readonly ready: false; 
  * The gateway config as it is NOW. OpenClaw hot-applies `mcp.*` changes (a
  * running gateway's turns have the tools right after `openclaw doctor --fix`
  * wrote the entry), so a readiness check must not read the snapshot the
- * account started with. `runtime.config.loadConfig()` is that live read;
+ * account started with. `runtime.config.current()` (OpenClaw main) or
+ * `runtime.config.loadConfig()` (older releases) is that live read;
  * without a usable runtime, or if it throws, the snapshot is what there is
  * (`live: false`) — and then a config fix needs a restart to be seen.
  */
 export function readLiveConfig(fallback: unknown, runtime: () => PluginRuntime | null = getPluginRuntime): { cfg: unknown; live: boolean } {
-  try {
-    const loaded: unknown = runtime()?.config?.loadConfig?.()
-    if (loaded && typeof loaded === 'object') return { cfg: loaded, live: true }
-  } catch {
-    // fall through to the snapshot
+  const config = (runtime() as { config?: { current?: () => unknown; loadConfig?: () => unknown } } | null)?.config
+  // OpenClaw main: `runtime.config.current()` (`loadConfig` is gone there);
+  // older releases: `runtime.config.loadConfig()`.
+  for (const read of [config?.current, config?.loadConfig]) {
+    if (typeof read !== 'function') continue
+    try {
+      const loaded: unknown = read.call(config)
+      if (loaded && typeof loaded === 'object') return { cfg: loaded, live: true }
+    } catch {
+      // try the next way, then the snapshot
+    }
   }
   return { cfg: fallback, live: false }
 }
@@ -308,6 +315,9 @@ export function createRuntimeTurnStarter(params: {
     const runtime = getRuntime()
     if (!runtime) return { ran: false, error: new RuntimeUnavailableError('the agent turn').message }
     let runId: string
+    // The session OpenClaw accepted the run in: newer releases return the
+    // normalized key, which is where its transcript lives.
+    let sessionKey = request.sessionKey
     try {
       const admitted = await runtime.subagent.run({
         sessionKey: request.sessionKey,
@@ -316,10 +326,11 @@ export function createRuntimeTurnStarter(params: {
         deliver: false,
       })
       runId = admitted.runId
+      const accepted = (admitted as { sessionKey?: unknown }).sessionKey
+      if (typeof accepted === 'string' && accepted.trim().length > 0) sessionKey = accepted.trim()
     } catch (err) {
       return { ran: false, error: err instanceof Error ? err.message : String(err) }
     }
-    const sessionKey = request.sessionKey
     const done = watchRunUntilEnded({
       runtime: getRuntime,
       runId,
@@ -342,6 +353,6 @@ export function createRuntimeTurnStarter(params: {
         elapsedMs: watched.elapsedMs,
       }
     })
-    return { ran: true, runId, done }
+    return { ran: true, runId, sessionKey, done }
   }
 }

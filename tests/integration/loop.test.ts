@@ -14,7 +14,7 @@ import type { InboxCard, TrayInvite } from 'agentchatme'
 import { parseChannelConfig } from '../../src/config-schema.js'
 import { CYCLE_TROUBLE_RUN, createIntegrationLoop, cycleTroubleLine, type IntegrationLoop } from '../../src/integration/loop.js'
 import type { TurnOutcome, TurnReadiness, TurnRequest, TurnStarter } from '../../src/integration/model.js'
-import { integration as kit } from 'agentchatme'
+import { AccountTurns } from '../../src/integration/running.js'
 import { IntegrationSocket } from '../../src/integration/socket.js'
 import { turnEndOf } from '../../src/integration/turns.js'
 import { card, invite, tray } from '../helpers/fake-client.js'
@@ -67,7 +67,7 @@ function openclawRuns() {
     let finish!: (outcome: TurnOutcome) => void
     const done = new Promise<TurnOutcome>((resolve) => (finish = resolve))
     finishers.push((outcome) => finish({ ran: true, runId: `run_${n}`, status: 'ok', agentchatCalls: { made: 3, failed: 0 }, ...outcome }))
-    return { ran: true, runId: `run_${n}`, done }
+    return { ran: true, runId: `run_${n}`, sessionKey: req.sessionKey, done }
   }
   return { start, requests, end: (i: number, outcome: Partial<TurnOutcome> = {}) => finishers[i]!(outcome) }
 }
@@ -88,17 +88,19 @@ interface Harness {
   socket: IntegrationSocket
   integration: IntegrationLoop
   ws: MockWebSocket
+  turns: AccountTurns
 }
 
 const live: Harness[] = []
 
-async function start(opts: { tracker?: kit.TurnTracker; server?: ReturnType<typeof fakeServer>; readiness?: () => TurnReadiness; gateEnabled?: boolean; texts?: ReturnType<typeof staticTexts> } = {}): Promise<Harness> {
+async function start(opts: { paceMs?: number; turns?: AccountTurns; server?: ReturnType<typeof fakeServer>; readiness?: () => TurnReadiness; gateEnabled?: boolean; texts?: ReturnType<typeof staticTexts> } = {}): Promise<Harness> {
   const config = parseChannelConfig({ apiKey: KEY, apiBase: 'https://api.agentchat.me', agentHandle: 'alice' })
   const server = opts.server ?? fakeServer()
   const runs = openclawRuns()
   const modelCalls: string[] = []
   const logger = capturingLogger()
   const socket = new IntegrationSocket({ config, logger, webSocket: MockWebSocketCtor })
+  const turns = opts.turns ?? new AccountTurns()
   const integration = createIntegrationLoop({
     accountId: 'default',
     agentId: 'main',
@@ -108,19 +110,20 @@ async function start(opts: { tracker?: kit.TurnTracker; server?: ReturnType<type
     handle: 'alice',
     callModel: gateModel(modelCalls),
     startRun: runs.start,
-    tracker: opts.tracker ?? new kit.TurnTracker(),
+    turns,
     logger,
     ...(opts.readiness ? { readiness: opts.readiness } : {}),
     ...(opts.gateEnabled !== undefined ? { gateEnabled: opts.gateEnabled } : {}),
     quietMs: 0,
     maxMs: 0,
+    ...(opts.paceMs !== undefined ? { paceMs: opts.paceMs } : {}),
   })
   socket.bind()
   await integration.loop.start()
   const ws = MockWebSocket.latest()
   ws.simulateReady(['ack', 'heartbeat', 'rewake'])
   await settle(20)
-  const h = { server, runs, modelCalls, logger, socket, integration, ws }
+  const h = { server, runs, modelCalls, logger, socket, integration, ws, turns }
   live.push(h)
   return h
 }
@@ -219,17 +222,17 @@ describe('a reply turn is one OpenClaw run', () => {
 })
 
 describe('an account restart while a run lives (OpenClaw restarts the channel task on a config change)', () => {
-  it('the new loop holds the same tracker: the card stays out of its gate; the old loop still records what the run did', async () => {
-    const tracker = new kit.TurnTracker()
+  it('the new loop shares the account’s turns: the card stays out of its gate; the old loop still records what the run did', async () => {
+    const turns = new AccountTurns()
     const server = fakeServer()
-    const first = await start({ tracker, server })
+    const first = await start({ turns, server })
     await message(first, 'conv_a', 1)
     expect(first.runs.requests).toHaveLength(1)
     live.splice(live.indexOf(first), 1)
     await first.integration.stop()
     first.socket.stopped()
 
-    const second = await start({ tracker, server })
+    const second = await start({ turns, server })
     await message(second, 'conv_a', 2)
     expect(second.modelCalls).toHaveLength(0)
     expect(second.runs.requests).toHaveLength(0)
@@ -238,7 +241,90 @@ describe('an account restart while a run lives (OpenClaw restarts the channel ta
     first.runs.end(0)
     await settle(30)
     expect(server.posts).toEqual(['conv_a:reply:msg_conv_a_1'])
-    expect(tracker.size).toBe(0)
+    expect(turns.tracker.size).toBe(0)
+  })
+
+  it('when the held run ends, the live loop is woken: a message that arrived during the run is gated at once (no new socket frame)', async () => {
+    const turns = new AccountTurns()
+    const server = fakeServer()
+    const first = await start({ turns, server })
+    await message(first, 'conv_a', 1)
+    live.splice(live.indexOf(first), 1)
+    await first.integration.stop()
+    first.socket.stopped()
+
+    const second = await start({ turns, server })
+    await message(second, 'conv_a', 2) // arrives during the run: held
+    expect(second.runs.requests).toHaveLength(0)
+    const gateCallsBefore = second.modelCalls.length
+
+    first.runs.end(0) // looked, sent nothing: the card (now msg 2) stays
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    await settle(30)
+    expect(second.modelCalls.length).toBeGreaterThan(gateCallsBefore)
+    expect(second.runs.requests).toHaveLength(1)
+    expect(second.runs.requests[0]!.prompt).toContain('conv_a')
+  })
+})
+
+describe('a run that never ends does not freeze the account', () => {
+  it('handed off after 30 minutes: the slot frees and another conversation gets its turn, while the hung one stays held', async () => {
+    const h = await start()
+    await message(h, 'conv_a', 1)
+    expect(h.runs.requests).toHaveLength(1)
+    await message(h, 'conv_b', 1) // waits: one turn slot
+    expect(h.runs.requests).toHaveLength(1)
+
+    const runId = h.turns.runningRuns()[0]!.runId
+    expect(h.turns.handOff(runId)).not.toBeNull() // what the run watch does past 30 minutes
+    await settle(30)
+    expect(h.runs.requests).toHaveLength(2)
+    expect(h.runs.requests[1]!.prompt).toContain('conv_b')
+
+    await message(h, 'conv_a', 2) // still held: no second turn for it
+    expect(h.runs.requests.filter((r) => r.prompt.includes('conv_a'))).toHaveLength(1)
+
+    h.runs.end(0) // OpenClaw finally ends it: nothing recorded for it, the card is gated again
+    await settle(30)
+    expect(h.server.posts.filter((p) => p.startsWith('conv_a'))).toEqual([])
+    expect(h.turns.hungCount).toBe(0)
+  })
+})
+
+describe('D5 rules of the kit, as recorded through this plugin', () => {
+  it('a reply turn that failed after its answer went out still records reply', async () => {
+    const h = await start()
+    await message(h, 'conv_a', 1)
+    h.server.cards.set('conv_a', card('conv_a', 'msg_conv_a_1', { you_owe_reply: false, your_last_message_at: '2026-11-08T00:01:00.000Z' }))
+    h.runs.end(0, { status: 'error', error: 'the run crashed after the send' })
+    await settle(30)
+    expect(h.server.posts).toEqual(['conv_a:reply:msg_conv_a_1'])
+  })
+
+  it('a second silent look with unknown call counts (transcript refused) is a defer, never a dismiss', async () => {
+    const h = await start({ paceMs: 0 })
+    await message(h, 'conv_a', 1)
+    h.runs.end(0, { agentchatCalls: null })
+    await settle(30)
+    expect(h.server.posts).toEqual([])
+    h.ws.simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: ['conv_a'], step: 1, at: '2026-11-08T00:00:00.000Z' } })
+    await settle(30)
+    expect(h.runs.requests).toHaveLength(2)
+    h.runs.end(1, { agentchatCalls: null })
+    await settle(30)
+    expect(h.server.posts).toEqual(['conv_a:defer:msg_conv_a_1'])
+  })
+
+  it('the same with known, fully successful calls is a dismiss', async () => {
+    const h = await start({ paceMs: 0 })
+    await message(h, 'conv_a', 1)
+    h.runs.end(0)
+    await settle(30)
+    h.ws.simulateMessage({ type: 'wake', payload: { reason: 'unanswered', conversation_ids: ['conv_a'], step: 1, at: '2026-11-08T00:00:00.000Z' } })
+    await settle(30)
+    h.runs.end(1)
+    await settle(30)
+    expect(h.server.posts).toEqual(['conv_a:dismiss:msg_conv_a_1'])
   })
 })
 

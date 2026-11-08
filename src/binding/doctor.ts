@@ -30,7 +30,7 @@ import {
 } from '../channel-account.js'
 import { validateApiKey } from '../setup-client.js'
 import { getIntegration, listActiveAccounts } from './runtime-registry.js'
-import { overdueTurnLines } from '../integration/running.js'
+import { accountTurns, hungTurnsReason, overdueTurnLines } from '../integration/running.js'
 import { cycleTroubleLine } from '../integration/loop.js'
 import { checkPlacement, resolvePlacementAgentId, restoreIdentityLine } from '../integration/placement.js'
 import { DEFAULT_API_BASE, withHostedMcpEntry } from '../integration/mcp.js'
@@ -71,7 +71,10 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
     for (const accountId of listActiveAccounts()) {
       const status = getIntegration(accountId)?.loop?.loop.status()
       if (!status) continue
-      for (const line of overdueTurnLines(status.turns ?? [], cfg)) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${line}`)
+      const turns = accountTurns(accountId)
+      const hung = hungTurnsReason(turns, cfg)
+      if (hung) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${hung}`)
+      for (const line of overdueTurnLines(turns.runningRuns(), cfg)) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${line}`)
       const trouble = cycleTroubleLine(status.recentCycles ?? [])
       if (trouble) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${trouble}`)
     }

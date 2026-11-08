@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { countAgentChatCalls, runEndOf, watchRunUntilEnded } from '../../src/integration/run.js'
+import { countAgentChatCalls, isHardTimeout, runEndOf, watchRunUntilEnded } from '../../src/integration/run.js'
 import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 
 const FULL = { requestedMs: 300_000, elapsedMs: 300_000 }
@@ -20,8 +20,8 @@ describe('runEndOf — a wait timeout is not an end', () => {
   })
 
   describe('with the wait metadata (OpenClaw ≥ 2026.10): OpenClaw’s own rule', () => {
-    it('a bare elapsed wait is not an end, however fast it came back', () => {
-      expect(runEndOf({ status: 'timeout', timeoutPhase: 'provider' }, QUICK)).toEqual({ ended: false })
+    it('a bare elapsed wait is not an end, however fast it came back (an elapsed wait only reports queue or gateway_draining)', () => {
+      expect(runEndOf({ status: 'timeout', timeoutPhase: 'queue' }, QUICK)).toEqual({ ended: false })
       expect(runEndOf({ status: 'timeout', timeoutPhase: 'queue', providerStarted: false }, FULL)).toEqual({ ended: false })
       expect(runEndOf({ status: 'timeout', timeoutPhase: 'gateway_draining' }, FULL)).toEqual({ ended: false })
     })
@@ -38,7 +38,21 @@ describe('runEndOf — a wait timeout is not an end', () => {
     })
   })
 
-  describe('without the metadata (OpenClaw ≤ 2026.6.x): the timing tells', () => {
+  describe('the hard_timeout reading (OpenClaw resolveAgentRunTerminalFacts)', () => {
+    it('a snapshot without endedAt is an end when its phase only the run’s own deadline reports', () => {
+      for (const timeoutPhase of ['preflight', 'provider', 'tool_execution', 'post_turn']) {
+        expect(runEndOf({ status: 'timeout', timeoutPhase }, FULL), timeoutPhase).toEqual({ ended: true, status: 'timeout' })
+      }
+    })
+
+    it('a timeout after the provider started is an end — unless the stop was a restart', () => {
+      expect(runEndOf({ status: 'timeout', providerStarted: true }, FULL)).toEqual({ ended: true, status: 'timeout' })
+      expect(isHardTimeout({ status: 'timeout', providerStarted: true, stopReason: 'restart' })).toBe(false)
+      expect(isHardTimeout({ status: 'timeout', timeoutPhase: 'queue', providerStarted: false })).toBe(false)
+    })
+  })
+
+  describe('without the metadata (OpenClaw 2026.6 / 2026.7 lines): the timing tells', () => {
     it('a timeout answered at once came from the run’s terminal record: an end', () => {
       expect(runEndOf({ status: 'timeout' }, QUICK)).toEqual({ ended: true, status: 'timeout' })
       expect(runEndOf({ status: 'timeout', error: 'aborted' }, QUICK)).toEqual({ ended: true, status: 'timeout', error: 'aborted' })
@@ -92,10 +106,13 @@ describe('watchRunUntilEnded', () => {
     expect(slept).toEqual([1_000, 1_000])
   })
 
-  it('a gateway that no longer knows the run ends the watch (it cannot be running)', async () => {
-    const fake = runtimeAnswering([new Error('agent run was not found')])
-    const result = await watchRunUntilEnded({ runtime: () => fake.runtime, runId: 'r', sleep: async () => undefined })
-    expect(result).toMatchObject({ ended: true, status: 'error', error: 'agent run was not found' })
+  it('a run the gateway does not know is answered like an elapsed wait (timeout, queue): it is not an end — the account hands it off later', async () => {
+    let clock = 0
+    const fake = runtimeAnswering([{ status: 'timeout', timeoutPhase: 'queue', providerStarted: false }, { status: 'timeout', timeoutPhase: 'queue', providerStarted: false }, { status: 'ok' }])
+    const still: number[] = []
+    const result = await watchRunUntilEnded({ runtime: () => fake.runtime, runId: 'r', chunkMs: 1_000, now: () => clock, sleep: async (ms) => void (clock += ms), onStillRunning: (ms) => still.push(ms) })
+    expect(still).toHaveLength(2)
+    expect(result).toMatchObject({ ended: true, status: 'ok' })
   })
 
   it('the back-off repeats its last step', async () => {

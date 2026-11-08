@@ -27,6 +27,7 @@ vi.mock('../../src/integration/texts.js', async (importOriginal) => {
 
 import { agentchatDoctorAdapter } from '../../src/binding/doctor.js'
 import { registerIntegration, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
+import { accountTurns, resetRunningTurnsForTest } from '../../src/integration/running.js'
 import { placeIntegration } from '../../src/integration/placement.js'
 import { loadIdentityLine } from '../../src/integration/texts.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
@@ -222,12 +223,14 @@ describe('doctor adapter — the llm override opt-in for a non-default bound age
           handlers: {},
         }),
       })
+      accountTurns('default').started({ runId: 'run_hung', kind: 'reply', id: 'conv_hung', anchor: 'msg_1', sessionKey: 'agent:main:subagent:x', startedAt: Date.now() - 40 * 60_000, owner: 'loop#1' })
       const doctorCfg = { channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
       const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: doctorCfg as never, doctorFixCommand: 'openclaw doctor --fix', env: {} })
       expect(warnings.some((w) => /^\[agentchat:default\] the last 3 cycles decided nothing \(fail_closed\)/.test(w))).toBe(true)
-      expect(warnings.some((w) => /^\[agentchat:default\] a turn for conversation conv_hung has run 40 min — its card stays held \(no second reply\).*agents\.defaults\.timeoutSeconds = 172800/.test(w))).toBe(true)
+      expect(warnings.some((w) => /^\[agentchat:default\] a turn for conversation conv_hung has run 40 min — that conversation stays held \(no second reply\).*agents\.defaults\.timeoutSeconds = 172800/.test(w))).toBe(true)
     } finally {
       await resetRegistryForTest()
+      resetRunningTurnsForTest()
     }
   })
 })

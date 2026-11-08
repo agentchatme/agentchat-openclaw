@@ -15,6 +15,7 @@ vi.mock('../../src/integration/mcp.js', async (importOriginal) => {
 })
 
 import { agentchatStatusAdapter } from '../../src/binding/status.js'
+import { accountTurns, resetRunningTurnsForTest } from '../../src/integration/running.js'
 import { placeIntegration } from '../../src/integration/placement.js'
 import { probeHostedMcp } from '../../src/integration/mcp.js'
 import { registerIntegration, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
@@ -150,15 +151,17 @@ describe('status adapter — the doctor-style probe', () => {
         handlers: {},
       }),
     })
+    accountTurns('default').started({ runId: 'run_slow', kind: 'reply', id: 'conv_slow', anchor: 'msg_1', sessionKey: 'agent:main:subagent:x', startedAt: started, owner: 'loop#1' })
     const cfg = { agents: { defaults: { workspace, timeoutSeconds: 7200 } } }
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account(cfg) as never, timeoutMs: 2000, cfg: cfg as never } as never)
+    resetRunningTurnsForTest()
     expect(probe.integration?.overdue).toHaveLength(1)
     expect(probe.integration?.trouble).toMatch(/^the last 3 cycles decided nothing \(tools_unavailable\): no turn could have the hosted tools — latest: mcp\.servers\.agentchat is not in the gateway config/)
     const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
     expect(lines.find((l) => l.text.startsWith('the last 3 cycles decided nothing'))?.tone).toBe('warn')
     const line = lines.find((l) => l.text.startsWith('a turn for conversation conv_slow'))
     expect(line?.tone).toBe('warn')
-    expect(line?.text).toMatch(/has run 4[45] min — its card stays held \(no second reply\) until the run ends; OpenClaw ends it at its run deadline, agents\.defaults\.timeoutSeconds = 7200$/)
+    expect(line?.text).toMatch(/has run 4[45] min — that conversation stays held \(no second reply\) until the run ends; OpenClaw ends it at its run deadline, agents\.defaults\.timeoutSeconds = 7200; other conversations are not held up by it$/)
   })
 
   it('a running integration with the gateway recorder shows the socket counters: wakes by source, closes by code/initiator, notices by class', async () => {

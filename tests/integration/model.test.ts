@@ -128,7 +128,7 @@ describe('createRuntimeTurnStarter — admission first, the confirmed end later'
   })
 
   it('a wait that elapses is not an end: the run is waited for again until OpenClaw reports it over', async () => {
-    const answers = [{ status: 'timeout', timeoutPhase: 'provider' }, { status: 'pending' }, { status: 'ok', endedAt: 5 }]
+    const answers = [{ status: 'timeout', timeoutPhase: 'queue' }, { status: 'pending' }, { status: 'ok', endedAt: 5 }]
     const waits: unknown[] = []
     const runtime = {
       subagent: {
@@ -203,6 +203,41 @@ describe('createRuntimeTurnStarter — admission first, the confirmed end later'
     expect(await admission.done).toMatchObject({ status: 'ok', agentchatCalls: { made: 2, failed: 1 } })
   })
 
+  it('the transcript is read from the session OpenClaw accepted the run in (newer releases return a normalized key)', async () => {
+    const reads: unknown[] = []
+    const runtime = {
+      subagent: {
+        run: async () => ({ runId: 'run_11', sessionKey: 'agent:main:subagent:normalized' }),
+        waitForRun: async () => ({ status: 'ok' }),
+        getSessionMessages: async (params: unknown) => {
+          reads.push(params)
+          return { messages: [{ role: 'toolResult', toolName: 'agentchat__agentchat_inbox', isError: false }] }
+        },
+      },
+    } as unknown as PluginRuntime
+    const start = createRuntimeTurnStarter({ runtime: () => runtime })
+    const admission = await start({ sessionKey: 'agent:main:subagent:asked', prompt: 'P', lane: 'l' })
+    if (!admission.ran) throw new Error('unreachable')
+    expect(admission.sessionKey).toBe('agent:main:subagent:normalized')
+    expect(await admission.done).toMatchObject({ agentchatCalls: { made: 1, failed: 0 } })
+    expect(reads).toEqual([{ sessionKey: 'agent:main:subagent:normalized', limit: 200 }])
+  })
+
+  it('a refused or empty transcript read is unknown (null) — never zero: the kit then defers rather than dismisses', async () => {
+    for (const getSessionMessages of [
+      async () => {
+        throw new Error('sessions.get: not authorized for this plugin')
+      },
+      async () => ({ messages: [] }),
+    ]) {
+      const runtime = { subagent: { run: async () => ({ runId: 'run_12' }), waitForRun: async () => ({ status: 'ok' }), getSessionMessages } } as unknown as PluginRuntime
+      const start = createRuntimeTurnStarter({ runtime: () => runtime })
+      const admission = await start({ sessionKey: 's', prompt: 'P', lane: 'l' })
+      if (!admission.ran) throw new Error('unreachable')
+      expect(await admission.done).toMatchObject({ status: 'ok', agentchatCalls: null })
+    }
+  })
+
   it('a runtime that disappears before the end is `gone`, not an end', async () => {
     let present = true
     const runtime = {
@@ -226,6 +261,17 @@ describe('createRuntimeTurnStarter — admission first, the confirmed end later'
     expect(admission.ran).toBe(false)
     if (admission.ran) throw new Error('unreachable')
     expect(admission.error).toMatch(/setRuntime/)
+  })
+})
+
+describe('readLiveConfig — the current config, on every OpenClaw line', () => {
+  it('OpenClaw main: runtime.config.current(); older releases: runtime.config.loadConfig(); neither: the snapshot', () => {
+    const current = { mcp: { from: 'current' } }
+    const loaded = { mcp: { from: 'loadConfig' } }
+    expect(readLiveConfig({ snapshot: true }, () => ({ config: { current: () => current } }) as never)).toEqual({ cfg: current, live: true })
+    expect(readLiveConfig({ snapshot: true }, () => ({ config: { loadConfig: () => loaded } }) as never)).toEqual({ cfg: loaded, live: true })
+    expect(readLiveConfig({ snapshot: true }, () => ({ config: { current: () => { throw new Error('x') }, loadConfig: () => loaded } }) as never)).toEqual({ cfg: loaded, live: true })
+    expect(readLiveConfig({ snapshot: true }, () => ({}) as never)).toEqual({ cfg: { snapshot: true }, live: false })
   })
 })
 
