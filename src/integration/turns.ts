@@ -52,8 +52,14 @@ export function createLoopTurnStarter(options: LoopTurnStarterOptions): integrat
   return async (request) => {
     const id = request.kind === 'reply' ? request.conversationId : request.invite.invite_id
     const sessionKey = request.kind === 'reply' ? wakeSessionKey(options.agentId, now()) : inviteSessionKey(options.agentId, id, now())
+    // Watched from here: if the kit's hold is released while OpenClaw admits
+    // the run (an operator's --force), the run starts out let go of.
+    const watch = options.turns.admission(request.kind, id)
     const admission = await options.startRun({ sessionKey, prompt: request.prompt, lane: integrationLane(options.accountId, options.turns.laneGeneration) })
-    if (!admission.ran) return { started: false, error: admission.error }
+    if (!admission.ran) {
+      options.turns.admitted(watch)
+      return { started: false, error: admission.error }
+    }
     options.turns.started({
       runId: admission.runId,
       kind: request.kind,
@@ -65,7 +71,7 @@ export function createLoopTurnStarter(options: LoopTurnStarterOptions): integrat
       // What the after-turn rule compares when the turn ends outside the
       // kit's watch (handed off, or after a restart).
       ...(request.kind === 'reply' ? { card: request.card, category: request.category } : { invite: request.invite }),
-    })
+    }, { admission: watch })
     options.logger.info(
       { kind: request.kind, sessionKey, runId: admission.runId, ...(request.kind === 'reply' ? { conversationId: id } : { inviteId: id }) },
       request.kind === 'reply' ? 'turn start' : 'group-invite turn start',

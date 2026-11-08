@@ -55,6 +55,8 @@ export interface StoredTurn {
   readonly sessionKey: string
   /** Local clock, ms. */
   readonly startedAt: number
+  /** When the first turn of this chain started (a turn continued after a restart keeps it): stored turns age out by it. */
+  readonly firstStartedAt?: number
   readonly category?: string | null
   readonly card?: StoredCard
 }

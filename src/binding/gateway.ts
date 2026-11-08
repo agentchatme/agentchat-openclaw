@@ -203,12 +203,29 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     // A turn that ends outside the kit's watch (handed off, or after a
     // restart) gets the after-turn rule here; the turns in flight are
     // written to disk for the next start (`integration/turn-store.ts`).
-    const watchRun = createRunWatcher({
-      onStillRunning: ({ runId, elapsedMs }) => {
-        const held = turns.restartHolds().find((hold) => hold.watching === runId)
-        if (held && isOverdue(elapsedMs)) reportOverdue(runId, held.record.kind, held.record.id, elapsedMs, false)
-      },
-    })
+    /**
+     * A wait elapsed with the run still going — a turn's run, or one OpenClaw
+     * continued after a restart. Past 30 minutes it is handed off, once (a
+     * released run never again): the account gets its turn slot back, the
+     * conversation stays held until the run ends. Reported then, and every
+     * further 30 minutes.
+     */
+    const onStillRunning = ({ runId, sessionKey, elapsedMs }: { runId: string; sessionKey: string; elapsedMs: number }) => {
+      const run = turns.run(runId)
+      if (turns.stateOf(runId) === 'released') {
+        // Let go of by the operator: it holds nothing, and is never handed off again.
+        logger.debug({ runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000) }, 'released turn still running in OpenClaw — it holds nothing')
+        return
+      }
+      logger.info(
+        { runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000), ...(run ? { [run.kind === 'reply' ? 'conversationId' : run.kind === 'invite' ? 'inviteId' : 'run']: run.id } : {}) },
+        'turn still running — its conversation stays in flight until OpenClaw reports the run ended',
+      )
+      if (!run || !isOverdue(elapsedMs)) return
+      const handed = turns.handOff(runId) !== null
+      reportOverdue(runId, run.kind, run.id, elapsedMs, handed)
+    }
+    const watchRun = createRunWatcher({ onStillRunning })
     turns.configure({
       recorder: createAfterTurnRecorder({ client, logger }),
       store: new TurnStore(ctx.accountId),
@@ -273,25 +290,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           // A turn holds its conversation until OpenClaw confirms its run
           // ended; a wait that elapses is asked again (`integration/run.ts`).
           startRun: createRuntimeTurnStarter({
-            onStillRunning: ({ runId, sessionKey, elapsedMs }) => {
-              const run = turns.run(runId)
-              const state = turns.stateOf(runId)
-              if (state === 'released') {
-                // Let go of by the operator: it holds nothing, and is never handed off again.
-                logger.debug({ runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000) }, 'released turn still running in OpenClaw — it holds nothing')
-                return
-              }
-              logger.info(
-                { runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000), ...(run ? { [run.kind === 'reply' ? 'conversationId' : run.kind === 'invite' ? 'inviteId' : 'run']: run.id } : {}) },
-                'turn still running — its conversation stays in flight until OpenClaw reports the run ended',
-              )
-              if (!run || !isOverdue(elapsedMs)) return
-              // Past 30 minutes the turn is handed off, once: the account
-              // gets its turn slot back, this conversation stays held until
-              // the run ends. Reported then, and every further 30 minutes.
-              const handed = turns.handOff(runId) !== null
-              reportOverdue(runId, run.kind, run.id, elapsedMs, handed)
-            },
+            onStillRunning,
             onWaitError: ({ runId, sessionKey, error, attempt, retryInMs }) =>
               logger[attempt === 1 ? 'warn' : 'debug']({ runId, sessionKey, error, attempt, retryInMs }, 'waiting for the turn to end failed — asking OpenClaw again'),
           }),

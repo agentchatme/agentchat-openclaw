@@ -17,7 +17,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { integration } from 'agentchatme'
 
 import { registerRunObserver } from '../../src/binding/run-observer.js'
-import { AccountTurns, RESTART_HOLD_MS, accountTurns, resetRunningTurnsForTest, restartHoldLines, type RunRecord } from '../../src/integration/running.js'
+import { AccountTurns, RESTART_HOLD_MS, STORED_TURN_MAX_AGE_MS, accountTurns, resetRunningTurnsForTest, restartHoldLines, type RunRecord } from '../../src/integration/running.js'
+import { createAfterTurnRecorder } from '../../src/integration/after-turn.js'
+import { capturingLogger } from '../helpers/logger.js'
 import { KEEP_ENDED_MS, TurnStore, storedCard, type StoredTurn } from '../../src/integration/turn-store.js'
 import { card } from '../helpers/fake-client.js'
 
@@ -48,14 +50,14 @@ function reply(runId: string, id: string, extra: Partial<RunRecord> = {}): RunRe
   }
 }
 
-function stored(runId: string, id: string): StoredTurn {
+function stored(runId: string, id: string, startedAt: number = Date.now() - 60_000): StoredTurn {
   return {
     runId,
     kind: 'reply',
     id,
     anchor: `msg_${id}`,
     sessionKey: `agent:main:subagent:agentchat-wake-${runId}`,
-    startedAt: 1_000,
+    startedAt,
     category: null,
     card: { conversation_id: id, last_message_id: `msg_${id}`, your_last_message_at: null, you_owe_reply: true, your_last_decision: null },
   }
@@ -66,11 +68,12 @@ describe('the store', () => {
     const store = new TurnStore('default', dir)
     expect(store.file).toBe(path.join(dir, 'agentchat', 'default', 'turns.json'))
     expect(store.load()).toEqual([])
-    expect(store.write([stored('run_1', 'conv_a')])).toBe(true)
-    expect(store.load()).toEqual([stored('run_1', 'conv_a')])
+    const one = stored('run_1', 'conv_a')
+    expect(store.write([one])).toBe(true)
+    expect(store.load()).toEqual([one])
     fs.writeFileSync(store.file, '{ not json')
     expect(store.load()).toEqual([])
-    fs.writeFileSync(store.file, JSON.stringify({ version: 2, turns: [stored('run_1', 'conv_a')] }))
+    fs.writeFileSync(store.file, JSON.stringify({ version: 2, turns: [one] }))
     expect(store.load()).toEqual([])
     expect(store.write([])).toBe(true)
     expect(fs.existsSync(store.file)).toBe(false)
@@ -159,9 +162,46 @@ describe('the next start adopts what the last process left', () => {
     expect(recorded).toEqual([{ runId: 'run_old', end: { status: 'failed', agentchatCalls: { made: 2, failed: 0 }, detail: 'the gateway restarted during the turn' } }])
     expect(store.load().map((t) => t.runId)).toEqual(['run_old']) // still in flight for a restart during the hold
     await vi.advanceTimersByTimeAsync(RESTART_HOLD_MS)
+    // The rule once more at expiry (the resumed main session may have answered meanwhile), then free.
+    expect(recorded).toHaveLength(2)
+    expect(recorded[1]).toEqual(recorded[0])
     expect(turns.tracker.conversationRunning('conv_a')).toBe(false)
     expect(wakes()).toBe(1)
     expect(store.load()).toEqual([])
+  })
+
+  it('a card the resumed main session answered during the hold is recorded at expiry — reply, not gated again', async () => {
+    vi.useFakeTimers()
+    const store = new TurnStore('default', dir)
+    store.write([stored('run_old', 'conv_a')])
+    let tray = [card('conv_a', 'msg_conv_a', { you_owe_reply: true, your_last_message_at: null })]
+    const posts: string[] = []
+    const client = {
+      inbox: { tray: async () => ({ version: 1, you: '@alice', conversations: tray, invites: [], truncated: false }) },
+      decisions: { record: async (id: string, o: { decision: string; throughMessageId?: string }) => (posts.push(`${id}:${o.decision}:${o.throughMessageId}`), {}) },
+      groups: { dismissInvite: async () => ({}) },
+    }
+    const turns = new AccountTurns()
+    turns.configure({ store, recorder: createAfterTurnRecorder({ client: client as never, logger: capturingLogger() }), readCalls: async () => null })
+    turns.adopt()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(posts).toEqual([]) // at the start: nothing went out
+    // The main session answers the peer during the hold…
+    tray = [card('conv_a', 'msg_conv_a', { you_owe_reply: false, your_last_message_at: new Date().toISOString() })]
+    await vi.advanceTimersByTimeAsync(RESTART_HOLD_MS)
+    // …so the expiry records reply through the anchor the gate saw.
+    expect(posts).toEqual(['conv_a:reply:msg_conv_a'])
+    expect(turns.tracker.conversationRunning('conv_a')).toBe(false)
+  })
+
+  it('a stored turn first started over a day ago is dropped, not adopted again (a restart storm)', () => {
+    const store = new TurnStore('default', dir)
+    const old = { ...stored('run_old', 'conv_a'), firstStartedAt: Date.now() - STORED_TURN_MAX_AGE_MS - 60_000 }
+    store.write([old, stored('run_new', 'conv_b')])
+    const { turns } = adopting(store)
+    expect(turns.adopt().map((r) => r.id)).toEqual(['conv_b'])
+    expect(turns.tracker.conversationRunning('conv_a')).toBe(false)
+    expect(store.load().map((t) => t.runId)).toEqual(['run_new'])
   })
 
   it('a run OpenClaw starts in that turn’s session keeps the hold past RESTART_HOLD_MS until it ends, then gets the after-turn rule', async () => {
@@ -190,6 +230,28 @@ describe('the next start adopts what the last process left', () => {
     expect(recorded[1]!.end).toEqual({ status: 'completed', agentchatCalls: { made: 4, failed: 0 } })
     expect(turns.tracker.conversationRunning('conv_a')).toBe(false)
     expect(wakes()).toBe(1)
+  })
+
+  it('a continued run that never ends goes through the 30-minute hand-off and counts as hung (no hold forever); it keeps the original start for aging', async () => {
+    let clock = Date.now()
+    const store = new TurnStore('default', dir)
+    const original = stored('run_old', 'conv_a', clock - 60_000)
+    store.write([original])
+    const turns = new AccountTurns({ now: () => clock })
+    turns.configure({ store, watch: () => new Promise(() => {}) })
+    turns.adopt()
+    turns.observeRun('run_resumed', 'agent:main:subagent:agentchat-wake-run_old')
+    expect(turns.stateOf('run_resumed')).toBe('watch')
+    expect(store.load()).toEqual([expect.objectContaining({ runId: 'run_resumed', firstStartedAt: original.startedAt })])
+    expect(turns.hungCount).toBe(0)
+    clock += 30 * 60_000
+    expect(turns.handOff('run_resumed')).toMatchObject({ runId: 'run_resumed', id: 'conv_a' })
+    expect(turns.stateOf('run_resumed')).toBe('hung')
+    expect(turns.hungCount).toBe(1)
+    expect(turns.laneGeneration).toBe(0) // its own session: none of our lanes moves
+    expect(turns.handOff('run_resumed')).toBeNull()
+    expect(turns.release('conv_a')).toMatchObject({ released: true, what: 'hung', runId: 'run_resumed' })
+    expect(turns.tracker.conversationRunning('conv_a')).toBe(false)
   })
 
   it('runs in other sessions, and runs this process started, are not taken for a continued turn', async () => {

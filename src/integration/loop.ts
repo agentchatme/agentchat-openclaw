@@ -135,12 +135,19 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
 /**
  * Single-run mode: one OpenClaw run with the served text; the cycle waits for
  * its confirmed end. The run is recorded with the account's turns, so a run
- * still going after 30 minutes is handed off like a turn — the cycle is let
- * go of (the run goes on; new runs move to a fresh lane), so it cannot stall
- * the loop — and `openclaw agentchat release <run id>` works on it.
+ * still going after 30 minutes is handed off like a turn: the cycle is let go
+ * of (the loop is not stuck in it), but no new run starts while it lives —
+ * one run reads the whole tray, a second would answer the same cards
+ * (readiness says not-ready too; `openclaw agentchat release <run id>
+ * --force` frees it).
  */
 function singleRunStarter(options: IntegrationLoopOptions, owner: string, logger: Logger, now: () => number): integration.RunStarter {
   return async (request) => {
+    const hung = options.turns.hungSingleRun()
+    if (hung) {
+      logger.warn({ runId: hung.runId }, 'gate off — a handed-off run is still going; no second run while it lives (the cards wait on the tray)')
+      return { status: 'not_started', detail: `the gate-off run ${hung.runId} is still going` }
+    }
     const sessionKey = wakeSessionKey(options.agentId, now())
     logger.info({ sessionKey, cards: request.cards, invites: request.invites }, 'gate off — one run with the served wake instruction')
     const admission = await options.startRun({ sessionKey, prompt: request.prompt, lane: integrationLane(options.accountId, options.turns.laneGeneration) })
@@ -158,7 +165,7 @@ function singleRunStarter(options: IntegrationLoopOptions, owner: string, logger
     })
     const first = await Promise.race([ended, handedOff])
     if (first === 'let_go') {
-      logger.warn({ sessionKey, runId }, 'gate off — the run is still going; the loop goes on without it (a later run may overlap it)')
+      logger.warn({ sessionKey, runId }, 'gate off — the run is still going after 30 min; no new run starts until it ends (or `openclaw agentchat release <run id> --force`)')
       return { status: 'failed', detail: 'the run was handed off while still going' }
     }
     return first.status === 'ok' && !first.error ? { status: 'completed' } : { status: 'failed', detail: first.error ?? `run ended: ${first.status ?? 'unknown'}` }

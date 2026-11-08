@@ -424,24 +424,26 @@ describe('OpenClaw-side switches', () => {
     expect(h.server.posts).toEqual([])
   })
 
-  it('gate off: a run still going after 30 minutes is handed off — the cycle ends, the next run goes to a fresh lane', async () => {
+  it('gate off: a run still going after 30 minutes is handed off — the cycle ends, but no new run starts while it lives (one run reads the whole tray)', async () => {
     const h = await start({ gateEnabled: false })
     await message(h, 'conv_a', 1)
-    expect(h.runs.requests).toHaveLength(1)
-    await message(h, 'conv_b', 1) // the cycle still waits on the first run
     expect(h.runs.requests).toHaveLength(1)
     const runId = h.turns.runningRuns()[0]!.runId
     expect(h.turns.handOff(runId)).toMatchObject({ kind: 'run' })
     await flushAsync(30)
+    await message(h, 'conv_b', 1)
     await message(h, 'conv_b', 2)
-    expect(h.runs.requests).toHaveLength(2)
-    expect(h.runs.requests[1]!.lane).toBe('agentchat-integration:default:1')
-    h.server.cards.clear() // the runs answered everything
-    h.runs.end(0)
-    h.runs.end(1)
+    expect(h.runs.requests).toHaveLength(1) // no second run over the same tray
+    expect(h.logger.at('warn').some((l) => /no second run while it lives/.test(l.msg ?? ''))).toBe(true)
+    h.runs.end(0) // it ends: the account starts runs again, on the next lane
     await flushAsync(30)
     expect(h.turns.hungCount).toBe(0)
-    for (let i = 2; i < h.runs.requests.length; i += 1) h.runs.end(i)
+    await message(h, 'conv_b', 3)
+    expect(h.runs.requests).toHaveLength(2)
+    expect(h.runs.requests[1]!.lane).toBe('agentchat-integration:default:1')
+    h.server.cards.clear()
+    for (let i = 1; i < h.runs.requests.length; i += 1) h.runs.end(i)
+    await flushAsync(30)
   })
 
   it('no gate-call texts (an older server): the gate uses the SDK’s 1.2 wording (lead decision) and works', async () => {

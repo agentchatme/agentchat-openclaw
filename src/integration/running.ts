@@ -22,14 +22,19 @@
  * the after-turn rule itself (`./after-turn.ts`: the kit no longer watches
  * it). At most `MAX_HUNG_TURNS` are held that way; beyond that, readiness
  * says not-ready (no gate calls) and status and doctor say why. An operator
- * can let one go: `openclaw agentchat release <conversation_id>`. A run that
- * was handed off or let go of is never handed off again — whatever later
- * "still running" reports say — so a release sticks: the turn that runs for
- * the conversation next is never touched by the old run.
+ * can let one go: `openclaw agentchat release <conversation_id>`.
  *
- * Gate off (single-run mode) the same holds for the one run a cycle waits
- * on: past `TURN_OVERDUE_MS` the cycle is let go of (the run goes on), so a
- * hung run cannot stall the loop, and the release command works on it.
+ * Every hold here is keyed by run id. A run that was handed off or let go of
+ * is never handed off again — whatever later "still running" reports say —
+ * so a release sticks; and a run whose kit hold was released while OpenClaw
+ * was still admitting it starts out let go of. Either way the old run can
+ * never release a newer turn's hold on the same conversation.
+ *
+ * Gate off (single-run mode) one run reads the whole tray, so two would
+ * answer the same cards: past `TURN_OVERDUE_MS` the cycle waiting on the run
+ * is let go of (the loop is not stuck in it), but no new run starts while the
+ * handed-off one lives — readiness says not-ready, status and doctor say why,
+ * and `openclaw agentchat release <run id> --force` frees it.
  *
  * A gateway restart ends every run with the process, and OpenClaw (current
  * main) may continue a plugin's turn session afterwards: a plugin run with
@@ -42,15 +47,22 @@
  * session when appropriate". Tested live: on 2026.11.5-beta.1 a restart
  * during a turn resumed `agent:<id>:main` with the restart text, its context
  * listing the AgentChat turn sessions; 2026.10.9 aborted the run and resumed
- * nothing. So the turns in flight are written
- * to disk (`./turn-store.ts`) and the next start adopts them (`adopt`): each
- * conversation is held for `RESTART_HOLD_MS`, the after-turn rule is applied
- * to what the ended run did (an answer it sent records `reply`, so the card
- * is not gated again), and a run OpenClaw starts in that turn's session —
- * seen through the `model_call_started` hook, the public way a plugin sees
- * runs it did not start — keeps the hold until it ends, then gets the
- * after-turn rule too. A plugin reload waits for the runs (OpenClaw drains a
- * plugin's admitted work first, and every turn holds it until it ends).
+ * nothing. So the turns in flight are written to disk (`./turn-store.ts`)
+ * and the next start adopts them (`adopt`): each conversation is held for
+ * `RESTART_HOLD_MS`, and the after-turn rule is applied to what the ended run
+ * did at once and again when the hold expires (an answer it — or the resumed
+ * main session — sent records `reply`, so the card is not gated again). A
+ * run OpenClaw starts in that turn's session during the hold — seen through
+ * the `model_call_started` hook, the public way a plugin sees runs it did not
+ * start — keeps the conversation held as a turn of its own: past
+ * `TURN_OVERDUE_MS` it is handed off and counts toward `MAX_HUNG_TURNS`, and
+ * when it ends it gets the after-turn rule. A stored turn first started more
+ * than `STORED_TURN_MAX_AGE_MS` ago is dropped, so a restart storm cannot
+ * re-adopt it forever. Not covered (accepted): a continuation that starts
+ * after the hold, when the conversation may have been gated again; the wake
+ * text AgentChat serves for OpenClaw is to tell the agent not to resume an
+ * AgentChat turn after a restart (a server change). A plugin reload waits for the runs (OpenClaw drains a plugin's
+ * admitted work first, and every turn holds it until it ends).
  */
 
 import { integration, type InboxCard, type TrayInvite } from 'agentchatme'
@@ -88,6 +100,9 @@ export const OPENCLAW_DEFAULT_RUN_TIMEOUT_SECONDS = 2880 * 60
  */
 export const RESTART_HOLD_MS = 3 * 60_000
 
+/** A stored turn first started longer ago than this is dropped, not adopted again (a restart storm). */
+export const STORED_TURN_MAX_AGE_MS = 24 * 60 * 60_000
+
 /** reply: a conversation; invite: a group invite; run: the one run of a gate-off cycle. */
 export type TurnKind = 'reply' | 'invite' | 'run'
 
@@ -109,6 +124,8 @@ export interface RunRecord {
   readonly category?: string | null
   /** invite: the invite the turn was for. */
   readonly invite?: TrayInvite
+  /** When the first turn of this chain started: a turn continued after a restart keeps its original's (stored turns age out by it). */
+  readonly firstStartedAt?: number
 }
 
 export type ReleaseResult =
@@ -144,13 +161,17 @@ interface LiveLoop {
   readonly run: <T>(fn: () => T) => T
 }
 
-/** kit: the kit's loop holds it. hung: handed off, held here. released: let go of; it holds nothing. */
-type RunState = 'kit' | 'hung' | 'released'
+/**
+ * kit: the kit's loop holds it. watch: a run OpenClaw started in an adopted
+ * turn's session, held here. hung: handed off, held here. released: let go
+ * of; it holds nothing.
+ */
+type RunState = 'kit' | 'watch' | 'hung' | 'released'
 
 interface Entry {
   readonly record: RunRecord
   state: RunState
-  /** The hold this module keeps for a hung reply / invite turn. */
+  /** The hold this module keeps (hung reply / invite turns, continued runs). */
   handle: integration.TurnHandle | null
   /** When it was handed off. */
   since: number
@@ -164,10 +185,18 @@ interface Adopted {
   readonly record: RunRecord
   readonly handle: integration.TurnHandle
   readonly until: number
-  /** A run OpenClaw started in the turn's session since; the hold waits for it. */
-  watching: string | null
+  /** What the ended run did (read once its transcript is): applied at the start and when the hold expires. */
+  end: integration.TurnEnd | null
   timer: ReturnType<typeof setTimeout> | null
 }
+
+/** A turn OpenClaw is admitting: whether its kit hold was released meanwhile. */
+export interface Admission {
+  readonly key: string
+  released: boolean
+}
+
+const RESTART_END_DETAIL = 'the gateway restarted during the turn'
 
 function trackerKey(kind: TurnKind, id: string): string {
   return kind === 'reply' ? `conversation:${id}` : kind === 'invite' ? `invite:${id}` : `run:${id}`
@@ -188,6 +217,7 @@ function storedOf(record: RunRecord): StoredTurn | null {
     anchor: record.anchor,
     sessionKey: record.sessionKey,
     startedAt: record.startedAt,
+    ...(record.firstStartedAt !== undefined ? { firstStartedAt: record.firstStartedAt } : {}),
     ...(record.category !== undefined ? { category: record.category } : {}),
     ...(record.kind === 'reply' && record.card ? { card: storedCard(record.card, record.anchor) } : {}),
   }
@@ -201,6 +231,7 @@ function recordOf(stored: StoredTurn): RunRecord {
     anchor: stored.anchor,
     sessionKey: stored.sessionKey,
     startedAt: stored.startedAt,
+    firstStartedAt: stored.firstStartedAt ?? stored.startedAt,
     owner: 'previous-process',
     ...(stored.category !== undefined ? { category: stored.category } : {}),
     ...(stored.kind === 'reply' && stored.card ? { card: cardFromStored(stored.card as never) } : {}),
@@ -214,6 +245,8 @@ export class AccountTurns {
   private readonly entries = new Map<string, Entry>()
   /** Turns the last process left in flight, by session key. */
   private readonly adopted = new Map<string, Adopted>()
+  /** Turns OpenClaw is admitting right now. */
+  private readonly admitting = new Set<Admission>()
   /** Ended runs still written to the store (`KEEP_ENDED_MS`). */
   private readonly kept = new Map<string, { readonly turn: StoredTurn; readonly endedAt: number }>()
   private keptTimer: ReturnType<typeof setTimeout> | null = null
@@ -226,6 +259,12 @@ export class AccountTurns {
   constructor(options: { now?: () => number } = {}) {
     this.now = options.now ?? Date.now
     this.tracker = new integration.TurnTracker({ now: this.now })
+    // A kit hold released while OpenClaw is still admitting its run: that run
+    // starts out let go of (`started`), so it can never release a newer
+    // turn's hold on the same conversation.
+    this.tracker.onRelease((handle) => {
+      for (const admission of this.admitting) if (admission.key === handle.key) admission.released = true
+    })
   }
 
   /** The account's after-turn recorder, store and run watcher (each account start; the latest wins). */
@@ -242,9 +281,33 @@ export class AccountTurns {
     if (this.live?.owner === owner) this.live = null
   }
 
-  /** A run OpenClaw admitted. `letGo` (gate-off runs): ends the cycle waiting on it when it is handed off or released. */
-  started(record: RunRecord, options: { letGo?: () => void } = {}): void {
-    this.entries.set(record.runId, { record, state: 'kit', handle: null, since: 0, ...(options.letGo ? { letGo: options.letGo } : {}) })
+  /** A turn is about to be admitted by OpenClaw: watch whether its kit hold is released meanwhile. */
+  admission(kind: 'reply' | 'invite', id: string): Admission {
+    const admission: Admission = { key: trackerKey(kind, id), released: false }
+    this.admitting.add(admission)
+    return admission
+  }
+
+  /** OpenClaw refused the turn: nothing to watch. */
+  admitted(admission: Admission): void {
+    this.admitting.delete(admission)
+  }
+
+  /**
+   * A run OpenClaw admitted. `letGo` (gate-off runs): ends the cycle waiting
+   * on it when it is handed off or released. `admission`: a turn whose kit
+   * hold was released during admission starts out let go of.
+   */
+  started(record: RunRecord, options: { letGo?: () => void; admission?: Admission } = {}): void {
+    const releasedMeanwhile = options.admission?.released === true
+    if (options.admission) this.admitting.delete(options.admission)
+    this.entries.set(record.runId, {
+      record,
+      state: releasedMeanwhile ? 'released' : 'kit',
+      handle: null,
+      since: 0,
+      ...(options.letGo ? { letGo: options.letGo } : {}),
+    })
     this.persist()
   }
 
@@ -252,7 +315,7 @@ export class AccountTurns {
     return this.entries.get(runId)?.record
   }
 
-  /** Whether the run was handed off or let go of (`null`: not a run of this account, or ended). */
+  /** Where the run stands (`null`: not a run of this account, or ended). */
   stateOf(runId: string): RunState | null {
     return this.entries.get(runId)?.state ?? null
   }
@@ -275,9 +338,21 @@ export class AccountTurns {
     return count
   }
 
-  /** Conversations (and invites) held after a restart, and until when. */
-  restartHolds(): Array<{ readonly record: RunRecord; readonly until: number; readonly watching: string | null }> {
-    return [...this.adopted.values()].map((a) => ({ record: a.record, until: a.until, watching: a.watching }))
+  /** The handed-off gate-off run still going, if any: no new run starts while it lives. */
+  hungSingleRun(): RunRecord | null {
+    for (const entry of this.entries.values()) if (entry.state === 'hung' && entry.record.kind === 'run') return entry.record
+    return null
+  }
+
+  /** Conversations (and invites) held after a restart: adopted (until when), or continued by a run OpenClaw started. */
+  restartHolds(): Array<{ readonly record: RunRecord; readonly until: number | null; readonly watching: string | null }> {
+    const holds: Array<{ readonly record: RunRecord; readonly until: number | null; readonly watching: string | null }> = [...this.adopted.values()].map((a) => ({
+      record: a.record,
+      until: a.until,
+      watching: null,
+    }))
+    for (const entry of this.entries.values()) if (entry.state === 'watch') holds.push({ record: entry.record, until: null, watching: entry.record.runId })
+    return holds
   }
 
   /** The lane generation new turns start on (`integrationLane(accountId, laneGeneration)`). */
@@ -286,11 +361,12 @@ export class AccountTurns {
   }
 
   /**
-   * OpenClaw reported the run ended (`end`: what it did, when known). A hung
-   * turn gets the after-turn rule here (the kit let go of it), then its hold
-   * drops and the live loop is woken. A turn the kit still holds is the
-   * kit's to record; the live loop is woken once the card is free, only when
-   * an earlier loop started it. A run let go of records nothing.
+   * OpenClaw reported the run ended (`end`: what it did, when known). A turn
+   * held here (handed off, or continued after a restart) gets the after-turn
+   * rule, then its hold drops and the live loop is woken. A turn the kit
+   * still holds is the kit's to record; the live loop is woken once the card
+   * is free, only when an earlier loop started it. A run let go of records
+   * nothing.
    */
   async ended(runId: string, end?: integration.TurnEnd): Promise<void> {
     const entry = this.entries.get(runId)
@@ -298,7 +374,7 @@ export class AccountTurns {
     this.entries.delete(runId)
     if (entry.state !== 'released') this.keep(entry.record)
     else this.persist()
-    if (entry.state === 'hung') {
+    if (entry.state === 'hung' || entry.state === 'watch') {
       try {
         if (end && this.wiring.recorder && entry.record.kind !== 'run') await this.wiring.recorder(entry.record, end)
       } finally {
@@ -313,21 +389,28 @@ export class AccountTurns {
   }
 
   /**
-   * Hand a long run off, once: release the kit's slot (its loop records
-   * nothing for it and may start other turns) and hold the conversation here
-   * until the run ends. A gate-off run: the cycle waiting on it is let go of.
-   * Returns the record when it was handed off now; null when it was already
-   * handed off or let go of (a release sticks).
+   * Hand a long run off, once, by run id: release the kit's slot for it (its
+   * loop records nothing for it and may start other turns) and hold the
+   * conversation here until the run ends. A gate-off run: the cycle waiting
+   * on it is let go of. A continued run is already held here: it becomes
+   * hung (counted toward `MAX_HUNG_TURNS`). Returns the record when it was
+   * handed off now; null when it was already handed off or let go of.
    */
   handOff(runId: string): RunRecord | null {
     const entry = this.entries.get(runId)
-    if (!entry || entry.state !== 'kit') return null
+    if (!entry || (entry.state !== 'kit' && entry.state !== 'watch')) return null
     const record = entry.record
+    entry.since = this.now()
+    if (entry.state === 'watch') {
+      // Its own session, not one of our lanes; its hold is ours already.
+      entry.state = 'hung'
+      this.live?.wake()
+      return record
+    }
     // OpenClaw serializes a lane: the next turn must not queue behind this
     // run. Moved first — the release below can admit a waiting turn at once.
     this.lane += 1
     entry.state = 'hung'
-    entry.since = this.now()
     const turn = trackedTurn(record)
     if (turn === null) {
       entry.letGo?.()
@@ -342,10 +425,12 @@ export class AccountTurns {
 
   /**
    * An operator lets go of a conversation's (or invite's) turn: a hung hold,
-   * a restart hold, or — past `TURN_OVERDUE_MS`, or with `force` — a turn the
-   * kit still holds. Its run may still be live and answer: a second reply is
+   * a restart hold, or — past `TURN_OVERDUE_MS`, or with `force` — a turn
+   * still running. Its run may still be live and answer: a second reply is
    * then possible, which is why a turn under 30 minutes (most likely still
-   * working) is refused without `force`.
+   * working) is refused without `force`. A gate-off run always needs
+   * `force`: it reads the whole tray, so a new run would answer the same
+   * cards while it may still be going.
    */
   release(id: string, options: { force?: boolean } = {}): ReleaseResult {
     const live = this.live
@@ -356,6 +441,7 @@ export class AccountTurns {
     const matches = (record: RunRecord) => record.id === id || record.runId === id
     for (const entry of this.entries.values()) {
       if (entry.state !== 'hung' || !matches(entry.record)) continue
+      if (entry.record.kind === 'run' && !force) return this.refuseSingleRun(entry.record)
       entry.state = 'released'
       if (entry.handle) this.tracker.end(entry.handle)
       entry.handle = null
@@ -366,19 +452,24 @@ export class AccountTurns {
     for (const [sessionKey, adopted] of this.adopted) {
       if (adopted.record.id !== id) continue
       this.finishAdopted(sessionKey)
-      return { released: true, what: 'restart', key: trackerKey(adopted.record.kind, adopted.record.id), runId: adopted.watching }
+      return { released: true, what: 'restart', key: trackerKey(adopted.record.kind, adopted.record.id), runId: null }
     }
     for (const entry of this.entries.values()) {
-      if (entry.state !== 'kit' || !matches(entry.record)) continue
+      if ((entry.state !== 'kit' && entry.state !== 'watch') || !matches(entry.record)) continue
       const refused = this.refuseYoung(entry.record.kind, entry.record.id, entry.record.startedAt, force)
       if (refused) return refused
-      // The released run may still be going in its lane: new turns move on
-      // (first — the release can admit a waiting turn at once).
-      this.lane += 1
-      entry.state = 'released'
       const key = trackerKey(entry.record.kind, entry.record.id)
-      if (entry.record.kind === 'run') entry.letGo?.()
-      else this.tracker.release(key)
+      if (entry.state === 'watch') {
+        if (entry.handle) this.tracker.end(entry.handle)
+        entry.handle = null
+      } else {
+        // The released run may still be going in its lane: new turns move on
+        // (first — the release can admit a waiting turn at once).
+        this.lane += 1
+        if (entry.record.kind === 'run') entry.letGo?.()
+        else this.tracker.release(key)
+      }
+      entry.state = 'released'
       this.persist()
       this.live?.wake()
       return { released: true, what: 'running', key, runId: entry.record.runId }
@@ -408,23 +499,38 @@ export class AccountTurns {
     }
   }
 
+  private refuseSingleRun(record: RunRecord): ReleaseResult {
+    return {
+      released: false,
+      reason: `${whatOf('run', record.runId)} has run ${Math.floor((this.now() - record.startedAt) / 60_000)} min and reads the whole tray — releasing it lets a new run answer the same cards while this one may still be going (the peers would get two replies); repeat with --force`,
+    }
+  }
+
   /**
    * Adopt the turns the last process left in flight (the store). Each one's
    * conversation (or invite) is held at once — before the loop's first gate —
-   * for `RESTART_HOLD_MS`, and the after-turn rule is applied to what the
-   * ended run did. A run OpenClaw starts in the turn's session meanwhile
-   * (`observeRun`) keeps the hold until it ends. Returns what was adopted.
+   * for `RESTART_HOLD_MS`; the after-turn rule is applied to what the ended
+   * run did now and again when the hold expires. A run OpenClaw starts in the
+   * turn's session meanwhile (`observeRun`) takes the hold over. A turn first
+   * started more than `STORED_TURN_MAX_AGE_MS` ago is dropped. Returns what
+   * was adopted.
    */
   adopt(stored: readonly StoredTurn[] = this.wiring.store?.load() ?? []): RunRecord[] {
     const adopted: RunRecord[] = []
+    const now = this.now()
     for (const turn of stored) {
       // Still running in this process (an account restart, not a gateway restart).
       if (this.entries.has(turn.runId) || this.adopted.has(turn.sessionKey) || this.kept.has(turn.runId)) continue
+      const first = turn.firstStartedAt ?? turn.startedAt
+      if (now - first > STORED_TURN_MAX_AGE_MS) {
+        this.wiring.logger?.info({ runId: turn.runId, [turn.kind === 'reply' ? 'conversationId' : 'inviteId']: turn.id }, 'a stored turn older than a day was dropped, not adopted again')
+        continue
+      }
       const record = recordOf(turn)
       const tracked = trackedTurn(record)
       const handle = tracked ? this.tracker.begin(tracked) : null
       if (!handle) continue
-      const entry: Adopted = { stored: turn, record, handle, until: this.now() + RESTART_HOLD_MS, watching: null, timer: null }
+      const entry: Adopted = { stored: { ...turn, firstStartedAt: first }, record, handle, until: now + RESTART_HOLD_MS, end: null, timer: null }
       this.adopted.set(turn.sessionKey, entry)
       entry.timer = setTimeout(() => this.expireAdopted(turn.sessionKey, entry), RESTART_HOLD_MS)
       entry.timer.unref?.()
@@ -438,32 +544,36 @@ export class AccountTurns {
   /**
    * A run started in some session (the `model_call_started` hook). One in
    * the session of a turn adopted after a restart is OpenClaw continuing
-   * that turn: its conversation stays held until the run ends.
+   * that turn: it takes the hold over as a turn of its own (`watch`), handed
+   * off past `TURN_OVERDUE_MS` like any other.
    */
   observeRun(runId: string, sessionKey: string | undefined): void {
     if (!sessionKey || this.entries.has(runId)) return
     const adopted = this.adopted.get(sessionKey)
-    if (!adopted || adopted.watching !== null) return
-    adopted.watching = runId
+    if (!adopted) return
+    this.adopted.delete(sessionKey)
+    if (adopted.timer) clearTimeout(adopted.timer)
+    const record: RunRecord = { ...adopted.record, runId, startedAt: this.now(), owner: 'restart' }
+    this.entries.set(runId, { record, state: 'watch', handle: adopted.handle, since: 0 })
+    this.persist()
     this.wiring.logger?.info(
-      { runId, sessionKey, [adopted.record.kind === 'reply' ? 'conversationId' : 'inviteId']: adopted.record.id },
+      { runId, sessionKey, [record.kind === 'reply' ? 'conversationId' : 'inviteId']: record.id },
       'OpenClaw continued a turn session after the restart — its conversation stays held until that run ends',
     )
-    const record: RunRecord = { ...adopted.record, runId, startedAt: this.now() }
-    void (async () => {
-      let end: integration.TurnEnd | null = null
-      try {
-        end = this.wiring.watch ? await this.wiring.watch(record) : null
-      } catch {
-        end = null
-      }
-      if (this.adopted.get(sessionKey) !== adopted) return // released meanwhile
-      try {
-        if (end && this.wiring.recorder) await this.wiring.recorder(record, end)
-      } finally {
-        this.finishAdopted(sessionKey)
-      }
-    })()
+    void this.watchContinued(record)
+  }
+
+  private async watchContinued(record: RunRecord): Promise<void> {
+    let end: integration.TurnEnd | null = null
+    try {
+      end = this.wiring.watch ? await this.wiring.watch(record) : null
+    } catch {
+      end = null
+    }
+    // null: the plugin runtime is gone — the hold stays (nothing in this
+    // process starts a second turn for it).
+    if (end === null) return
+    await this.ended(record.runId, end)
   }
 
   private async recordRestartEnded(adopted: Adopted): Promise<void> {
@@ -474,13 +584,26 @@ export class AccountTurns {
     } catch {
       calls = null
     }
+    adopted.end = { status: 'failed', agentchatCalls: calls, detail: RESTART_END_DETAIL }
     if (this.adopted.get(record.sessionKey) !== adopted || !this.wiring.recorder) return
-    await this.wiring.recorder(record, { status: 'failed', agentchatCalls: calls, detail: 'the gateway restarted during the turn' })
+    await this.wiring.recorder(record, adopted.end)
   }
 
+  /**
+   * The hold expired with nothing continuing the turn: the after-turn rule
+   * once more — the resumed main session may have answered the card
+   * meanwhile — then the conversation is free.
+   */
   private expireAdopted(sessionKey: string, adopted: Adopted): void {
-    if (this.adopted.get(sessionKey) !== adopted || adopted.watching !== null) return // a continued run ends it
-    this.finishAdopted(sessionKey)
+    if (this.adopted.get(sessionKey) !== adopted) return // taken over by a continued run, or released
+    void (async () => {
+      try {
+        if (this.wiring.recorder) await this.wiring.recorder(adopted.record, adopted.end ?? { status: 'failed', agentchatCalls: null, detail: RESTART_END_DETAIL })
+      } catch {
+        // the recorder never rejects; a failure leaves the card to the server's re-wake
+      }
+      if (this.adopted.get(sessionKey) === adopted) this.finishAdopted(sessionKey)
+    })()
   }
 
   private finishAdopted(sessionKey: string): void {
@@ -601,7 +724,7 @@ function deadlineText(cfg: unknown): string {
 export function overdueTurnLine(turn: { readonly kind: TurnKind; readonly id: string; readonly elapsedMs: number }, cfg: unknown): string {
   const minutes = Math.round(turn.elapsedMs / 60_000)
   if (turn.kind === 'run') {
-    return `${whatOf(turn.kind, turn.id)} has run ${minutes} min — the loop went on without it (a later run may overlap it); ${deadlineText(cfg)}`
+    return `${whatOf(turn.kind, turn.id)} has run ${minutes} min — no new run starts until it ends (one run reads the whole tray); ${deadlineText(cfg)}`
   }
   return `a turn for ${whatOf(turn.kind, turn.id)} has run ${minutes} min — that conversation stays held (no second reply) until the run ends; ${deadlineText(cfg)}; other conversations are not held up by it`
 }
@@ -614,14 +737,22 @@ export function overdueTurnLines(runs: readonly RunRecord[], cfg: unknown, now: 
 /** One line per conversation held after a gateway restart (status, doctor, the start log). */
 export function restartHoldLines(turns: AccountTurns, now: number = Date.now()): string[] {
   return turns.restartHolds().map(({ record, until, watching }) =>
-    watching
-      ? `${whatOf(record.kind, record.id)} is held: OpenClaw continued its turn's session after the gateway restart (run ${watching}) — gated again once that run ends`
+    watching || until === null
+      ? `${whatOf(record.kind, record.id)} is held: OpenClaw continued its turn's session after the gateway restart (run ${watching ?? 'unknown'}) — gated again once that run ends (handed off like any turn past 30 min)`
       : `${whatOf(record.kind, record.id)} is held for ${Math.max(0, Math.ceil((until - now) / 60_000))} more min: its turn was running when the gateway restarted, and OpenClaw may continue that turn's session`,
   )
 }
 
-/** Readiness while too many turns are hung: why nothing is gated, and what to do. Null while under the cap. */
+/**
+ * Readiness while handed-off runs block the account: a gate-off run still
+ * going (no new run while it lives), or too many hung turns. Why nothing is
+ * gated, and what to do; null when nothing blocks.
+ */
 export function hungTurnsReason(turns: AccountTurns, cfg: unknown, now: number = Date.now()): string | null {
+  const single = turns.hungSingleRun()
+  if (single) {
+    return `${whatOf('run', single.runId)} has run ${Math.floor((now - single.startedAt) / 60_000)} min and is still going in OpenClaw — no new run starts while it lives (one run reads the whole tray; a second would answer the same cards), so the cards wait on the tray; ${deadlineText(cfg)}. \`openclaw agentchat release ${single.runId} --force\` lets a new run start (the old one may still answer)`
+  }
   if (turns.hungCount < MAX_HUNG_TURNS) return null
   const held = turns
     .hungRuns()

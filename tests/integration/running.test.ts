@@ -234,6 +234,33 @@ describe('a release sticks (the old run never touches the next turn)', () => {
   })
 })
 
+describe('a hold is keyed by run id', () => {
+  it('a run whose kit hold was force-released while OpenClaw admitted it starts out let go of: its hand-off never drops the newer turn’s hold', () => {
+    let clock = 0
+    const turns = new AccountTurns({ now: () => clock })
+    turns.tracker.begin({ kind: 'reply', conversationId: 'conv_a', anchor: 'msg_1' })
+    const admitting = turns.admission('reply', 'conv_a')
+    expect(turns.release('conv_a', { force: true })).toMatchObject({ released: true, runId: null }) // during admission
+    const newer = turns.tracker.begin({ kind: 'reply', conversationId: 'conv_a', anchor: 'msg_2' })
+    turns.started(record('run_newer', 'conv_a', { startedAt: clock }), {})
+    turns.started(record('run_old', 'conv_a'), { admission: admitting }) // OpenClaw's admission answers late
+    expect(turns.stateOf('run_old')).toBe('released')
+    clock = 31 * 60_000
+    expect(turns.handOff('run_old')).toBeNull()
+    expect(turns.tracker.holds(newer!)).toBe(true)
+  })
+
+  it('an admission whose hold was not released starts as the kit’s', () => {
+    const turns = new AccountTurns()
+    turns.tracker.begin({ kind: 'reply', conversationId: 'conv_a', anchor: 'msg_1' })
+    const admitting = turns.admission('reply', 'conv_a')
+    turns.tracker.begin({ kind: 'reply', conversationId: 'conv_b', anchor: 'msg_1' })
+    turns.tracker.release('conversation:conv_b') // another conversation's release does not touch it
+    turns.started(record('run_1', 'conv_a'), { admission: admitting })
+    expect(turns.stateOf('run_1')).toBe('kit')
+  })
+})
+
 describe('the release command refuses a young turn without --force', () => {
   it('under 30 minutes: refused, saying a second reply is possible; with force: released', () => {
     const turns = new AccountTurns({ now: () => 12 * 60_000 })
@@ -293,19 +320,32 @@ describe('gate off: the one run a cycle waits on', () => {
     expect(turns.hungCount).toBe(1)
     expect(turns.laneGeneration).toBe(1)
     expect(turns.handOff('run_1')).toBeNull()
-    expect(overdueTurnLine({ kind: 'run', id: 'run_1', elapsedMs: 31 * 60_000 }, {})).toMatch(/^the gate-off run run_1 has run 31 min — the loop went on without it/)
+    expect(overdueTurnLine({ kind: 'run', id: 'run_1', elapsedMs: 31 * 60_000 }, {})).toMatch(/^the gate-off run run_1 has run 31 min — no new run starts until it ends/)
+    // No new run while it lives: readiness says why, and how to free it.
+    expect(turns.hungSingleRun()).toMatchObject({ runId: 'run_1' })
+    expect(hungTurnsReason(turns, {}, 31 * 60_000)).toMatch(/^the gate-off run run_1 has run 31 min and is still going in OpenClaw — no new run starts while it lives .*`openclaw agentchat release run_1 --force`/)
     await turns.ended('run_1')
     expect(turns.hungCount).toBe(0)
     expect(wakes).toBe(2)
   })
 
-  it('the release command lets go of it by run id (refused under 30 minutes without --force)', () => {
-    const turns = new AccountTurns({ now: () => 5 * 60_000 })
+  it('the release command lets go of it by run id, and only with --force (a new run would answer the same cards)', () => {
+    let clock = 5 * 60_000
+    const turns = new AccountTurns({ now: () => clock })
     let letGo = 0
     turns.started({ runId: 'run_1', kind: 'run', id: 'run_1', anchor: null, sessionKey: 's', startedAt: 0, owner: 'loop#1' }, { letGo: () => void (letGo += 1) })
     expect(turns.release('run_1').released).toBe(false)
     expect(turns.release('run_1', { force: true })).toMatchObject({ released: true, what: 'running', key: 'run:run_1', runId: 'run_1' })
     expect(letGo).toBe(1)
+    // Handed off (past 30 minutes): still only with --force.
+    turns.started({ runId: 'run_2', kind: 'run', id: 'run_2', anchor: null, sessionKey: 's2', startedAt: clock, owner: 'loop#1' })
+    clock += 31 * 60_000
+    turns.handOff('run_2')
+    const refused = turns.release('run_2')
+    expect(refused).toMatchObject({ released: false, reason: expect.stringMatching(/reads the whole tray — releasing it lets a new run answer the same cards .*--force$/) })
+    expect(turns.hungSingleRun()).not.toBeNull()
+    expect(turns.release('run_2', { force: true })).toMatchObject({ released: true, what: 'hung' })
+    expect(turns.hungSingleRun()).toBeNull()
   })
 })
 
