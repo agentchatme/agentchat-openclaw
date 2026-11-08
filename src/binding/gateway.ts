@@ -37,7 +37,7 @@ import { multiAccountRefusal } from '../channel-account.js'
 import { registerIntegration, unregisterIntegration, getIntegration } from './runtime-registry.js'
 import { createIntegrationLoop } from '../integration/loop.js'
 import { OpenClawTexts, createTextsCache, spellTextsForOpenClaw } from '../integration/texts.js'
-import { TURN_OVERDUE_MS, accountTurns, hungTurnsReason, overdueTurnLine, restartHoldLines } from '../integration/running.js'
+import { OVERDUE_SLACK_MS, TURN_OVERDUE_MS, accountTurns, hungTurnsReason, isOverdue, overdueTurnLine, restartHoldLines } from '../integration/running.js'
 import { createAfterTurnRecorder } from '../integration/after-turn.js'
 import { TurnStore } from '../integration/turn-store.js'
 import { turnEndOf } from '../integration/turns.js'
@@ -195,7 +195,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     const turns = accountTurns(ctx.accountId)
     /** The "still running" report for a run, past 30 minutes: a warn line at each 30-minute mark. */
     const reportOverdue = (runId: string, kind: 'reply' | 'invite' | 'run', id: string, elapsedMs: number, handed: boolean) => {
-      const mark = Math.floor(elapsedMs / TURN_OVERDUE_MS)
+      const mark = Math.floor((elapsedMs + OVERDUE_SLACK_MS) / TURN_OVERDUE_MS)
       if (!handed && overdueWarned.get(runId) === mark) return
       overdueWarned.set(runId, mark)
       ctx.log?.warn?.(`[agentchat:${ctx.accountId}] ${overdueTurnLine({ kind, id, elapsedMs }, readLiveConfig(ctx.cfg).cfg)}`)
@@ -206,7 +206,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     const watchRun = createRunWatcher({
       onStillRunning: ({ runId, elapsedMs }) => {
         const held = turns.restartHolds().find((hold) => hold.watching === runId)
-        if (held && elapsedMs >= TURN_OVERDUE_MS) reportOverdue(runId, held.record.kind, held.record.id, elapsedMs, false)
+        if (held && isOverdue(elapsedMs)) reportOverdue(runId, held.record.kind, held.record.id, elapsedMs, false)
       },
     })
     turns.configure({
@@ -285,7 +285,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
                 { runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000), ...(run ? { [run.kind === 'reply' ? 'conversationId' : run.kind === 'invite' ? 'inviteId' : 'run']: run.id } : {}) },
                 'turn still running — its conversation stays in flight until OpenClaw reports the run ended',
               )
-              if (!run || elapsedMs < TURN_OVERDUE_MS) return
+              if (!run || !isOverdue(elapsedMs)) return
               // Past 30 minutes the turn is handed off, once: the account
               // gets its turn slot back, this conversation stays held until
               // the run ends. Reported then, and every further 30 minutes.

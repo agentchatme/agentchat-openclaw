@@ -62,6 +62,18 @@ import { KEEP_ENDED_MS, storedCard, type StoredTurn, type TurnStore } from './tu
 /** A turn running longer than this is handed off and reported (the kit's threshold). */
 export const TURN_OVERDUE_MS = 30 * 60_000
 
+/**
+ * A wait that elapses comes back a few milliseconds early, so the sixth
+ * 5-minute "still running" report lands at 29:59.9: the threshold allows
+ * that much (seen live — without it the hand-off slipped to 35 minutes).
+ */
+export const OVERDUE_SLACK_MS = 5_000
+
+/** Whether a turn this old is past `TURN_OVERDUE_MS` (with the wait's slack). */
+export function isOverdue(elapsedMs: number): boolean {
+  return elapsedMs + OVERDUE_SLACK_MS >= TURN_OVERDUE_MS
+}
+
 /** Hung turns held at once before the account stops gating (each holds one conversation). */
 export const MAX_HUNG_TURNS = 2
 
@@ -587,7 +599,7 @@ function deadlineText(cfg: unknown): string {
  * conversation (or invite) it holds, for how long, and what ends it.
  */
 export function overdueTurnLine(turn: { readonly kind: TurnKind; readonly id: string; readonly elapsedMs: number }, cfg: unknown): string {
-  const minutes = Math.floor(turn.elapsedMs / 60_000)
+  const minutes = Math.round(turn.elapsedMs / 60_000)
   if (turn.kind === 'run') {
     return `${whatOf(turn.kind, turn.id)} has run ${minutes} min — the loop went on without it (a later run may overlap it); ${deadlineText(cfg)}`
   }

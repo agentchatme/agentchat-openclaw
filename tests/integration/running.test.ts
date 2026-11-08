@@ -18,6 +18,7 @@ import {
   accountsWithTurns,
   findAccountTurns,
   hungTurnsReason,
+  isOverdue,
   overdueTurnLine,
   overdueTurnLines,
   resetRunningTurnsForTest,
@@ -146,6 +147,12 @@ describe('the long-turn line', () => {
     expect(overdueTurnLine({ kind: 'invite', id: 'gri_1', elapsedMs: 90 * 60_000 }, { agents: { defaults: { timeoutSeconds: 0 } } })).toMatch(
       /^a turn for invite gri_1 has run 90 min — .*agents\.defaults\.timeoutSeconds is 0 \(no deadline\), so it may never end;/,
     )
+  })
+
+  it('the sixth 5-minute report counts as 30 minutes: a wait comes back a few ms early (seen live: 29:59.9)', () => {
+    expect(isOverdue(6 * (5 * 60_000 - 15))).toBe(true)
+    expect(isOverdue(25 * 60_000 + 10)).toBe(false)
+    expect(overdueTurnLine({ kind: 'reply', id: 'conv_a', elapsedMs: 30 * 60_000 - 90 }, {})).toMatch(/has run 30 min/)
   })
 
   it('only runs past 30 minutes are reported', () => {
