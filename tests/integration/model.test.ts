@@ -187,7 +187,7 @@ describe('createRuntimeTurnStarter — admission first, the confirmed end later'
     const start = createRuntimeTurnStarter({ runtime: () => runtime })
     const admission = await start({ sessionKey: 'sk', prompt: 'P', lane: 'l' })
     if (!admission.ran) throw new Error('unreachable')
-    expect(await admission.done).toMatchObject({ status: 'ok', agentchatCalls: { total: 2, failed: 1 } })
+    expect(await admission.done).toMatchObject({ status: 'ok', agentchatCalls: { made: 2, failed: 1 } })
   })
 
   it('a runtime that disappears before the end is `gone`, not an end', async () => {

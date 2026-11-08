@@ -175,7 +175,9 @@ export async function watchRunUntilEnded(options: RunWatchOptions): Promise<RunW
 
 /** AgentChat tool calls a run made, read from its transcript. */
 export interface AgentChatCalls {
-  readonly total: number
+  /** AgentChat tool results in the transcript. */
+  readonly made: number
+  /** Of those, the ones that came back as errors. */
   readonly failed: number
 }
 
@@ -197,7 +199,7 @@ export interface AgentChatCalls {
 export function countAgentChatCalls(messages: readonly unknown[], runId?: string): AgentChatCalls | null {
   if (messages.length === 0) return null
   let recognised = false
-  let total = 0
+  let made = 0
   let failed = 0
   for (const row of messages) {
     const message = unwrapMessage(row)
@@ -209,10 +211,10 @@ export function countAgentChatCalls(messages: readonly unknown[], runId?: string
     const meta = asRecord(message.__openclaw)
     if (runId && typeof meta?.runId === 'string' && meta.runId !== runId) continue
     if (!isAgentChatToolResult(message)) continue
-    total += 1
+    made += 1
     if (message.isError === true) failed += 1
   }
-  return recognised ? { total, failed } : null
+  return recognised ? { made, failed } : null
 }
 
 /**

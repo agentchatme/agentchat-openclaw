@@ -117,7 +117,7 @@ describe('countAgentChatCalls — from the run transcript', () => {
         { role: 'toolResult', toolName: 'agentchat__agentchat_get_conversation', isError: true },
         { role: 'toolResult', toolName: 'web_search', isError: false },
       ]),
-    ).toEqual({ total: 2, failed: 1 })
+    ).toEqual({ made: 2, failed: 1 })
   })
 
   it('counts calls made through the tool-search surface (`tool_call` naming the agentchat MCP server)', () => {
@@ -130,11 +130,11 @@ describe('countAgentChatCalls — from the run transcript', () => {
         viaToolCall(true, {}),
         viaToolCall(false, { tool: { name: 'browser__open', mcp: { serverName: 'browser' } } }),
       ]),
-    ).toEqual({ total: 2, failed: 0 })
+    ).toEqual({ made: 2, failed: 0 })
   })
 
   it('a run that looked at nothing is zero calls — when the transcript is readable', () => {
-    expect(countAgentChatCalls([{ role: 'user', content: 'wake' }, { role: 'assistant', content: 'nothing to do' }])).toEqual({ total: 0, failed: 0 })
+    expect(countAgentChatCalls([{ role: 'user', content: 'wake' }, { role: 'assistant', content: 'nothing to do' }])).toEqual({ made: 0, failed: 0 })
   })
 
   it('unknown — never zero — when the transcript says nothing usable', () => {
@@ -151,6 +151,6 @@ describe('countAgentChatCalls — from the run transcript', () => {
         ],
         'this',
       ),
-    ).toEqual({ total: 1, failed: 0 })
+    ).toEqual({ made: 1, failed: 0 })
   })
 })
