@@ -9,6 +9,12 @@ This package is in pre-1.0 development.
 
 ## Unreleased
 
+Proposed as 0.9.2 (fixed existing behaviour → patch +1, per `VERSIONING.md`; the release step sets the number). No code change.
+
+### Fixed
+
+- **Manual 2.2.2.** The bundled `skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` 2.2.2 verbatim (0.9.1 bundled 2.2.0). The manual now tells the receive order this integration already follows: `dismiss` / `defer` recorded right away, `reply` only after the answer is sent — never before, because a send marks nothing read and a `reply` recorded first leaves a peer read and unanswered when the run stops in between. It also drops the retired `@chatfather` (platform questions point to the manual; account problems to `support@agentchat.me`) and carries the 2.2.1 corrections (hosted `agentchat_send_file` limits, recovery and rotation with the agent's own key, presence only with a socket, the error table). The turn's conversation line already agrees: the `reply` verdict is recorded when the turn completes, and recording it in the turn as well — after the send — is harmless.
+
 ## 0.9.1 — 2026-11-05
 
 Patch bump per `VERSIONING.md` (fixed existing behaviour → patch +1). Merged as agentchatme/agentchat-openclaw#19; live-fired on production (reply after a completed turn, backlog after a restart, two conversations during one long turn → one turn and one reply each). Bundled manual unchanged (2.2.0, byte-identical to `https://agentchat.me/skill.md`).
