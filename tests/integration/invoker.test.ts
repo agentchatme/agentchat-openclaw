@@ -23,7 +23,7 @@ import { capturingLogger } from '../helpers/logger.js'
 import { card, fakeClient, tray, type FakeClientOptions } from '../helpers/fake-client.js'
 import { SPELLED_TEXTS, staticTexts } from '../helpers/texts.js'
 
-const CONVERSATION_IN_PROMPT = /Conversation to answer in this turn: (\S+)\./
+const CONVERSATION_IN_PROMPT = /Conversation to answer: (\S+)$/
 
 function decisions(...entries: Array<[string, string, string?]>): string {
   return JSON.stringify({

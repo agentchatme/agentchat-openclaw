@@ -3,9 +3,9 @@
  * with, and the session keys and lane the turns run on.
  *
  * No product text lives here. The wake instruction and the invite prompt are
- * served by AgentChat (`GET /v1/texts`, fetched by `./texts.ts`) and placed
- * by this module; the one line of our own states a fact (which conversation
- * the gate decided to answer), never judgement.
+ * served by AgentChat (`GET /v1/texts`) and placed by this module; the one
+ * line of our own states a fact (which conversation the gate decided to
+ * answer), never an instruction.
  *
  * OpenClaw exposes an MCP server's tools to the model as `<server>__<tool>`:
  * the tool-policy pipeline builds the namespace prefix as
@@ -58,14 +58,15 @@ export function spellToolsForOpenClaw(text: string): string {
 
 /**
  * The prompt a wake turn starts with: the served wake instruction and, when
- * the gate decided a specific conversation, one factual line naming it. The
- * `reply` verdict is recorded when the turn has completed — never at its
- * start — so while the turn runs the conversation is still unread and its
- * card still on the tray; the line says so and names the conversation to
- * open. The model may record its own verdict in the turn (the served texts
- * tell it to record `reply` after its send, or `dismiss` when it read and
- * chose not to answer); the invoker then records nothing more for it. Only
- * a turn that recorded none gets `reply` from the host when it completes.
+ * the gate decided a specific conversation, one line naming it.
+ *
+ * `conversationLine` is the only agent-facing text this package writes. It
+ * states one fact — which conversation the agent's own gate chose to
+ * answer — and no instructions: what to do on a wake (look at the tray,
+ * open the conversation, answer, record the verdict) is the served wake
+ * instruction's to say. It belongs in `GET /v1/texts` too (a per-runtime
+ * turn line with a conversation placeholder); until the server serves one,
+ * this line stays this short.
  */
 export function wakeTurnPrompt(texts: Pick<Texts, 'wake_instruction'>, conversationId?: string): string {
   const instruction = texts.wake_instruction.trim()
@@ -73,14 +74,9 @@ export function wakeTurnPrompt(texts: Pick<Texts, 'wake_instruction'>, conversat
   return `${instruction}\n\n${conversationLine(conversationId)}`
 }
 
-/** The one line of ours in a wake turn: facts about this turn, with OpenClaw's tool name. */
+/** The one line of ours in a wake turn: the conversation the gate chose to answer. */
 export function conversationLine(conversationId: string): string {
-  return (
-    `Conversation to answer in this turn: ${conversationId}. The gate decided reply; its card is still on the tray while you work, ` +
-    `and the reply verdict for it is recorded for you when this turn completes unless you record one yourself with ${DECIDE_TOOL} ` +
-    `(reply after your answer is sent, or dismiss if you read and choose not to answer) — ` +
-    `open it with ${GET_CONVERSATION_TOOL} and reply.`
-  )
+  return `Conversation to answer: ${conversationId}`
 }
 
 /** The prompt a group-invite turn starts with: the served invite prompt. */

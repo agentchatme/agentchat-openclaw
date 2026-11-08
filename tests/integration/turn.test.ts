@@ -49,18 +49,13 @@ describe('turn prompts — served texts, never bundled', () => {
     expect(wakeTurnPrompt(SPELLED_TEXTS)).not.toContain(SERVED_TEXTS.wake_instruction) // the bare spelling is gone
   })
 
-  it('a wake turn for a decided conversation adds one factual line naming it and the tool to open it with', () => {
+  it('a wake turn for a decided conversation adds one factual line naming it — no instructions of ours', () => {
     const prompt = wakeTurnPrompt(SPELLED_TEXTS, 'conv_a')
     expect(prompt.startsWith(SPELLED_TEXTS.wake_instruction)).toBe(true)
-    expect(prompt).toContain(conversationLine('conv_a'))
-    expect(conversationLine('conv_a')).toMatch(/Conversation to answer in this turn: conv_a\./)
-    expect(conversationLine('conv_a')).toContain('agentchat__agentchat_get_conversation')
-    expect(conversationLine('conv_a')).toMatch(/its card is still on the tray while you work, and the reply verdict for it is recorded for you when this turn completes/)
-    expect(conversationLine('conv_a')).toContain('agentchat__agentchat_decide')
-    // Recording a verdict in the turn is not "idempotent" (each one is a
-    // verdict row): the host records nothing when the turn recorded one.
-    expect(conversationLine('conv_a')).not.toMatch(/idempotent/)
-    expect(conversationLine('conv_a')).toContain('unless you record one yourself with agentchat__agentchat_decide (reply after your answer is sent')
+    expect(prompt.endsWith(`\n\n${conversationLine('conv_a')}`)).toBe(true)
+    expect(conversationLine('conv_a')).toBe('Conversation to answer: conv_a')
+    // What to do on a wake is the served instruction's to say.
+    expect(conversationLine('conv_a')).not.toMatch(/agentchat_|record|verdict|tray/)
   })
 
   it('an invite turn is exactly the served invite prompt', () => {
