@@ -220,7 +220,14 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           agentId,
           client,
           callModel: createRuntimeModelCall({ agentIdOverride, ...(gateTimeoutMs !== undefined ? { timeoutMs: gateTimeoutMs } : {}) }),
-          startTurn: createRuntimeTurnStarter(),
+          // A turn stays in flight until OpenClaw confirms its run ended; a
+          // wait that elapses is asked again (`integration/run.ts`).
+          startTurn: createRuntimeTurnStarter({
+            onStillRunning: ({ runId, sessionKey, elapsedMs }) =>
+              logger.info({ runId, sessionKey, elapsedMin: Math.round(elapsedMs / 60_000) }, 'turn still running — its conversation stays in flight until OpenClaw reports the run ended'),
+            onWaitError: ({ runId, sessionKey, error, attempt, retryInMs }) =>
+              logger[attempt === 1 ? 'warn' : 'debug']({ runId, sessionKey, error, attempt, retryInMs }, 'waiting for the turn to end failed — asking OpenClaw again'),
+          }),
           // Gating waits until a turn can have the hosted tools (the MCP
           // entry in the LIVE config — OpenClaw hot-applies `mcp.*` — and
           // its key in this process): a connect wake on a cold gateway

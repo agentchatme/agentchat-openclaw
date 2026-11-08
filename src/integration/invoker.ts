@@ -27,7 +27,7 @@
  *    records nothing more, so the agent's own last verdict stands and a
  *    reply is counted once. A failed read, or a card that may sit past a
  *    truncated tray, records `reply` as before (reading is forward-only). A turn
- *    OpenClaw refuses, or one that ends in error or on the wait timeout,
+ *    OpenClaw refuses, or one that ends in error or on its own run deadline,
  *    records nothing: the conversation stays unread, the card stays on the
  *    tray, and the ladder re-wakes so it is gated again (one more gate
  *    call, no silent drop). The turn's final text is discarded — nothing is
@@ -541,9 +541,11 @@ export class AgentInvoker {
    *
    * For a reply turn the end is also when the `reply` verdict is recorded —
    * only if the run completed (`status: ok`, no error): a turn that looked
-   * and chose not to send still counts as read. A run that ended in error,
-   * on the wait timeout, or whose wait failed records nothing: the card stays
-   * on the tray and the ladder re-wakes so the conversation is gated again.
+   * and chose not to send still counts as read. A run that ended in error
+   * or on its own deadline records nothing. `done` resolves only once
+   * OpenClaw confirmed the end (`./run.ts`), so the conversation stays in
+   * flight for as long as the run lives. A run that did not complete
+   * leaves the card on the tray and the ladder re-wakes so it is gated again.
    */
   private admitted(sessionKey: string, admission: Extract<TurnAdmission, { ran: true }>, completeLine: string, reply?: GateReply): void {
     this.turns += 1
@@ -551,9 +553,23 @@ export class AgentInvoker {
     void admission.done.then(
       async (outcome: TurnOutcome) => {
         this.turnsInFlight -= 1
+        if (outcome.status === 'gone') {
+          // The plugin runtime went away before OpenClaw confirmed an end:
+          // the gateway is going down. The conversation stays in flight —
+          // nothing in this process may start a second turn for it.
+          this.logger.warn({ sessionKey, runId: outcome.runId }, `${completeLine} — not confirmed: the plugin runtime is gone`)
+          return
+        }
         const completed = outcome.ran && outcome.status === 'ok' && !outcome.error
         this.logger[completed ? 'info' : 'warn'](
-          { sessionKey, runId: outcome.runId, status: outcome.status, ...(outcome.error ? { error: outcome.error } : {}) },
+          {
+            sessionKey,
+            runId: outcome.runId,
+            status: outcome.status,
+            ...(outcome.error ? { error: outcome.error } : {}),
+            ...(outcome.elapsedMs !== undefined ? { elapsedMs: outcome.elapsedMs } : {}),
+            ...(outcome.agentchatCalls !== undefined ? { agentchatCalls: outcome.agentchatCalls } : {}),
+          },
           completeLine,
         )
         if (!reply) return

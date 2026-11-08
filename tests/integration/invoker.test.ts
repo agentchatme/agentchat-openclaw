@@ -16,7 +16,7 @@ import * as path from 'node:path'
 
 import { AgentInvoker } from '../../src/integration/invoker.js'
 import { InviteLedger } from '../../src/integration/invites.js'
-import type { TurnReadiness, TurnRequest, TurnStarter } from '../../src/integration/model.js'
+import type { TurnOutcome, TurnReadiness, TurnRequest, TurnStarter } from '../../src/integration/model.js'
 import type { MetricsRecorder } from '../../src/metrics.js'
 import { Clock } from '../helpers/clock.js'
 import { capturingLogger } from '../helpers/logger.js'
@@ -258,7 +258,7 @@ describe('AgentInvoker — wake → tray → gate → one turn per reply', () =>
 
   it('a cycle ends when its turns are admitted, not when they finish: the next wake is serviced while a turn still runs', async () => {
     let finish!: () => void
-    const done = new Promise<{ ran: true; runId: string; status: string }>((resolve) => {
+    const done = new Promise<TurnOutcome>((resolve) => {
       finish = () => resolve({ ran: true, runId: 'run_slow', status: 'ok' })
     })
     const t = make({
@@ -427,7 +427,7 @@ describe('AgentInvoker — failure policy and the ladder', () => {
   })
 
   it('a turn that ends in error records no reply verdict: the card stays on the tray, the ladder re-wakes, and a later completed turn records it', async () => {
-    let outcome: { status: string; error?: string } = { status: 'error', error: 'model crashed' }
+    let outcome: Pick<TurnOutcome, 'status' | 'error'> = { status: 'error', error: 'model crashed' }
     const t = make({
       trays: [tray([card('conv_a', 'msg_a')])],
       answer: decisions(['conv_a', 'reply']),
@@ -455,7 +455,7 @@ describe('AgentInvoker — failure policy and the ladder', () => {
 
   it('a conversation whose reply turn is still running is left out of later cycles: one turn, one record; a newer message after the turn ends gets a new turn', async () => {
     let finish!: () => void
-    const firstDone = new Promise<{ ran: true; runId: string; status: string }>((resolve) => {
+    const firstDone = new Promise<TurnOutcome>((resolve) => {
       finish = () => resolve({ ran: true, runId: 'run_1', status: 'ok' })
     })
     const started: string[] = []
@@ -501,9 +501,28 @@ describe('AgentInvoker — failure policy and the ladder', () => {
     expect(t.invoker.counters().turnsInFlight).toBe(0)
   })
 
+  it('a turn whose end was never confirmed (the plugin runtime went away) keeps its conversation in flight: no second turn, no verdict', async () => {
+    const t = make({
+      trays: [tray([card('conv_a', 'msg_a')]), tray([card('conv_a', 'msg_a')])],
+      answer: async () => decisions(['conv_a', 'reply']),
+      startTurn: async () => ({ ran: true, runId: 'run_g', done: Promise.resolve<TurnOutcome>({ ran: true, runId: 'run_g', status: 'gone' }) }),
+    })
+    tmpDirs.push(t.stateDir)
+    t.invoker.wake('message')
+    t.clock.advance(2000)
+    await t.settle()
+    t.invoker.wake('connect')
+    t.clock.advance(2000)
+    await t.settle()
+    expect(t.invoker.turns).toBe(1)
+    expect(t.modelCalls()).toBe(1)
+    expect(t.posts).toEqual([])
+    expect(t.logger.at('warn').some((l) => /not confirmed: the plugin runtime is gone/.test(l.msg ?? ''))).toBe(true)
+  })
+
   it('a tray holding only in-flight cards is nothing to decide: no gate call, no turn, and no re-read until the turn ends', async () => {
     let finish!: () => void
-    const done = new Promise<{ ran: true; runId: string; status: string }>((resolve) => {
+    const done = new Promise<TurnOutcome>((resolve) => {
       finish = () => resolve({ ran: true, runId: 'run_1', status: 'ok' })
     })
     const t = make({
@@ -579,8 +598,8 @@ describe('AgentInvoker — failure policy and the ladder', () => {
     expect(t.invoker.counters().retryRung).toBe(0)
   })
 
-  it('a turn that hits the wait timeout, or whose wait failed, records nothing either', async () => {
-    for (const outcome of [{ status: 'timeout' }, { status: 'unknown', error: 'wait failed' }]) {
+  it('a turn that hit its own run deadline records nothing either', async () => {
+    for (const outcome of [{ status: 'timeout' as const }, { status: 'timeout' as const, error: 'run timed out' }]) {
       const t = make({
         trays: [tray([card('conv_a', 'msg_a')])],
         answer: decisions(['conv_a', 'reply']),

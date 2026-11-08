@@ -26,10 +26,11 @@
  *    OpenClaw's own background features use with `deliver: false`). The
  *    turn's output is never routed anywhere: the agent's only way to say
  *    something on AgentChat is the hosted `agentchat__agentchat_send_message`
- *    tool during the turn. Admission and completion are reported separately
- *    (`TurnAdmission`): the invoker records the `reply` verdict the moment
- *    the run is admitted, and `runtime.subagent.waitForRun` bounds how long
- *    it waits before the next cycle may start; it never cancels the run.
+ *    tool during the turn. Admission and the run's end are reported
+ *    separately (`TurnAdmission`): `done` resolves only once OpenClaw
+ *    confirms the run is over (`./run.ts` — a `waitForRun` timeout bounds
+ *    the wait, never the run, so it is asked again), with the AgentChat
+ *    calls the run made read from its transcript when OpenClaw allows it.
  *
  * The agent id is resolved the way OpenClaw routes inbound for this channel
  * (`channelRuntime.routing.resolveAgentRoute`), so the integration wakes the
@@ -40,6 +41,7 @@ import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 import type { GateModelCall } from 'agentchatme'
 
 import { getPluginRuntime } from './runtime-holder.js'
+import { readAgentChatCalls, watchRunUntilEnded, type AgentChatCalls, type RunEndStatus } from './run.js'
 import { describeMcpEntry } from './mcp.js'
 import { MCP_SERVER_NAME } from './turn.js'
 import { AGENTCHAT_CHANNEL_ID } from '../channel-account.js'
@@ -59,8 +61,6 @@ export const DEFAULT_GATE_MAX_TOKENS = 2048
 /** Decision-call timeout. The gate must never block the integration forever. */
 export const DEFAULT_GATE_TIMEOUT_MS = 20_000
 
-/** How long one turn may run before the invoker moves on. Bounds the wait, not the run. */
-export const DEFAULT_TURN_WAIT_MS = 15 * 60_000
 
 export class RuntimeUnavailableError extends Error {
   constructor(what: string) {
@@ -185,17 +185,29 @@ export interface TurnRequest {
   readonly lane: string
 }
 
+/**
+ * How an admitted turn's run ended, once OpenClaw confirmed it. `status`:
+ * `ok` / `error` / `timeout` (the run's own deadline — never an elapsed
+ * wait), or `gone` when the plugin runtime disappeared before an end was
+ * confirmed (the gateway is going down; nothing in this process starts
+ * another turn after it).
+ */
 export interface TurnOutcome {
   readonly ran: boolean
   readonly runId?: string
-  readonly status?: string
+  readonly status?: RunEndStatus | 'gone'
   readonly error?: string
+  /** AgentChat tool calls the run made, from its transcript; null when OpenClaw did not let the plugin read it (unknown, never zero). */
+  readonly agentchatCalls?: AgentChatCalls | null
+  /** From admission to the confirmed end. */
+  readonly elapsedMs?: number
 }
 
 /**
  * What starting a turn tells the invoker: refused (OpenClaw did not admit
- * the run — no runtime, a thrown `subagent.run`), or admitted with a bounded
- * promise of the outcome.
+ * the run — no runtime, a thrown `subagent.run`), or admitted with the
+ * promise of its end. `done` never rejects and resolves only when OpenClaw
+ * confirmed the end (or the runtime is gone).
  */
 export type TurnAdmission =
   | { readonly ran: false; readonly error: string }
@@ -267,17 +279,23 @@ export function turnReadiness(params: { cfg: unknown; apiBase: string; apiKey: s
 
 /**
  * The turn starter for production. `deliver: false` — the final text is
- * recorded by OpenClaw and announced nowhere. The run's result is never read
- * by the integration: the agent's send is a hosted-tool call inside the
- * turn. `done` resolves when the run ends or `waitMs` passes, whichever
- * comes first; it never rejects.
+ * recorded by OpenClaw and announced nowhere; the agent's send is a
+ * hosted-tool call inside the turn. `done` resolves when OpenClaw confirms
+ * the run ended (`watchRunUntilEnded`), then carries the AgentChat calls
+ * counted from the run's transcript. It never rejects.
  */
 export function createRuntimeTurnStarter(params: {
   runtime?: () => PluginRuntime | null
-  waitMs?: number
+  /** One `waitForRun` call; the watch asks again until the run is over. */
+  waitChunkMs?: number
+  /** Called each time a wait elapses with the run still going. */
+  onStillRunning?: (info: { runId: string; sessionKey: string; elapsedMs: number }) => void
+  /** Called when a wait call fails (the watch retries). */
+  onWaitError?: (info: { runId: string; sessionKey: string; error: string; attempt: number; retryInMs: number }) => void
+  now?: () => number
+  sleep?: (ms: number) => Promise<void>
 } = {}): TurnStarter {
   const getRuntime = params.runtime ?? getPluginRuntime
-  const waitMs = params.waitMs ?? DEFAULT_TURN_WAIT_MS
   return async (request) => {
     const runtime = getRuntime()
     if (!runtime) return { ran: false, error: new RuntimeUnavailableError('the agent turn').message }
@@ -293,13 +311,29 @@ export function createRuntimeTurnStarter(params: {
     } catch (err) {
       return { ran: false, error: err instanceof Error ? err.message : String(err) }
     }
-    const done = runtime.subagent
-      .waitForRun({ runId, timeoutMs: waitMs })
-      .then(
-        (waited): TurnOutcome => ({ ran: true, runId, status: waited.status, ...(waited.error ? { error: waited.error } : {}) }),
-        // The run was admitted; only the wait failed. The turn is OpenClaw's now.
-        (err): TurnOutcome => ({ ran: true, runId, status: 'unknown', error: err instanceof Error ? err.message : String(err) }),
-      )
+    const sessionKey = request.sessionKey
+    const done = watchRunUntilEnded({
+      runtime: getRuntime,
+      runId,
+      ...(params.waitChunkMs !== undefined ? { chunkMs: params.waitChunkMs } : {}),
+      ...(params.onStillRunning ? { onStillRunning: (elapsedMs: number) => params.onStillRunning?.({ runId, sessionKey, elapsedMs }) } : {}),
+      ...(params.onWaitError
+        ? { onWaitError: (error: string, attempt: number, retryInMs: number) => params.onWaitError?.({ runId, sessionKey, error, attempt, retryInMs }) }
+        : {}),
+      ...(params.now ? { now: params.now } : {}),
+      ...(params.sleep ? { sleep: params.sleep } : {}),
+    }).then(async (watched): Promise<TurnOutcome> => {
+      if (!watched.ended) return { ran: true, runId, status: 'gone', elapsedMs: watched.elapsedMs }
+      const agentchatCalls = await readAgentChatCalls(getRuntime(), sessionKey, runId)
+      return {
+        ran: true,
+        runId,
+        status: watched.status,
+        ...(watched.error ? { error: watched.error } : {}),
+        agentchatCalls,
+        elapsedMs: watched.elapsedMs,
+      }
+    })
     return { ran: true, runId, done }
   }
 }

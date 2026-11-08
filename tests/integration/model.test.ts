@@ -94,16 +94,17 @@ describe('resolveGateAgent + the llm override opt-in', () => {
   })
 })
 
-describe('createRuntimeTurnStarter — admission first, completion later', () => {
-  it('admits one run with deliver:false on the given session and lane, and resolves `done` once it is waited for', async () => {
+describe('createRuntimeTurnStarter — admission first, the confirmed end later', () => {
+  it('admits one run with deliver:false on the given session and lane, and resolves `done` once OpenClaw reports the end', async () => {
     const { runtime, calls } = fakeRuntime()
-    const start = createRuntimeTurnStarter({ runtime: () => runtime, waitMs: 1234 })
+    const start = createRuntimeTurnStarter({ runtime: () => runtime, waitChunkMs: 1234 })
     const admission = await start({ sessionKey: 'agent:main:subagent:agentchat-wake-x', prompt: 'P', lane: 'agentchat-integration:default' })
     expect(admission.ran).toBe(true)
     if (!admission.ran) throw new Error('unreachable')
     expect(admission.runId).toBe('run_42')
     expect(calls.run[0]).toEqual({ sessionKey: 'agent:main:subagent:agentchat-wake-x', message: 'P', lane: 'agentchat-integration:default', deliver: false })
-    expect(await admission.done).toEqual({ ran: true, runId: 'run_42', status: 'ok' })
+    const outcome = await admission.done
+    expect(outcome).toMatchObject({ ran: true, runId: 'run_42', status: 'ok' })
     expect(calls.wait[0]).toEqual({ runId: 'run_42', timeoutMs: 1234 })
   })
 
@@ -113,13 +114,97 @@ describe('createRuntimeTurnStarter — admission first, completion later', () =>
     expect(await start({ sessionKey: 's', prompt: 'P', lane: 'l' })).toEqual({ ran: false, error: 'lane busy' })
   })
 
-  it("a failed wait still counts as a run (the turn is OpenClaw's now)", async () => {
-    const { runtime } = fakeRuntime({ waitThrows: true })
-    const start = createRuntimeTurnStarter({ runtime: () => runtime })
+  it('a wait that elapses is not an end: the run is waited for again until OpenClaw reports it over', async () => {
+    const answers = [{ status: 'timeout', timeoutPhase: 'provider' }, { status: 'pending' }, { status: 'ok', endedAt: 5 }]
+    const waits: unknown[] = []
+    const runtime = {
+      subagent: {
+        run: async () => ({ runId: 'run_7' }),
+        waitForRun: async (params: unknown) => {
+          waits.push(params)
+          return answers.shift()
+        },
+        getSessionMessages: async () => ({ messages: [] }),
+      },
+    } as unknown as PluginRuntime
+    const still: number[] = []
+    const start = createRuntimeTurnStarter({ runtime: () => runtime, waitChunkMs: 60_000, onStillRunning: ({ elapsedMs }) => still.push(elapsedMs), sleep: async () => undefined })
     const admission = await start({ sessionKey: 's', prompt: 'P', lane: 'l' })
-    expect(admission.ran).toBe(true)
     if (!admission.ran) throw new Error('unreachable')
-    expect(await admission.done).toEqual({ ran: true, runId: 'run_42', status: 'unknown', error: 'wait failed' })
+    expect(await admission.done).toMatchObject({ ran: true, runId: 'run_7', status: 'ok', agentchatCalls: null })
+    expect(waits).toHaveLength(3)
+    expect(still).toHaveLength(2)
+  })
+
+  it('a failed wait is not an end either: it is asked again after a back-off', async () => {
+    let n = 0
+    const runtime = {
+      subagent: {
+        run: async () => ({ runId: 'run_8' }),
+        waitForRun: async () => {
+          n += 1
+          if (n < 3) throw new Error('gateway busy')
+          return { status: 'error', error: 'model refused' }
+        },
+      },
+    } as unknown as PluginRuntime
+    const errors: Array<{ attempt: number; retryInMs: number }> = []
+    const slept: number[] = []
+    const start = createRuntimeTurnStarter({
+      runtime: () => runtime,
+      onWaitError: ({ attempt, retryInMs }) => errors.push({ attempt, retryInMs }),
+      sleep: async (ms) => {
+        slept.push(ms)
+      },
+    })
+    const admission = await start({ sessionKey: 's', prompt: 'P', lane: 'l' })
+    if (!admission.ran) throw new Error('unreachable')
+    expect(await admission.done).toMatchObject({ status: 'error', error: 'model refused', agentchatCalls: null })
+    expect(errors).toEqual([
+      { attempt: 1, retryInMs: 1_000 },
+      { attempt: 2, retryInMs: 5_000 },
+    ])
+    expect(slept).toEqual([1_000, 5_000])
+  })
+
+  it('the AgentChat calls are counted from the run transcript after the end', async () => {
+    const runtime = {
+      subagent: {
+        run: async () => ({ runId: 'run_9' }),
+        waitForRun: async () => ({ status: 'ok' }),
+        getSessionMessages: async (params: unknown) => {
+          expect(params).toEqual({ sessionKey: 'sk', limit: 200 })
+          return {
+            messages: [
+              { role: 'user', content: 'P' },
+              { role: 'toolResult', toolName: 'agentchat__agentchat_inbox', isError: false },
+              { role: 'toolResult', toolName: 'agentchat__agentchat_send_message', isError: true },
+            ],
+          }
+        },
+      },
+    } as unknown as PluginRuntime
+    const start = createRuntimeTurnStarter({ runtime: () => runtime })
+    const admission = await start({ sessionKey: 'sk', prompt: 'P', lane: 'l' })
+    if (!admission.ran) throw new Error('unreachable')
+    expect(await admission.done).toMatchObject({ status: 'ok', agentchatCalls: { total: 2, failed: 1 } })
+  })
+
+  it('a runtime that disappears before the end is `gone`, not an end', async () => {
+    let present = true
+    const runtime = {
+      subagent: {
+        run: async () => ({ runId: 'run_10' }),
+        waitForRun: async () => {
+          present = false
+          return { status: 'timeout', timeoutPhase: 'queue' }
+        },
+      },
+    } as unknown as PluginRuntime
+    const start = createRuntimeTurnStarter({ runtime: () => (present ? runtime : null), sleep: async () => undefined })
+    const admission = await start({ sessionKey: 's', prompt: 'P', lane: 'l' })
+    if (!admission.ran) throw new Error('unreachable')
+    expect(await admission.done).toMatchObject({ ran: true, runId: 'run_10', status: 'gone' })
   })
 
   it('without a runtime the turn is not started and says why', async () => {
