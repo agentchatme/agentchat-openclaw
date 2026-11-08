@@ -29,6 +29,8 @@ import {
   readAgentchatConfigField,
 } from '../channel-account.js'
 import { validateApiKey } from '../setup-client.js'
+import { getIntegration, listActiveAccounts } from './runtime-registry.js'
+import { overdueTurnLines } from '../integration/running.js'
 import { checkPlacement, resolvePlacementAgentId, restoreIdentityLine } from '../integration/placement.js'
 import { DEFAULT_API_BASE, withHostedMcpEntry } from '../integration/mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, readLlmAgentOverrideOptIn, withLlmAgentOverrideOptIn } from '../integration/model.js'
@@ -62,6 +64,11 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
           `[${AGENTCHAT_CHANNEL_ID}:${accountId}] gate: this account is bound to agent "${bound}", not OpenClaw's default — the gate call is refused (LLM_COMPLETION_NOT_AUTHORIZED) until ${LLM_AGENT_OVERRIDE_PATH} is true (${doctorFixCommand} writes it)`,
         )
       }
+    }
+    // A turn the running integration (this process) has held past 30 minutes.
+    for (const accountId of listActiveAccounts()) {
+      const turns = getIntegration(accountId)?.loop?.loop.status().turns ?? []
+      for (const line of overdueTurnLines(turns, cfg)) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${line}`)
     }
     return warnings
   },

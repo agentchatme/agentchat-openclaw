@@ -14,13 +14,13 @@ import type { InboxCard, TrayInvite } from 'agentchatme'
 import { parseChannelConfig } from '../../src/config-schema.js'
 import { createIntegrationLoop, type IntegrationLoop } from '../../src/integration/loop.js'
 import type { TurnOutcome, TurnReadiness, TurnRequest, TurnStarter } from '../../src/integration/model.js'
-import { RunningTurns } from '../../src/integration/running.js'
+import { integration as kit } from 'agentchatme'
 import { IntegrationSocket } from '../../src/integration/socket.js'
 import { turnEndOf } from '../../src/integration/turns.js'
 import { card, invite, tray } from '../helpers/fake-client.js'
 import { capturingLogger } from '../helpers/logger.js'
 import { MockWebSocket, MockWebSocketCtor, messageNew, sentFrames, settle } from '../helpers/mock-websocket.js'
-import { SPELLED_TEXTS, staticTexts } from '../helpers/texts.js'
+import { SERVED_TEXTS, staticTexts } from '../helpers/texts.js'
 
 const KEY = ['ac', 'live', 'w'.repeat(24)].join('_')
 
@@ -92,7 +92,7 @@ interface Harness {
 
 const live: Harness[] = []
 
-async function start(opts: { running?: RunningTurns; server?: ReturnType<typeof fakeServer>; readiness?: () => TurnReadiness; gateEnabled?: boolean; texts?: ReturnType<typeof staticTexts> } = {}): Promise<Harness> {
+async function start(opts: { tracker?: kit.TurnTracker; server?: ReturnType<typeof fakeServer>; readiness?: () => TurnReadiness; gateEnabled?: boolean; texts?: ReturnType<typeof staticTexts> } = {}): Promise<Harness> {
   const config = parseChannelConfig({ apiKey: KEY, apiBase: 'https://api.agentchat.me', agentHandle: 'alice' })
   const server = opts.server ?? fakeServer()
   const runs = openclawRuns()
@@ -108,7 +108,7 @@ async function start(opts: { running?: RunningTurns; server?: ReturnType<typeof 
     handle: 'alice',
     callModel: gateModel(modelCalls),
     startRun: runs.start,
-    running: opts.running ?? new RunningTurns(),
+    tracker: opts.tracker ?? new kit.TurnTracker(),
     logger,
     ...(opts.readiness ? { readiness: opts.readiness } : {}),
     ...(opts.gateEnabled !== undefined ? { gateEnabled: opts.gateEnabled } : {}),
@@ -157,7 +157,7 @@ describe('the loop on the SDK socket', () => {
   it('the gate prompt opens with the served gate-call preamble, spelled for OpenClaw', async () => {
     const h = await start()
     await message(h, 'conv_a', 1)
-    expect(h.modelCalls[0]!.startsWith(SPELLED_TEXTS.gate_call_preamble!)).toBe(true)
+    expect(h.modelCalls[0]!.startsWith(SERVED_TEXTS.gate_call_preamble!)).toBe(true)
     expect(h.modelCalls[0]).toContain('agentchat__agentchat_decide')
   })
 })
@@ -170,7 +170,7 @@ describe('a reply turn is one OpenClaw run', () => {
     const req = h.runs.requests[0]!
     expect(req.sessionKey).toMatch(/^agent:main:subagent:agentchat-wake-\d{8}T\d{6}Z-[0-9a-f]{6}$/)
     expect(req.lane).toBe('agentchat-integration:default')
-    expect(req.prompt.startsWith(SPELLED_TEXTS.wake_instruction)).toBe(true)
+    expect(req.prompt.startsWith(SERVED_TEXTS.wake_instruction)).toBe(true)
     expect(req.prompt).toContain('conv_a')
     expect(h.server.posts).toEqual([])
     expect(h.logger.at('info').some((l) => l.msg === 'turn start')).toBe(true)
@@ -219,26 +219,26 @@ describe('a reply turn is one OpenClaw run', () => {
 })
 
 describe('an account restart while a run lives (OpenClaw restarts the channel task on a config change)', () => {
-  it('the new loop starts no second run for the card; when the old run ends, it reads the tray again', async () => {
-    const running = new RunningTurns()
+  it('the new loop holds the same tracker: the card stays out of its gate; the old loop still records what the run did', async () => {
+    const tracker = new kit.TurnTracker()
     const server = fakeServer()
-    const first = await start({ running, server })
+    const first = await start({ tracker, server })
     await message(first, 'conv_a', 1)
     expect(first.runs.requests).toHaveLength(1)
     live.splice(live.indexOf(first), 1)
     await first.integration.stop()
     first.socket.stopped()
 
-    const second = await start({ running, server })
-    await settle(30)
+    const second = await start({ tracker, server })
+    await message(second, 'conv_a', 2)
+    expect(second.modelCalls).toHaveLength(0)
     expect(second.runs.requests).toHaveLength(0)
-    expect(second.logger.at('info').some((l) => /still live for it — no second turn/.test(l.msg ?? ''))).toBe(true)
 
-    const readsBefore = server.reads()
+    server.cards.set('conv_a', card('conv_a', 'msg_conv_a_2', { you_owe_reply: false, your_last_message_at: '2026-11-08T00:01:00.000Z' }))
     first.runs.end(0)
     await settle(30)
-    expect(server.reads()).toBeGreaterThan(readsBefore)
-    expect(second.runs.requests).toHaveLength(1) // now it may be gated again
+    expect(server.posts).toEqual(['conv_a:reply:msg_conv_a_1'])
+    expect(tracker.size).toBe(0)
   })
 })
 
@@ -252,7 +252,7 @@ describe('invites from the tray', () => {
     expect(h.runs.requests).toHaveLength(1)
     const first = h.runs.requests[0]!
     expect(first.sessionKey).toMatch(/^agent:main:subagent:agentchat-invite-inv_1-\d{8}T\d{6}Z-[0-9a-f]{6}$/)
-    expect(first.prompt.startsWith(SPELLED_TEXTS.invite_prompt)).toBe(true)
+    expect(first.prompt.startsWith(SERVED_TEXTS.invite_prompt)).toBe(true)
     expect(first.prompt).toContain('inv_1')
     h.runs.end(0)
     await settle(30)
@@ -287,14 +287,14 @@ describe('OpenClaw-side switches', () => {
     await message(h, 'conv_a', 1)
     expect(h.modelCalls).toHaveLength(0)
     expect(h.runs.requests).toHaveLength(1)
-    expect(h.runs.requests[0]!.prompt).toBe(SPELLED_TEXTS.wake_instruction)
+    expect(h.runs.requests[0]!.prompt).toBe(SERVED_TEXTS.wake_instruction)
     h.runs.end(0)
     await settle(30)
     expect(h.server.posts).toEqual([])
   })
 
   it('no gate-call texts (an older server): the gate uses the SDK’s 1.2 wording (lead decision) and works', async () => {
-    const { gate_call_preamble: _p, gate_call_answer_format: _f, ...old } = SPELLED_TEXTS
+    const { gate_call_preamble: _p, gate_call_answer_format: _f, ...old } = SERVED_TEXTS
     const h = await start({ texts: staticTexts(old) })
     await message(h, 'conv_a', 1)
     expect(h.modelCalls).toHaveLength(1)

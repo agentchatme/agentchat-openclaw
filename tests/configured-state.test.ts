@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
 import { hasAgentChatConfiguredState } from '../src/configured-state.js'
+import { testKey } from './helpers/keys.js'
 
 describe('hasAgentChatConfiguredState', () => {
-  const validKey = 'ac_live_' + 'x'.repeat(20)
+  const validKey = testKey('x'.repeat(20))
 
   it('rejects undefined config', () => {
     expect(hasAgentChatConfiguredState(undefined)).toBe(false)

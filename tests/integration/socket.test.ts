@@ -27,8 +27,9 @@ import type { MetricsRecorder } from '../../src/metrics.js'
 import { PACKAGE_VERSION } from '../../src/version.js'
 import { MockWebSocket, MockWebSocketCtor, messageNew, sentFrames, settle, wakeFrame } from '../helpers/mock-websocket.js'
 import { silentLogger } from '../helpers/logger.js'
+import { testKey } from '../helpers/keys.js'
 
-const KEY = 'ac_live_' + 'w'.repeat(24)
+const KEY = testKey('w'.repeat(24))
 
 function recordingMetrics(): MetricsRecorder & { states: string[]; wakes: string[]; disconnects: string[]; errors: string[] } {
   const m = {

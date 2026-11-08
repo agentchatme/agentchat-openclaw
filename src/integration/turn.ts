@@ -1,19 +1,20 @@
 /**
- * Turns: the names OpenClaw gives the hosted tools, and the session keys and
+ * Turns: the name OpenClaw gives the hosted tools, and the session keys and
  * lane the turns run on.
  *
  * No text lives here. What a turn starts with — the served wake instruction
  * or invite prompt and the id it is about — is composed by the SDK kit's
- * receive loop from `GET /v1/texts`; this module only re-spells the hosted
- * tool names in served text the way OpenClaw exposes them.
+ * receive loop from `GET /v1/texts?runtime=openclaw`, which the server
+ * already spells the way OpenClaw exposes the hosted tools
+ * (`agentchat__<tool>`). The one place the plugin still names a tool is the
+ * tray's gate question (`GET /v1/inbox` serves bare names): the kit's gate
+ * re-spells it with `OPENCLAW_TOOL_NAMER`.
  *
  * OpenClaw exposes an MCP server's tools to the model as `<server>__<tool>`:
  * the tool-policy pipeline builds the namespace prefix as
  * `normalizeToolName(sanitizeServerName(serverName) + "__")`
  * (`openclaw/dist/tool-policy-*.js`, 2026.6.10) and the docs describe the
- * same shape (docs.openclaw.ai/tools/mcp). The server spells the hosted
- * tools by their bare names (`agentchat_inbox`); `spellToolsForOpenClaw`
- * re-spells exactly those tokens so the agent is told the names it can call.
+ * same shape (docs.openclaw.ai/tools/mcp).
  */
 
 import type { ToolNamer } from 'agentchatme'
@@ -34,30 +35,12 @@ export function mcpToolName(tool: string): string {
   return `${MCP_TOOL_PREFIX}${tool}`
 }
 
-export const INBOX_TOOL = mcpToolName('agentchat_inbox')
-export const DECIDE_TOOL = mcpToolName('agentchat_decide')
-export const GET_CONVERSATION_TOOL = mcpToolName('agentchat_get_conversation')
-export const SEND_MESSAGE_TOOL = mcpToolName('agentchat_send_message')
-
 /**
  * How OpenClaw spells a hosted tool. Idempotent: a name that already carries
  * the server prefix is returned as is, so a server that one day serves the
  * OpenClaw spelling itself is not prefixed twice.
  */
 export const OPENCLAW_TOOL_NAMER: ToolNamer = (tool) => (tool.startsWith(MCP_TOOL_PREFIX) ? tool : mcpToolName(tool))
-
-// A bare hosted tool name: `agentchat_` followed by the tool, never a second
-// underscore (which is the already-prefixed form) and never inside a longer
-// word. `api.agentchat.me` carries no underscore and is untouched. The SDK's
-// gate holds the same pattern privately for the tray question; until the
-// server serves texts spelled for OpenClaw, or the SDK exports its speller,
-// the served texts are re-spelled here.
-const HOSTED_TOOL_TOKEN = /\bagentchat_(?!_)[a-z0-9_]+\b/g
-
-/** Re-spell every bare hosted tool name in a served text the way OpenClaw exposes it. Pure, idempotent. */
-export function spellToolsForOpenClaw(text: string): string {
-  return text.replace(HOSTED_TOOL_TOKEN, (token) => OPENCLAW_TOOL_NAMER(token))
-}
 
 /**
  * A fresh OpenClaw session per wake turn, in the shape OpenClaw's own

@@ -21,6 +21,7 @@ import { getClient } from './sdk-client.js'
 import { probeHostedMcp } from '../integration/mcp.js'
 import { checkPlacement, resolvePlacementAgentId, type PlacementCheck } from '../integration/placement.js'
 import { cachedIdentityLine } from '../integration/texts.js'
+import { overdueTurnLines } from '../integration/running.js'
 import type { SocketState } from '../integration/socket.js'
 import type { MetricsSnapshot } from '../metrics.js'
 import { getIntegration } from './runtime-registry.js'
@@ -45,6 +46,8 @@ export type AgentchatProbeResult = {
     readonly texts?: 'server' | 'cache' | 'missing'
     /** The socket's counters since the account started: wakes by source, closes by code/initiator, SDK notices by class. */
     readonly socket?: MetricsSnapshot
+    /** Turns running past 30 minutes, one operator line each (the conversation, and what ends the run). */
+    readonly overdue?: readonly string[]
   }
   /** Set when the integration refuses to start (more than one account configured). */
   readonly refusal?: string
@@ -110,6 +113,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
           turns: loopStatus.counters.turnsStarted + loopStatus.counters.inviteTurnsStarted + loopStatus.counters.runsStarted,
         }
       : undefined
+    const overdue = loopStatus ? overdueTurnLines(loopStatus.turns, cfg) : []
     const servedFrom = live?.texts?.source
     const textsSource: 'server' | 'cache' | 'missing' | undefined = live ? (servedFrom === 'server' || servedFrom === 'cache' ? servedFrom : 'missing') : undefined
     const socketCounters = live?.metrics?.snapshot?.()
@@ -119,6 +123,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
       ...(counters ? { wakes: counters.wakes, cycles: counters.cycles, turns: counters.turns } : {}),
       ...(textsSource ? { texts: textsSource } : {}),
       ...(socketCounters ? { socket: socketCounters } : {}),
+      ...(overdue.length > 0 ? { overdue } : {}),
     }
     const refusal = multiAccountRefusal(cfg as never)
 
@@ -168,6 +173,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
             tone: 'muted',
           })
         }
+        for (const line of d.overdue ?? []) lines.push({ text: line, tone: 'warn' })
         if (d.texts === 'missing') {
           lines.push({ text: 'served texts not available yet (AgentChat unreachable, nothing cached) — turns wait for the first copy', tone: 'error' })
         } else if (d.texts === 'cache') {

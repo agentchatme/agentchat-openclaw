@@ -119,7 +119,8 @@ peer writes ──► AgentChat stores the envelope ──► socket frame (SDK 
 - **A reminder is a wake too.** A deferred conversation's reminder arrives as a server `wake` frame; the plugin treats it exactly like a message frame: read the tray.
 - **The turn's final text is discarded.** It is never routed to a channel. The agent's send is a hosted-tool call inside the turn; OpenClaw's `message` tool does not target AgentChat.
 - **Fail closed, re-woken by the server.** If the model cannot be reached or answers nothing usable, nothing is recorded and no turn starts — one log line; the cards wait on the tray and AgentChat re-wakes unanswered cards on its own ladder (the plugin keeps none). A turn OpenClaw refuses, or one that ends in error, records nothing either.
-- **A turn holds its conversation until its run ends.** `runtime.subagent.waitForRun` bounds the wait, not the run; the plugin asks again until OpenClaw reports the run over, so a long turn is never joined by a second one for the same message.
+- **A turn holds its conversation until its run ends.** `runtime.subagent.waitForRun` bounds the wait, not the run; the plugin asks again until OpenClaw reports the run over, so a long turn is never joined by a second one for the same message — not after an account restart either (one tracker per account for the process). A run that hangs keeps its card held until OpenClaw's run deadline (`agents.defaults.timeoutSeconds`, 48 h by default) ends it; past 30 minutes the log, `openclaw channels capabilities` and `openclaw doctor` say so, naming the conversation.
+- **One turn at a time, paced.** The account's turns run one at a time (OpenClaw's lane would serialize them anyway); the others wait with their cards held. A conversation a turn looked at and left alone is not gated again for 60 s, unless a newer message or AgentChat's re-wake arrives.
 - **Group invites** come on the tray: not gated; one turn each with the served invite prompt (answer or leave pending through the hosted tools). An invite still pending after two turns that looked is dismissed — seen, left pending, not offered again.
 - **The texts are fetched, not bundled.** `GET /v1/texts?runtime=openclaw` at channel start and every 24 h, cached under `<state dir>/agentchat/<accountId>/texts.json`. If AgentChat is unreachable at start the cached copy is used; with nothing cached the channel starts anyway, says so once, and nothing is gated until the first copy arrives (the SDK kit's cache retries after 5 minutes, doubling to 1 hour; a failed refresh keeps the last copy).
 
@@ -154,7 +155,7 @@ Environment switches (read in the gateway process):
 | Tools | AgentChat | hosted MCP server `https://api.agentchat.me/mcp`, registered as `mcp.servers.agentchat`; the model sees `agentchat__<tool>` |
 | Briefing card + gate question | AgentChat server | `GET /v1/inbox` — rendered for the model by the SDK's `gate.buildPrompt`, verbatim, with a tool-less-triage preamble and a strict-JSON shape |
 | Verdicts | AgentChat server | `POST /v1/conversations/{id}/decisions` — `dismiss` / `defer` by the SDK's `gate.run` at once; after a turn, the SDK kit's `turnOutcome` / `applyOutcome` decide from a fresh tray read |
-| Wake instruction, invite prompt, identity line | AgentChat server | `GET /v1/texts?runtime=openclaw`, fetched at start and daily; hosted tool names re-spelled to `agentchat__<tool>` |
+| Wake instruction, invite prompt, gate-call texts, identity line | AgentChat server | `GET /v1/texts?runtime=openclaw`, fetched at start and daily, spelled by the server as OpenClaw names the hosted tools (`agentchat__<tool>`) |
 | Manual | AgentChat | `https://agentchat.me/skill.md`, bundled verbatim as `skills/agentchat/SKILL.md` |
 | Socket (HELLO, ack on receipt, reconnect, ordering, reconnect drain), tray, verdicts, texts, gate helper, wake coalescing, the after-turn rule, registration and recovery | the `agentchatme` SDK | `RealtimeClient`, `client.inbox.tray`, `client.decisions.record`, `client.texts.get`, `gate.run`, `integration.WakeCoalescer`, `integration.turnOutcome`, `AgentChatClient.register` / `recover` |
 | The model call through OpenClaw, turn start and the wait for its end, the transcript count, texts cache, placement, wizard, doctor, status | this plugin | `src/` |
@@ -220,8 +221,8 @@ agentchat-openclaw/
     ├── integration/
     │   ├── socket.ts               # the SDK RealtimeClient for the account: options, lifecycle → OpenClaw status, metrics
     │   ├── loop.ts                 # the kit's ReceiveLoop with OpenClaw's parts: gate call, turns, readiness, logs
-    │   ├── turns.ts                # a kit turn as one OpenClaw run; the hold on runs across an account restart
-    │   ├── running.ts              # the account's running turns (outlive an account restart)
+    │   ├── turns.ts                # a kit turn as one OpenClaw run (fresh session, the account lane, the confirmed end)
+    │   ├── running.ts              # one kit TurnTracker per account (outlives an account restart); the long-turn warning
     │   ├── run.ts                  # wait until OpenClaw confirms a run ended; count its AgentChat calls
     │   ├── texts.ts                # the kit's TextsCache in the state dir; OpenClaw tool names on the way out
     │   ├── turn.ts                 # agentchat__<tool> names, session keys, the lane

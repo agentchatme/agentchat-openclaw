@@ -20,10 +20,10 @@ import { probeHostedMcp } from '../../src/integration/mcp.js'
 import { registerIntegration, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
 import { createInMemoryMetrics } from '../../src/metrics.js'
 import type { IntegrationSocket, SocketState } from '../../src/integration/socket.js'
-import type { OpenClawTexts } from '../../src/integration/texts.js'
 import { IDENTITY_LINE } from '../helpers/texts.js'
+import { testKey } from '../helpers/keys.js'
 
-const KEY = 'ac_live_' + 's'.repeat(24)
+const KEY = testKey('s'.repeat(24))
 
 function account(cfg: object) {
   return {
@@ -56,11 +56,11 @@ function stubSocket(state: SocketState): IntegrationSocket {
 const silent = { trace() {}, debug() {}, info() {}, warn() {}, error() {}, child() { return this } } as never
 
 /** A receive loop as the status probe reads it: its `status()` counters. */
-function loopWith(c: { wakes: number; cycles: number; turns: number }): never {
+function loopWith(c: { wakes: number; cycles: number; turns: number; running?: Array<Record<string, unknown>> }): never {
   return {
     loop: {
       start: async () => undefined,
-      status: () => ({ coalescer: { wakes: c.wakes, cycles: c.cycles }, counters: { turnsStarted: c.turns, inviteTurnsStarted: 0, runsStarted: 0 } }),
+      status: () => ({ coalescer: { wakes: c.wakes, cycles: c.cycles }, counters: { turnsStarted: c.turns, inviteTurnsStarted: 0, runsStarted: 0 }, turns: c.running ?? [] }),
     },
     stop: async () => undefined,
   } as never
@@ -127,7 +127,7 @@ describe('status adapter — the doctor-style probe', () => {
       config: account({}).config as never,
       logger: silent,
       createSocket: () => stubSocket('ready'),
-      build: () => ({ loop: loopWith({ wakes: 3, cycles: 2, turns: 1 }), texts: { source: 'cache' } as unknown as OpenClawTexts, handlers: {} }),
+      build: () => ({ loop: loopWith({ wakes: 3, cycles: 2, turns: 1 }), texts: { source: 'cache' } as never, handlers: {} }),
     })
     const cfg = { agents: { defaults: { workspace } } }
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account(cfg) as never, timeoutMs: 2000, cfg: cfg as never } as never)
@@ -135,6 +135,28 @@ describe('status adapter — the doctor-style probe', () => {
     const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
     expect(lines.find((l) => l.text.startsWith('integration ready'))).toEqual({ text: 'integration ready — wakes 3, cycles 2, turns 1', tone: 'success' })
     expect(lines.find((l) => l.text.startsWith('served texts from the cached copy'))?.tone).toBe('warn')
+  })
+
+  it('a turn running past 30 minutes is a warn line naming the conversation and the run deadline that ends it (the card stays held)', async () => {
+    const started = Date.now() - 45 * 60_000
+    await registerIntegration({
+      accountId: 'default',
+      config: account({}).config as never,
+      logger: silent,
+      createSocket: () => stubSocket('ready'),
+      build: () => ({
+        loop: loopWith({ wakes: 1, cycles: 1, turns: 1, running: [{ kind: 'reply', conversationId: 'conv_slow', anchor: 'msg_1', startedAt: started, waitTimedOutAt: null, overdue: true }] }),
+        texts: { source: 'server' } as never,
+        handlers: {},
+      }),
+    })
+    const cfg = { agents: { defaults: { workspace, timeoutSeconds: 7200 } } }
+    const probe = await agentchatStatusAdapter.probeAccount!({ account: account(cfg) as never, timeoutMs: 2000, cfg: cfg as never } as never)
+    expect(probe.integration?.overdue).toHaveLength(1)
+    const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+    const line = lines.find((l) => l.text.startsWith('a turn for conversation conv_slow'))
+    expect(line?.tone).toBe('warn')
+    expect(line?.text).toMatch(/has run 4[45] min — its card stays held \(no second reply\) until the run ends; OpenClaw ends it at its run deadline, agents\.defaults\.timeoutSeconds = 7200$/)
   })
 
   it('a running integration with the gateway recorder shows the socket counters: wakes by source, closes by code/initiator, notices by class', async () => {
@@ -151,7 +173,7 @@ describe('status adapter — the doctor-style probe', () => {
       logger: silent,
       createSocket: () => stubSocket('ready'),
       socketOptions: { metrics },
-      build: () => ({ loop: loopWith({ wakes: 3, cycles: 1, turns: 0 }), texts: { source: 'server' } as unknown as OpenClawTexts, handlers: {} }),
+      build: () => ({ loop: loopWith({ wakes: 3, cycles: 1, turns: 0 }), texts: { source: 'server' } as never, handlers: {} }),
     })
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
     expect(probe.integration?.socket).toEqual({ state: 'ready', wakes: { connect: 1, message: 2 }, disconnects: { '4000/client': 1 }, errors: { transport: 1 } })
@@ -168,7 +190,7 @@ describe('status adapter — the doctor-style probe', () => {
       config: account({}).config as never,
       logger: silent,
       createSocket: () => stubSocket('blocked'),
-      build: () => ({ loop: null, texts: { source: 'none' } as unknown as OpenClawTexts, handlers: {} }),
+      build: () => ({ loop: null, texts: { source: 'none' } as never, handlers: {} }),
     })
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
     expect(probe.integration).toEqual({ mode: 'on', state: 'blocked', texts: 'missing' })

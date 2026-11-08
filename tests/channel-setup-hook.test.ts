@@ -38,8 +38,9 @@ import { agentchatSetupWizard } from '../src/channel.wizard.js'
 import { agentchatChannelConfigSchema } from '../src/config-schema.js'
 import { writeAgentsAnchor } from '../src/binding/agents-anchor.js'
 import { getPluginRuntime, setPluginRuntime, isUsablePluginRuntime, resetPluginRuntimeForTest } from '../src/integration/runtime-holder.js'
+import { testKey } from './helpers/keys.js'
 
-const KEY = 'ac_live_' + 'n'.repeat(24)
+const KEY = testKey('n'.repeat(24))
 const liveAgent = { handle: 'alice', email: 'a@x', displayName: null, createdAt: 'now' }
 
 /** OpenClaw's setup-only runtime: a Proxy that throws on ANY property access. */
@@ -270,9 +271,9 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
     it('onAccountConfigChanged does nothing when the enabled state does not change (key rotation, enabled → enabled, disabled → disabled)', async () => {
       fs.writeFileSync(anchorFile(), ANCHOR)
       const prevCfg = substituted()
-      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, apiKey: 'ac_live_' + 'r'.repeat(24) } } } as never, accountId: 'default', runtime })
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, apiKey: testKey('r'.repeat(24)) } } } as never, accountId: 'default', runtime })
       const disabled = { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, enabled: false } } }
-      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: disabled as never, nextCfg: { ...disabled, channels: { agentchat: { ...disabled.channels.agentchat, apiKey: 'ac_live_' + 'r'.repeat(24) } } } as never, accountId: 'default', runtime })
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: disabled as never, nextCfg: { ...disabled, channels: { agentchat: { ...disabled.channels.agentchat, apiKey: testKey('r'.repeat(24)) } } } as never, accountId: 'default', runtime })
       expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(ANCHOR)
       expect(lines).toEqual([])
     })

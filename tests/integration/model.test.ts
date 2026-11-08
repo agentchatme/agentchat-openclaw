@@ -14,6 +14,7 @@ import {
   readLiveConfig,
 } from '../../src/integration/model.js'
 import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
+import { testKey } from '../helpers/keys.js'
 
 function fakeRuntime(overrides: { completeText?: string; runError?: Error; waitStatus?: string; waitThrows?: boolean } = {}) {
   const calls: { complete: unknown[]; run: unknown[]; wait: unknown[] } = { complete: [], run: [], wait: [] }
@@ -218,7 +219,7 @@ describe('createRuntimeTurnStarter — admission first, the confirmed end later'
 
 describe('turnReadiness / withTurnReadiness — a turn only when it can have the hosted tools', () => {
   const apiBase = 'https://api.agentchat.me'
-  const apiKey = 'ac_live_' + 'k'.repeat(24)
+  const apiKey = testKey('k'.repeat(24))
   const ours = { mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}' } } } } }
 
   it('not ready without the mcp.servers.agentchat entry, or with it disabled', () => {

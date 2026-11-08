@@ -16,14 +16,13 @@ import type { Logger } from '../log.js'
 import type { AgentchatChannelConfig } from '../config-schema.js'
 import { IntegrationSocket, type IntegrationSocketOptions, type SocketHandlers } from '../integration/socket.js'
 import type { IntegrationLoop } from '../integration/loop.js'
-import type { OpenClawTexts } from '../integration/texts.js'
 import type { MetricsRecorder } from '../metrics.js'
 
 export interface IntegrationEntry {
   readonly socket: IntegrationSocket
   readonly loop: IntegrationLoop | null
-  /** The served texts as the loop reads them (spelled for OpenClaw). */
-  readonly texts: OpenClawTexts | null
+  /** The served texts as the loop reads them. */
+  readonly texts: integration.TextsSource | null
   /** The recorder the socket binding and the loop count into; the status probe reads its snapshot when it keeps one. */
   readonly metrics: MetricsRecorder | null
   readonly config: AgentchatChannelConfig
@@ -32,7 +31,7 @@ export interface IntegrationEntry {
 
 export interface BuiltIntegration {
   readonly loop: IntegrationLoop | null
-  readonly texts?: OpenClawTexts | null
+  readonly texts?: integration.TextsSource | null
   /** Stopped after the loop (the texts refresh timer). */
   readonly textsCache?: integration.TextsCache | null
   readonly handlers: SocketHandlers

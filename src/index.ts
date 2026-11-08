@@ -27,10 +27,9 @@ export type { SocketHandlers, SocketHealth, SocketState, SocketDisconnect, Socke
 export { createIntegrationLoop } from './integration/loop.js'
 export type { IntegrationLoop, IntegrationLoopOptions } from './integration/loop.js'
 export { createLoopTurnStarter, turnEndOf } from './integration/turns.js'
-export { RunningTurns, runningTurnsFor } from './integration/running.js'
-export { OpenClawTexts, createTextsCache, loadIdentityLine, spellTextsForOpenClaw } from './integration/texts.js'
+export { trackerFor } from './integration/running.js'
+export { createTextsCache, loadIdentityLine } from './integration/texts.js'
 export {
-  spellToolsForOpenClaw,
   mcpToolName,
   MCP_SERVER_NAME,
   OPENCLAW_TOOL_NAMER,

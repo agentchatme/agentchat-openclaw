@@ -23,9 +23,8 @@ import type { Logger } from '../log.js'
 import type { MetricsRecorder } from '../metrics.js'
 import { createNoopMetrics } from '../metrics.js'
 import type { GateModelCall, TurnReadiness, TurnStarter as RuntimeTurnStarter } from './model.js'
-import { RunningTurns } from './running.js'
 import { OPENCLAW_TOOL_NAMER, integrationLane, wakeSessionKey } from './turn.js'
-import { createLoopTurnStarter, onEarlierRunEnded } from './turns.js'
+import { createLoopTurnStarter } from './turns.js'
 
 export interface IntegrationLoopOptions {
   readonly accountId: string
@@ -38,7 +37,8 @@ export interface IntegrationLoopOptions {
   readonly handle?: string | undefined
   readonly callModel: GateModelCall
   readonly startRun: RuntimeTurnStarter
-  readonly running: RunningTurns
+  /** The account's tracker, shared with every loop for the account in this process (`trackerFor`). */
+  readonly tracker: integration.TurnTracker
   readonly logger: Logger
   readonly metrics?: MetricsRecorder
   readonly readiness?: () => TurnReadiness
@@ -53,18 +53,14 @@ export interface IntegrationLoopOptions {
 
 export interface IntegrationLoop {
   readonly loop: integration.ReceiveLoop
-  /** Stop the loop (it disconnects the socket) and detach from the account's runs. */
+  /** Stop the loop (it disconnects the socket). Turns already running go on and still have their outcome recorded. */
   stop(): Promise<void>
 }
-
-let generation = 0
 
 export function createIntegrationLoop(options: IntegrationLoopOptions): IntegrationLoop {
   const logger = options.logger.child({ component: 'integration', accountId: options.accountId })
   const metrics = options.metrics ?? createNoopMetrics()
   const now = options.now ?? Date.now
-  generation += 1
-  const owner = `${options.accountId}#${generation}`
   const gateEnabled = options.gateEnabled ?? true
 
   let unreadyReason: string | null = null
@@ -83,7 +79,7 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
       }
     : undefined
 
-  const startTurn = createLoopTurnStarter({ accountId: options.accountId, agentId: options.agentId, startRun: options.startRun, running: options.running, owner, logger, now })
+  const startTurn = createLoopTurnStarter({ accountId: options.accountId, agentId: options.agentId, startRun: options.startRun, logger, now })
 
   const loop = new integration.ReceiveLoop({
     client: options.client,
@@ -93,6 +89,10 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
     socket: options.socket,
     ...(options.handle ? { handle: options.handle } : {}),
     toolNamer: OPENCLAW_TOOL_NAMER,
+    // One account's turns run on one OpenClaw lane anyway; one slot keeps
+    // the rest held out of the gate (no second model call decides them).
+    maxConcurrentTurns: 1,
+    tracker: options.tracker,
     ...(readiness ? { readiness } : {}),
     ...(options.quietMs !== undefined ? { quietMs: options.quietMs } : {}),
     ...(options.maxMs !== undefined ? { maxMs: options.maxMs } : {}),
@@ -102,14 +102,9 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
     onEvent: (event) => logEvent(event, logger, metrics),
   })
 
-  // A run an earlier loop for this account started (before a config-change
-  // restart) holds its card here too; when it ends, look at the tray again.
-  const detach = onEarlierRunEnded(options.running, owner, () => loop.wake())
-
   return {
     loop,
     async stop() {
-      detach()
       await loop.stop()
     },
   }
