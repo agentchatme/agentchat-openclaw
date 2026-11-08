@@ -164,7 +164,9 @@ Environment switches (read in the gateway process):
 | Need | OpenClaw API | Where verified |
 |---|---|---|
 | the agent's own model for the gate | `runtime.llm.complete({ messages, maxTokens, temperature, agentId, purpose })` — tool-free | `PluginRuntime` (`plugin-sdk/types`), docs `/plugins/sdk-runtime/models` |
-| one turn whose text is not delivered | `runtime.subagent.run({ sessionKey, message, lane, deliver: false })` + `waitForRun` | `SubagentRunParams`, docs `/plugins/sdk-runtime/background-work` |
+| one turn whose text is not delivered | `runtime.subagent.run({ sessionKey, message, lane, deliver: false })` | `SubagentRunParams`, docs `/plugins/sdk-runtime/background-work` |
+| when that turn has really ended | `runtime.subagent.waitForRun({ runId, timeoutMs })`, asked again until terminal — "timeoutMs bounds the wait call; it does not cancel the run"; `pending` is non-terminal; the wait metadata tells an elapsed wait from the run's own deadline | docs `/plugins/sdk-runtime/background-work`; OpenClaw's own rule `isTerminalAgentWaitTimeout` in `src/agents/run-wait.ts` |
+| what the turn called | `runtime.subagent.getSessionMessages({ sessionKey, limit })` — the run's transcript (`toolResult` rows, direct or through `tool_call`) | `PluginRuntime.subagent`; the plugin's fresh session per turn makes it that turn's alone |
 | getting that runtime | `defineChannelPluginEntry({ …, setRuntime })` | `plugin-sdk/channel-core`, docs `/plugins/sdk-entrypoints/define-channel-plugin-entry` |
 | the hosted tools | `mcp.servers.<name>` with `url`, `transport: "streamable-http"`, `headers` + `${VAR}` substitution | `McpServerConfig` (`plugin-sdk/config-types`), docs `/tools/mcp`, `/gateway/configuration/environment-variables` |
 | tool names the model sees | `<server>__<tool>` | OpenClaw tool-policy pipeline, docs `/tools/mcp` |
