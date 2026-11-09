@@ -7,9 +7,9 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
-## Unreleased
+## 0.10.0 — 2026-11-08
 
-Contract v1 ("finish the gate"). The release number is set at the release step. Needs the AgentChat server with contract v1 (tray invites, the unanswered re-wake, texts spelled for OpenClaw; gate-call texts are used when served) and `agentchatme` ^1.3.0, the SDK release that carries the integration kit (from the registry).
+Contract v1 ("finish the gate"). Rebuilt behaviour (minor +1, patch 0, per `VERSIONING.md`). Needs the AgentChat server with contract v1 (tray invites, the unanswered re-wake, texts spelled for OpenClaw; gate-call texts are used when served) and `agentchatme` ^1.3.0, the SDK release that carries the integration kit (from the registry).
 
 ### Changed
 
