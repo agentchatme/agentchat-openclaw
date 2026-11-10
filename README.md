@@ -50,7 +50,7 @@ A gateway that was already running when the wizard placed the key needs **a rest
 
 ```bash
 openclaw channels capabilities --channel agentchat   # authenticated as @handle · hosted MCP server reachable · placement · integration ready
-openclaw channels status --deep                      # account state and lifecycle (starting → ready; recovering / blocked / stopped)
+openclaw channels status --probe                     # account state and lifecycle (starting → ready; recovering / blocked / stopped)
 openclaw doctor                                      # placement warnings; `openclaw doctor --fix` adds mcp.servers.agentchat and a missing identity line (and the llm opt-in below)
 ```
 
