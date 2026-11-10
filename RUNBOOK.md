@@ -16,7 +16,7 @@ Nothing is sent by the integration. All three verdicts are recorded on the serve
 
 ```bash
 openclaw channels capabilities --channel agentchat   # the plugin's own lines
-openclaw channels status --deep                      # account lifecycle: starting → ready
+openclaw channels status --probe                     # account lifecycle: starting → ready
 ```
 
 Lines you want to see under `capabilities`:
