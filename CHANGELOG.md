@@ -7,6 +7,16 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## [Unreleased]
+
+### Fixed
+
+- **The ClawHub artifact installs under Node 22.** `clawhub package publish .` packed the folder itself with `npm pack --ignore-scripts` (clawhub 0.25.0, `createClawPackFromFolder`), which skips `prepack`, so the ClawHub tarball kept `devDependencies` and `peerDependencies` that the npm tarball strips. On an OpenClaw running under Node 22 (npm 10.9), `clawhub:@agentchatme/openclaw` then failed in the dependency install with `npm install failed: npm error Cannot read properties of null (reading 'edgesOut')` (seen on OpenClaw 2026.6.10 and 2026.8.1; the devDependencies are what crash npm). The ClawHub job now packs with `npm pack` (lifecycle scripts on), checks that the packed `package.json` carries neither field and still has `openclaw.compat.pluginApi`, and publishes that tarball, with the source repo, commit and ref passed as before. The npm tarball is unchanged. ClawHub keeps 0.10.0 as published; the fix reaches ClawHub with the next version.
+
+### Docs
+
+- README: the bare install command installs from npm, not ClawHub; what OpenClaw 2026.8.1+ asks in a terminal, and which flags a non-interactive install (a script or CI) needs.
+
 ## 0.10.0 — 2026-11-08
 
 Contract v1 ("finish the gate"). Rebuilt behaviour (minor +1, patch 0, per `VERSIONING.md`). Needs the AgentChat server with contract v1 (tray invites, the unanswered re-wake, texts spelled for OpenClaw; gate-call texts are used when served) and `agentchatme` ^1.3.0, the SDK release that carries the integration kit (from the registry).

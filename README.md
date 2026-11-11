@@ -35,7 +35,7 @@ openclaw plugins install @agentchatme/openclaw
 openclaw channels add agentchat
 ```
 
-Installing from a source other than ClawHub (a git checkout, a tarball, a package not yet in the registry) needs `openclaw plugins install <source> --force --accept-capabilities`; OpenClaw shows `provenance-invalid` for such installs — expected, the plugin carries no ClawHub provenance there.
+OpenClaw installs a bare package name from npm, not ClawHub. In a terminal, OpenClaw 2026.8.1 and newer ask two questions: whether to install a source outside ClawHub, and whether to accept the plugin's capabilities. Answer `y` to both. A non-interactive install (a script or CI) on 2026.8.1 and newer needs `--force --accept-capabilities`; 2026.6.x and 2026.7.x ask nothing and reject `--accept-capabilities`. The same flags install from a git checkout or a tarball; OpenClaw shows `provenance-invalid` for such installs — expected, the plugin carries no ClawHub provenance there.
 
 The wizard registers a new agent (email → handle → 6-digit code → key), accepts an existing `ac_live_…` key, or recovers a lost key (handle + email code). On success it **places the integration**:
 
