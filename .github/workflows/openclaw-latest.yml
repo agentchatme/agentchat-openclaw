@@ -1,0 +1,132 @@
+name: OpenClaw latest
+
+# The plugin against the newest OpenClaw release.
+#
+# ci.yml type-checks, tests and builds against the lockfile's openclaw,
+# 2026.6.10: the oldest release the plugin claims (peerDependencies and
+# openclaw.compat.pluginApi). That floor stays. But users install the plugin
+# into whatever OpenClaw they run, most often the newest, and ci.yml never
+# sees it. This workflow swaps the dev dependency for the release npm tags
+# `latest` (or a dist-tag or exact version given by hand) and runs the same
+# type-check, tests and build on a Node line that release supports: OpenClaw
+# 2026.9.3 and later declare Node 24 or 26, and 2026.11.3 refuses to start on
+# Node 22.
+#
+# It runs daily as well as on changes, because upstream ships without a
+# commit here: a red scheduled run means a new OpenClaw release broke the
+# plugin's types or tests, before a user finds out.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "23 6 * * *"
+  workflow_dispatch:
+    inputs:
+      openclaw:
+        description: "OpenClaw dist-tag or exact version (latest, beta, extended-stable, 2026.11.3, ...)"
+        type: string
+        required: true
+        default: latest
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  openclaw-latest:
+    name: openclaw@${{ inputs.openclaw || 'latest' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      # Node 24: the LTS line every OpenClaw from 2026.9.3 on supports. The
+      # next step fails if the resolved release does not accept it.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Resolve the OpenClaw release
+        id: openclaw
+        env:
+          SPEC: ${{ inputs.openclaw || 'latest' }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${SPEC}" =~ ^[A-Za-z0-9][A-Za-z0-9.+-]*$ ]]; then
+            echo "::error::not a dist-tag or version: ${SPEC}"
+            exit 1
+          fi
+          VERSION="$(npm view "openclaw@${SPEC}" version)"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::openclaw@${SPEC} did not resolve to one version: ${VERSION}"
+            exit 1
+          fi
+          ENGINES="$(npm view "openclaw@${VERSION}" engines.node)"
+          NODE="$(node --version)"
+          echo "OpenClaw ${VERSION} (openclaw@${SPEC}; engines.node: ${ENGINES}) on Node ${NODE}" | tee -a "${GITHUB_STEP_SUMMARY}"
+          # Pinned: a range check, not a new dependency of the plugin.
+          if [[ -n "${ENGINES}" ]] && ! npm exec --yes --package=semver@7.7.3 -- semver -r "${ENGINES}" "${NODE#v}" > /dev/null; then
+            echo "::error::OpenClaw ${VERSION} does not support Node ${NODE} (engines.node: ${ENGINES}); move this job to a Node line it supports"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+      # `pnpm add` rewrites package.json and the lockfile on the runner only;
+      # nothing is committed. The plugin's `prepare` builds it as usual.
+      - name: Install, with that release as the dev dependency
+        env:
+          VERSION: ${{ steps.openclaw.outputs.version }}
+        run: |
+          set -euo pipefail
+          pnpm add --save-dev "openclaw@${VERSION}"
+          INSTALLED="$(node -p "require('./node_modules/openclaw/package.json').version")"
+          if [[ "${INSTALLED}" != "${VERSION}" ]]; then
+            echo "::error::installed openclaw ${INSTALLED}, expected ${VERSION}"
+            exit 1
+          fi
+
+      # One zod in the tree, OpenClaw's. The plugin builds its config schema
+      # with its own zod and hands it to OpenClaw's buildChannelConfigSchema,
+      # whose parameter is typed with OpenClaw's zod. Two zod copies, even one
+      # patch apart (the lockfile's 4.6.6 next to the exact 4.6.7 that
+      # OpenClaw 2026.9.37 and 2026.11.5-beta.1 pin), are not assignable to
+      # each other, so tsc and the d.ts build fail on zod's own types rather
+      # than on OpenClaw's API. At run time a user's install always has two
+      # copies, and that works: OpenClaw reads the schema through `_zod`
+      # (its toJSONSchema) and calls the schema's own `safeParse` (the test
+      # suite passed with both copies in place on 2026.11.5-beta.1, including
+      # the generated-schema check against openclaw.plugin.json).
+      - name: Use OpenClaw's zod in this tree
+        run: |
+          set -euo pipefail
+          read -r OPENCLAW_ZOD PLUGIN_ZOD < <(node -e '
+            const { createRequire } = require("node:module");
+            const { realpathSync } = require("node:fs");
+            const version = (from) => { try { return createRequire(from)("zod/package.json").version } catch { return "-" } };
+            console.log(version(realpathSync("node_modules/openclaw") + "/"), version(process.cwd() + "/"));
+          ')
+          echo "zod: OpenClaw ${OPENCLAW_ZOD}, plugin ${PLUGIN_ZOD}"
+          if [[ "${OPENCLAW_ZOD}" == "-" ]]; then
+            echo "::notice::OpenClaw resolves no zod; nothing to align"
+          elif [[ "${OPENCLAW_ZOD}" != "${PLUGIN_ZOD}" ]]; then
+            pnpm add "zod@${OPENCLAW_ZOD}"
+          fi
+
+      - name: Type-check
+        run: pnpm run type-check
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Build
+        run: pnpm run build

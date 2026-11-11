@@ -207,6 +207,8 @@ pnpm test           # unit: the real SDK over a mock WebSocket, a fake server, a
 pnpm test:smoke     # live legs against the real API — needs .env.test-agents; skipped otherwise
 ```
 
+CI runs the type-check, the tests and the build against two OpenClaw releases: the lockfile's `openclaw` (2026.6.10, the oldest release the plugin claims) on Node 22 on every change, and the newest release on npm (`latest`) on Node 24 on every change and daily (`.github/workflows/openclaw-latest.yml`; a manual run takes another dist-tag or version).
+
 The suite covers the socket binding over the SDK (HELLO capabilities, wake-frame labels, the state mapping incl. the blocked-key hold), the receive loop wiring over the real SDK socket (ack before any gate call, the echo filter, one OpenClaw run per reply and per invite on fresh sessions, the after-turn rule as recorded, a live run's card held — across an account restart too — readiness, single-run mode), the run watch (a wait timeout is not an end; the transcript count), the served texts on the kit cache, placement, the registry, the wizard, status and doctor.
 
 ## Files
