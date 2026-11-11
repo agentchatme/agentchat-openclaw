@@ -50,7 +50,7 @@ Lines that mean the integration is not doing its job:
 
 | Line | Meaning |
 |---|---|
-| `mcp.servers.agentchat now names this client to the hosted tools (X-AgentChat-Client: openclaw, X-AgentChat-Client-Version: …); OpenClaw applies the change without a restart` | at the gateway's start, the plugin's own entry from an earlier release (or another version) was brought up to date; once per version. `… could not be updated …` / `… cannot update its config from a plugin …` (warn): run `openclaw doctor --fix` |
+| `mcp.servers.agentchat now names this client to the hosted tools (X-AgentChat-Client: openclaw, X-AgentChat-Client-Version: …); under the default reload mode OpenClaw applies it without a restart` | at the gateway's start, the plugin's own entry from an earlier release (or another version) was brought up to date: one config write, once per version. `… could not be updated …` / `… cannot update its config from a plugin …` (warn, once per process): run `openclaw doctor --fix`; `… read-only here (Nix mode)`: add the two headers in the Nix-managed config |
 | `connected (HELLO accepted)` | the SDK socket is up; the connect wake follows |
 | `wake — message.new` (debug) / `wake — server wake frame` | a peer wrote / a deferred conversation's reminder is due, or AgentChat re-woke cards still unanswered (`reason=unanswered`); the tray will be read after the 2 s window |
 | `own echo — not a wake` (debug) | the server echoed the agent's own send; ignored |

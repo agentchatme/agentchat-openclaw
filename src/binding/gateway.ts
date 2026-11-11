@@ -45,7 +45,7 @@ import { readAgentChatCalls } from '../integration/run.js'
 import { getPluginRuntime } from '../integration/runtime-holder.js'
 import { removeOldStateFiles } from '../integration/state.js'
 import { refreshIdentityLine } from '../integration/placement.js'
-import { clientIdentityText, refreshHostedMcpEntry, type ConfigMutator } from '../integration/mcp.js'
+import { NIX_MODE_ERROR_CODE, clientIdentityText, refreshHostedMcpEntry, type ConfigMutator } from '../integration/mcp.js'
 import {
   createRuntimeModelCall,
   createRuntimeTurnStarter,
@@ -131,6 +131,9 @@ export async function waitUntilAbort(signal: AbortSignal, onAbort: () => Promise
   await onAbort()
 }
 
+/** Accounts already told, in this process, that their entry could not be updated (one warning, not one per start). */
+const mcpUpdateWarned = new Set<string>()
+
 /**
  * `refreshHostedMcpEntry` for this account, with its log line. The live
  * config decides whether anything is written; the write goes through
@@ -142,21 +145,36 @@ export async function updateHostedMcpEntry(
   apiKey: string,
   runtime: () => ReturnType<typeof getPluginRuntime> = getPluginRuntime,
 ): Promise<void> {
+  const prefix = `[agentchat:${ctx.accountId}]`
+  const warnOnce = (line: string) => {
+    if (mcpUpdateWarned.has(ctx.accountId)) return
+    mcpUpdateWarned.add(ctx.accountId)
+    ctx.log?.warn?.(`${prefix} ${line}`)
+  }
   try {
     const { cfg: liveCfg } = readLiveConfig(ctx.cfg, runtime)
     const config = (runtime() as { config?: ConfigMutator } | null)?.config
     const result = await refreshHostedMcpEntry({ liveCfg, config, apiBase, apiKey })
-    const prefix = `[agentchat:${ctx.accountId}]`
     if (result.outcome === 'updated') {
-      ctx.log?.info?.(`${prefix} mcp.servers.agentchat now names this client to the hosted tools (${clientIdentityText()}); OpenClaw applies the change without a restart`)
+      mcpUpdateWarned.delete(ctx.accountId)
+      ctx.log?.info?.(`${prefix} mcp.servers.agentchat now names this client to the hosted tools (${clientIdentityText()}); under the default reload mode OpenClaw applies it without a restart`)
     } else if (result.outcome === 'unsupported') {
-      ctx.log?.warn?.(`${prefix} mcp.servers.agentchat does not name this client (${clientIdentityText()}) and this OpenClaw cannot update its config from a plugin — run \`openclaw doctor --fix\``)
+      warnOnce(`mcp.servers.agentchat does not name this client (${clientIdentityText()}) and this OpenClaw cannot update its config from a plugin — run \`openclaw doctor --fix\``)
     } else if (result.outcome === 'failed') {
-      ctx.log?.warn?.(`${prefix} mcp.servers.agentchat could not be updated to name this client (${result.error ?? 'unknown error'}) — run \`openclaw doctor --fix\``)
+      warnOnce(
+        result.code === NIX_MODE_ERROR_CODE
+          ? `mcp.servers.agentchat does not name this client and OpenClaw's config is read-only here (Nix mode) — add ${clientIdentityText().replace(', ', ' and ')} to its headers in the Nix-managed config`
+          : `mcp.servers.agentchat could not be updated to name this client (${result.error ?? 'unknown error'}) — run \`openclaw doctor --fix\``,
+      )
     }
   } catch (err) {
-    ctx.log?.warn?.(`[agentchat:${ctx.accountId}] mcp.servers.agentchat check failed: ${err instanceof Error ? err.message : String(err)}`)
+    warnOnce(`mcp.servers.agentchat check failed: ${err instanceof Error ? err.message : String(err)}`)
   }
+}
+
+/** Test seam: forget which accounts were warned. */
+export function resetHostedMcpUpdateWarningsForTest(): void {
+  mcpUpdateWarned.clear()
 }
 
 export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAccount> = {

@@ -204,7 +204,7 @@ describe('doctor adapter — the llm override opt-in for a non-default bound age
     expect(fixed.changes.some((c) => c.includes('mcp.servers'))).toBe(false)
   })
 
-  it('our entry from an earlier release (bearer only): one notice, and --fix brings it up to date with the bearer as a template', async () => {
+  it('our entry from an earlier release (bearer only): one notice, and --fix brings it up to date leaving the bearer as it is', async () => {
     const substituted = {
       ...bound,
       bindings: [],
@@ -214,11 +214,15 @@ describe('doctor adapter — the llm override opt-in for a non-default bound age
     const mcp = warnings.filter((w) => w.includes('mcp:'))
     expect(mcp).toHaveLength(1)
     expect(mcp[0]).toMatch(/without X-AgentChat-Client — AgentChat treats the agent as an unknown client and lists the webhook-setup tools/)
-    expect(mcp[0]).toMatch(/\(openclaw doctor --fix updates it\)$/)
+    expect(mcp[0]).toContain('the gateway updates the entry when it starts (its log says if it could not), and openclaw doctor --fix does now')
+    expect(mcp[0]).not.toMatch(/adds it\)$/)
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: substituted as never, doctorFixCommand: 'fix', env: {} })
     expect(fixed.changes).toContain(`updated mcp.servers.agentchat to name this client (X-AgentChat-Client: openclaw, X-AgentChat-Client-Version: ${PACKAGE_VERSION})`)
-    expect((fixed.config as unknown as { mcp: { servers: { agentchat: unknown } } }).mcp.servers.agentchat).toEqual(hostedMcpServerEntry())
-    expect(JSON.stringify(fixed.config)).not.toContain(`Bearer ${KEY2}`)
+    // only the identity headers change; the substituted bearer goes back as it came, so OpenClaw's write restores the file's ${VAR}
+    expect((fixed.config as unknown as { mcp: { servers: { agentchat: unknown } } }).mcp.servers.agentchat).toEqual({
+      ...hostedMcpServerEntry(),
+      headers: { ...hostedMcpServerEntry().headers, Authorization: `Bearer ${KEY2}` },
+    })
     const again = await agentchatDoctorAdapter.repairConfig!({ cfg: fixed.config, doctorFixCommand: 'fix', env: {} })
     expect(again.changes.some((c) => c.includes('mcp.servers'))).toBe(false)
   })

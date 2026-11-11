@@ -482,8 +482,8 @@ function checkMcpEntry(cfg: unknown, apiBase: string, apiKey: string | undefined
         notice: true,
         repair: true,
         detail:
-          `hosted tools registered as mcp.servers.agentchat, ${identity === 'outdated' ? 'naming an older version of this client' : `without ${CLIENT_HEADER}`} — ` +
-          `${identity === 'missing' ? `${unknownClient}; ` : ''}the gateway updates the entry at its next start, or run openclaw doctor --fix (${clientIdentityText()})`,
+          `hosted tools registered as mcp.servers.agentchat, ${identity === 'outdated' ? 'naming another version of this client' : `without ${CLIENT_HEADER}`} — ` +
+          `${identity === 'missing' ? `${unknownClient}; ` : ''}the gateway updates the entry when it starts (its log says if it could not), and openclaw doctor --fix does now (${clientIdentityText()})`,
       }
     }
     case 'user_managed': {

@@ -56,7 +56,7 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
       const agentId = resolvePlacementAgentId(cfg, accountId)
       for (const check of checkPlacement({ cfg, handle, apiKey, apiBase, identityLine: cachedIdentityLine(accountId), agentId, accountId, env })) {
         if (check.ok && !check.notice) continue
-        const fix = check.name === 'mcp' && check.repair ? ` (${doctorFixCommand} ${check.ok ? 'updates' : 'adds'} it)` : ''
+        const fix = check.name === 'mcp' && check.repair && !check.ok ? ` (${doctorFixCommand} adds it)` : ''
         warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${check.name}: ${check.detail}${fix}`)
       }
       const bound = resolveBoundAgentId(cfg, AGENTCHAT_CHANNEL_ID, accountId)

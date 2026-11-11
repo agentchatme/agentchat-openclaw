@@ -44,7 +44,7 @@ describe('hosted MCP entry', () => {
   })
 
   it('names the client with the header names AgentChat reads, and the version header tracks the package version', () => {
-    // apps/api-server lib/analytics/client-context.ts: x-agentchat-client / x-agentchat-client-version
+    // AgentChat reads these two headers (any case) to name the client and its version
     expect(CLIENT_HEADER.toLowerCase()).toBe('x-agentchat-client')
     expect(CLIENT_VERSION_HEADER.toLowerCase()).toBe('x-agentchat-client-version')
     expect(PACKAGE_VERSION).toBe(PACKAGE_JSON_VERSION)
@@ -81,11 +81,10 @@ describe('hosted MCP entry', () => {
     expect(describeMcpEntry({ mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'sse' } } } })).toBe('user_managed')
     // and channels remove strips the substituted entry
     expect(withoutHostedMcpEntry(substituted, 'https://api.agentchat.me', key).removed).toBe(true)
-    // brought up to date, the bearer goes back as the TEMPLATE — never the key the substituted config carries
+    // brought up to date, the bearer stays exactly as it was (OpenClaw restores the file's ${VAR} on an unchanged path)
     const updated = withHostedMcpEntry(substituted, 'https://api.agentchat.me', key)
     expect(updated.outcome).toBe('updated')
-    expect(updated.cfg.mcp.servers.agentchat).toEqual(hostedMcpServerEntry())
-    expect(JSON.stringify(updated.cfg)).not.toContain(key)
+    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ Authorization: `Bearer ${key}`, 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION })
     // a current entry, substituted, is left as it is
     const current = { mcp: { servers: { agentchat: { ...hostedMcpServerEntry(), headers: { ...hostedMcpServerEntry().headers, Authorization: `Bearer ${key}` } } } } }
     expect(withHostedMcpEntry(current, 'https://api.agentchat.me', key)).toEqual({ cfg: current, outcome: 'present' })
@@ -109,14 +108,14 @@ describe('hosted MCP entry', () => {
   it('an entry an earlier release wrote (bearer only) is still ours, and is brought up to date keeping what the operator added', () => {
     expect(describeMcpEntry({ mcp: { servers: { agentchat: OLD_ENTRY } } })).toBe('ours')
     expect(describeMcpIdentity({ mcp: { servers: { agentchat: OLD_ENTRY } } })).toBe('missing')
-    const cfg = { mcp: { servers: { agentchat: { ...OLD_ENTRY, requestTimeoutMs: 20000, toolFilter: { deny: ['agentchat_report_agent'] }, headers: { ...OLD_ENTRY.headers, 'X-Trace': 'on' } }, other: { url: 'https://x/mcp' } } } }
+    const cfg = { mcp: { servers: { agentchat: { ...OLD_ENTRY, requestTimeoutMs: 20000, toolFilter: { exclude: ['agentchat_report_agent'] }, headers: { ...OLD_ENTRY.headers, 'X-Trace': 'on' } }, other: { url: 'https://x/mcp' } } } }
     const updated = withHostedMcpEntry(cfg)
     expect(updated.outcome).toBe('updated')
     expect(updated.cfg.mcp.servers.agentchat).toEqual({
       url: 'https://api.agentchat.me/mcp',
       transport: 'streamable-http',
       requestTimeoutMs: 20000,
-      toolFilter: { deny: ['agentchat_report_agent'] },
+      toolFilter: { exclude: ['agentchat_report_agent'] },
       headers: { 'X-Trace': 'on', Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION },
     })
     expect(updated.cfg.mcp.servers.other).toEqual({ url: 'https://x/mcp' })
@@ -130,8 +129,8 @@ describe('hosted MCP entry', () => {
     expect(describeMcpIdentity(older)).toBe('outdated')
     const updated = withHostedMcpEntry(older)
     expect(updated.outcome).toBe('updated')
-    // one spelling of each header, not two
-    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual(hostedMcpServerEntry().headers)
+    // one spelling of each identity header, not two; the bearer keeps its own spelling and value
+    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION })
     const sameVersionOtherCase = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'x-agentchat-client': 'OpenClaw', 'x-agentchat-client-version': PACKAGE_VERSION } } } } }
     expect(describeMcpIdentity(sameVersionOtherCase)).toBe('current')
     expect(withHostedMcpEntry(sameVersionOtherCase).outcome).toBe('present')
@@ -139,11 +138,38 @@ describe('hosted MCP entry', () => {
     expect(describeMcpIdentity({ mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { ...OLD_ENTRY.headers, 'X-AgentChat-Client': 'hermes' } } } } })).toBe('missing')
   })
 
+  it('the bearer is never rewritten: a literal key, or the configured key under another variable, is kept as it is', () => {
+    const key = testKey('c'.repeat(24))
+    // channels.agentchat.apiKey: "${MY_KEY}" with a hand-written `Bearer ${MY_KEY}`, as the plugin sees it: substituted
+    const custom = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { Authorization: `Bearer ${key}` } } } } }
+    const updated = withHostedMcpEntry(custom, 'https://api.agentchat.me', key)
+    expect(updated.outcome).toBe('updated')
+    expect(updated.cfg.mcp.servers.agentchat.headers.Authorization).toBe(`Bearer ${key}`)
+    expect(updated.cfg.mcp.servers.agentchat.headers).not.toHaveProperty('authorization')
+  })
+
+  it('a second spelling of a header is not ours to guess: two Authorization headers are hand-written, two client headers name no client', () => {
+    const twoBearers = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}', AUTHORIZATION: `Bearer ${testKey('o'.repeat(24))}` } } } } }
+    expect(describeMcpEntry(twoBearers)).toBe('user_managed')
+    expect(withHostedMcpEntry(twoBearers).outcome).toBe('user_managed')
+    // an upper-case bearer with somebody else's key is read too, and is not ours
+    const upper = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { AUTHORIZATION: `Bearer ${testKey('o'.repeat(24))}` } } } } }
+    expect(describeMcpEntry(upper, 'https://api.agentchat.me', testKey('m'.repeat(24)))).toBe('user_managed')
+    // "openclaw, openclaw" names no client the server knows
+    const twoClients = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { ...hostedMcpServerEntry().headers, 'x-agentchat-client': 'openclaw' } } } } }
+    expect(describeMcpIdentity(twoClients)).toBe('missing')
+    const upgraded = withHostedMcpEntry(twoClients)
+    expect(upgraded.outcome).toBe('updated')
+    expect(upgraded.cfg.mcp.servers.agentchat.headers).toEqual(hostedMcpServerEntry().headers)
+    const twoVersions = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { ...hostedMcpServerEntry().headers, 'x-agentchat-client-version': '0.9.0' } } } } }
+    expect(describeMcpIdentity(twoVersions)).toBe('outdated')
+  })
+
   it('a bearer template the operator spelled differently is kept as written', () => {
     const custom = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { authorization: 'Bearer  ${AGENTCHAT_API_KEY}' } } } } }
     const updated = withHostedMcpEntry(custom)
     expect(updated.outcome).toBe('updated')
-    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ Authorization: 'Bearer  ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION })
+    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ authorization: 'Bearer  ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION })
   })
 
   it('an entry of ours without an Authorization header gets the client headers and no bearer it did not have', () => {
@@ -176,16 +202,20 @@ describe('hosted MCP entry', () => {
   })
 
   describe('refreshHostedMcpEntry — the gateway start', () => {
-    function mutator(file: object, fail?: Error) {
+    /** OpenClaw's mutateConfigFile as it behaves: the callback edits a draft, and whatever it leaves is committed unless it throws. */
+    function mutator(file: object, options: { fail?: Error; substitute?: (draft: object) => object } = {}) {
       const calls: Array<{ afterWrite: unknown }> = []
+      const writes: object[] = []
       return {
         calls,
+        writes,
         config: {
           mutateConfigFile: async (params: { afterWrite: unknown; mutate: (draft: never) => unknown }) => {
             calls.push({ afterWrite: params.afterWrite })
-            if (fail) throw fail
-            const draft = structuredClone(file)
+            if (options.fail) throw options.fail
+            const draft = options.substitute ? options.substitute(structuredClone(file)) : structuredClone(file)
             await params.mutate(draft as never)
+            writes.push(draft)
             Object.assign(file, draft)
             return { result: undefined }
           },
@@ -204,14 +234,27 @@ describe('hosted MCP entry', () => {
       expect(calls).toHaveLength(1)
     })
 
-    it('reads the substituted live config with the key, and writes the template into the file', async () => {
+    it('a file already current (another process got there first) aborts the write instead of rewriting it', async () => {
+      const file = { mcp: { servers: { agentchat: hostedMcpServerEntry() } } }
+      const { calls, writes, config } = mutator(file)
+      expect(await refreshHostedMcpEntry({ liveCfg: { mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, config })).toEqual({ outcome: 'current' })
+      expect(calls).toHaveLength(1)
+      expect(writes).toHaveLength(0)
+    })
+
+    it('works on a substituted draft (the key, not the template) when given the key, and leaves the bearer as it is', async () => {
       const key = testKey('s'.repeat(24))
-      const file = { mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }
       const live = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { Authorization: `Bearer ${key}` } } } } }
-      const { config } = mutator(file)
+      const substitute = (draft: object) => JSON.parse(JSON.stringify(draft).split('${AGENTCHAT_API_KEY}').join(key)) as object
+      const file = { mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }
+      const { writes, config } = mutator(file, { substitute })
       expect(await refreshHostedMcpEntry({ liveCfg: live, config, apiKey: key })).toEqual({ outcome: 'updated' })
-      expect(JSON.stringify(file)).not.toContain(key)
-      expect(file.mcp.servers.agentchat.headers.Authorization).toBe('Bearer ${AGENTCHAT_API_KEY}')
+      // the bearer path is unchanged, value for value — what OpenClaw needs to put the file's ${AGENTCHAT_API_KEY} back
+      expect((writes[0] as typeof live).mcp.servers.agentchat.headers.Authorization).toBe(`Bearer ${key}`)
+      // without the key, a substituted bearer is not recognisably ours: nothing is written
+      const again = mutator({ mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, { substitute })
+      expect(await refreshHostedMcpEntry({ liveCfg: { mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, config: again.config })).toEqual({ outcome: 'not_ours' })
+      expect(again.writes).toHaveLength(0)
     })
 
     it('writes nothing for a missing, hand-written or disabled entry', async () => {
@@ -224,9 +267,10 @@ describe('hosted MCP entry', () => {
 
     it('leaves an entry the operator took over since the live read alone', async () => {
       const file = { mcp: { servers: { agentchat: { url: 'https://proxy/mcp', transport: 'streamable-http' } } } }
-      const { calls, config } = mutator(file)
+      const { calls, writes, config } = mutator(file)
       expect(await refreshHostedMcpEntry({ liveCfg: { mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, config })).toEqual({ outcome: 'not_ours' })
       expect(calls).toHaveLength(1)
+      expect(writes).toHaveLength(0)
       expect(file.mcp.servers.agentchat).toEqual({ url: 'https://proxy/mcp', transport: 'streamable-http' })
     })
 
@@ -234,8 +278,11 @@ describe('hosted MCP entry', () => {
       const liveCfg = { mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }
       expect(await refreshHostedMcpEntry({ liveCfg, config: undefined })).toEqual({ outcome: 'unsupported' })
       expect(await refreshHostedMcpEntry({ liveCfg, config: {} })).toEqual({ outcome: 'unsupported' })
-      const { config } = mutator(structuredClone(liveCfg), new Error('config is read-only (Nix mode)'))
-      expect(await refreshHostedMcpEntry({ liveCfg, config })).toEqual({ outcome: 'failed', error: 'config is read-only (Nix mode)' })
+      const { config } = mutator(structuredClone(liveCfg), { fail: new Error('disk full') })
+      expect(await refreshHostedMcpEntry({ liveCfg, config })).toEqual({ outcome: 'failed', error: 'disk full' })
+      const nix = Object.assign(new Error('config is immutable in Nix mode'), { code: 'OPENCLAW_NIX_MODE_CONFIG_IMMUTABLE' })
+      const readOnly = mutator(structuredClone(liveCfg), { fail: nix })
+      expect(await refreshHostedMcpEntry({ liveCfg, config: readOnly.config })).toEqual({ outcome: 'failed', error: 'config is immutable in Nix mode', code: 'OPENCLAW_NIX_MODE_CONFIG_IMMUTABLE' })
     })
   })
 

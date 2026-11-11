@@ -154,7 +154,10 @@ function pointsAtUs(entry: Record<string, unknown>, apiBase: string, apiKey: str
   const headers = entry.headers
   if (headers === undefined) return true
   if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return false
-  const auth = (headers as Record<string, unknown>).Authorization ?? (headers as Record<string, unknown>).authorization
+  // Any casing; two spellings of the header are not something this plugin wrote.
+  const auths = headerValues(headers as Record<string, unknown>, 'Authorization')
+  if (auths.length > 1) return false
+  const auth = auths[0]
   if (auth === undefined) return true
   if (typeof auth !== 'string') return false
   if (auth === AUTH_HEADER_TEMPLATE || auth.includes(`\${${API_KEY_ENV}}`)) return true
@@ -176,10 +179,14 @@ export function describeMcpIdentity(cfg: unknown): McpIdentityState {
   const headers = entry && isRecord(entry.headers) ? entry.headers : undefined
   if (!headers) return 'missing'
   const want = clientIdentityHeaders()
-  const client = headerValue(headers, CLIENT_HEADER)
-  if (typeof client !== 'string' || client.trim().toLowerCase() !== want[CLIENT_HEADER]) return 'missing'
-  const version = headerValue(headers, CLIENT_VERSION_HEADER)
-  return typeof version === 'string' && version.trim() === want[CLIENT_VERSION_HEADER] ? 'current' : 'outdated'
+  // Two spellings of one header reach the server joined ("openclaw, openclaw"),
+  // which names no client it knows: as good as none.
+  const clients = headerValues(headers, CLIENT_HEADER)
+  const client = clients[0]
+  if (clients.length !== 1 || typeof client !== 'string' || client.trim().toLowerCase() !== want[CLIENT_HEADER]) return 'missing'
+  const versions = headerValues(headers, CLIENT_VERSION_HEADER)
+  const version = versions[0]
+  return versions.length === 1 && typeof version === 'string' && version.trim() === want[CLIENT_VERSION_HEADER] ? 'current' : 'outdated'
 }
 
 export type McpEntryOutcome = 'added' | 'updated' | 'present' | 'user_managed' | 'disabled'
@@ -210,35 +217,36 @@ export function withHostedMcpEntry<T extends object>(
   return { cfg: { ...base, mcp } as T, outcome: state === 'ours' ? 'updated' : 'added' }
 }
 
-/** Header names this plugin owns in its entry (lower case). */
-const OWN_HEADERS = new Set(['authorization', CLIENT_HEADER.toLowerCase(), CLIENT_VERSION_HEADER.toLowerCase()])
+/** The identity header names (lower case), replaced in every spelling on an upgrade. */
+const IDENTITY_HEADERS = new Set([CLIENT_HEADER.toLowerCase(), CLIENT_VERSION_HEADER.toLowerCase()])
 
 /**
- * Our entry, brought up to date: the identity headers for this release, the
- * bearer kept as the template it is (`${AGENTCHAT_API_KEY}`) — or put back
- * as `AUTH_HEADER_TEMPLATE` when a substituted config carries the key
- * itself, so the key is never written; an entry with no Authorization keeps
- * none — and everything else the operator added (timeouts, `toolFilter`,
- * other headers) as it was.
+ * Our entry, brought up to date: the identity headers for this release, in
+ * one spelling each, and everything else exactly as it was — the bearer
+ * included (same header name, same value), timeouts, `toolFilter`, other
+ * headers. The bearer is never rewritten: the config OpenClaw hands a plugin
+ * (and the draft `mutateConfigFile` gives it) is env-substituted, so the
+ * value seen may be the key itself; written back unchanged, OpenClaw
+ * restores the `${VAR}` reference the file had at that path, and an operator
+ * who chose another variable, or a literal, keeps it.
  */
 export function upgradedHostedMcpEntry(entry: Readonly<Record<string, unknown>>, apiBase: string = DEFAULT_API_BASE): Record<string, unknown> {
   const headers = isRecord(entry.headers) ? entry.headers : {}
-  const kept = Object.fromEntries(Object.entries(headers).filter(([name]) => !OWN_HEADERS.has(name.toLowerCase())))
-  const auth = headerValue(headers, 'Authorization')
-  const bearer = auth === undefined ? {} : { Authorization: typeof auth === 'string' && auth.includes(`\${${API_KEY_ENV}}`) ? auth : AUTH_HEADER_TEMPLATE }
+  const kept = Object.fromEntries(Object.entries(headers).filter(([name]) => !IDENTITY_HEADERS.has(name.toLowerCase())))
   return {
     ...entry,
     url: hostedMcpUrl(apiBase),
     transport: 'streamable-http',
-    headers: { ...kept, ...bearer, ...clientIdentityHeaders() },
+    headers: { ...kept, ...clientIdentityHeaders() },
   }
 }
 
 /**
  * In-place form of the upgrade, for OpenClaw's `mutateConfigFile` draft:
  * true when our entry was out of date and is now current. Classifies the
- * draft itself (the config file as it is now), so an entry the operator
- * took over in the meantime is left alone. Never adds a missing entry.
+ * draft itself (the file as it is now, env-substituted like any config a
+ * plugin sees — hence `apiKey`), so an entry the operator took over in the
+ * meantime is left alone. Never adds a missing entry.
  */
 export function upgradeHostedMcpEntryInPlace(draft: unknown, apiBase: string = DEFAULT_API_BASE, apiKey?: string): boolean {
   if (describeMcpEntry(draft, apiBase, apiKey) !== 'ours' || describeMcpIdentity(draft) === 'current') return false
@@ -256,21 +264,34 @@ export interface ConfigMutator {
 
 export type McpRefreshOutcome = 'updated' | 'current' | 'not_ours' | 'unsupported' | 'failed'
 
+/** Thrown from the mutate callback to abort a write that would change nothing. */
+class NoChange extends Error {
+  constructor(readonly outcome: 'current' | 'not_ours') {
+    super(`no change (${outcome})`)
+  }
+}
+
+/** OpenClaw's error for a config it may not write (Nix mode). */
+export const NIX_MODE_ERROR_CODE = 'OPENCLAW_NIX_MODE_CONFIG_IMMUTABLE'
+
 /**
  * At the gateway's start: bring our `mcp.servers.agentchat` up to date when
  * the live config shows it out of date (an install from an earlier release,
  * or a version change). One focused write through OpenClaw's
- * `runtime.config.mutateConfigFile` on the config file as it is (templates
- * intact), with `afterWrite: auto` — OpenClaw applies an `mcp.*` change hot.
- * Nothing is written when the entry is current, missing (setup and
- * `doctor --fix` add it), disabled or hand-written. Never throws.
+ * `runtime.config.mutateConfigFile` (its draft is the file as it is now,
+ * env-substituted; OpenClaw restores `${VAR}` references on the paths left
+ * unchanged), with `afterWrite: auto` — under the default reload mode
+ * OpenClaw applies an `mcp.*` change hot. Nothing is written when the entry
+ * is current, missing (setup and `doctor --fix` add it), disabled or
+ * hand-written; `mutateConfigFile` commits whatever the callback leaves, so
+ * a draft that needs no change aborts the write. Never throws.
  */
 export async function refreshHostedMcpEntry(params: {
   liveCfg: unknown
   config: ConfigMutator | undefined
   apiBase?: string
   apiKey?: string
-}): Promise<{ outcome: McpRefreshOutcome; error?: string }> {
+}): Promise<{ outcome: McpRefreshOutcome; error?: string; code?: string }> {
   const apiBase = params.apiBase ?? DEFAULT_API_BASE
   if (describeMcpEntry(params.liveCfg, apiBase, params.apiKey) !== 'ours') return { outcome: 'not_ours' }
   if (describeMcpIdentity(params.liveCfg) === 'current') return { outcome: 'current' }
@@ -279,17 +300,22 @@ export async function refreshHostedMcpEntry(params: {
   try {
     // The file can differ from the live read (an edit in between): the draft
     // is classified again, and an entry that is no longer ours is left alone.
-    let outcome: McpRefreshOutcome = 'current'
     await mutate.call(params.config, {
       afterWrite: { mode: 'auto' },
       mutate: ((draft: unknown) => {
-        if (describeMcpEntry(draft, apiBase, params.apiKey) !== 'ours') outcome = 'not_ours'
-        else if (upgradeHostedMcpEntryInPlace(draft, apiBase, params.apiKey)) outcome = 'updated'
+        if (describeMcpEntry(draft, apiBase, params.apiKey) !== 'ours') throw new NoChange('not_ours')
+        if (!upgradeHostedMcpEntryInPlace(draft, apiBase, params.apiKey)) throw new NoChange('current')
       }) as (draft: never) => unknown,
     })
-    return { outcome }
+    return { outcome: 'updated' }
   } catch (err) {
-    return { outcome: 'failed', error: err instanceof Error ? err.message : String(err) }
+    if (err instanceof NoChange) return { outcome: err.outcome }
+    const code = (err as { code?: unknown } | null)?.code
+    return {
+      outcome: 'failed',
+      error: err instanceof Error ? err.message : String(err),
+      ...(typeof code === 'string' ? { code } : {}),
+    }
   }
 }
 
@@ -304,10 +330,12 @@ function agentchatEntry(cfg: unknown): Record<string, unknown> | undefined {
   return isRecord(entry) ? entry : undefined
 }
 
-function headerValue(headers: Readonly<Record<string, unknown>>, name: string): unknown {
+/** Every value of a header, in any spelling of its name (HTTP names ignore case). */
+function headerValues(headers: Readonly<Record<string, unknown>>, name: string): unknown[] {
   const wanted = name.toLowerCase()
-  for (const [key, value] of Object.entries(headers)) if (key.toLowerCase() === wanted) return value
-  return undefined
+  return Object.entries(headers)
+    .filter(([key]) => key.toLowerCase() === wanted)
+    .map(([, value]) => value)
 }
 
 /** Return a config without the entry when it is ours; a hand-written entry is left alone. */

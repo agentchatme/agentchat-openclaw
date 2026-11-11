@@ -63,9 +63,14 @@ shadowed by a stale in-process value.
 
 The key is also placed on disk, once, by the wizard: `AGENTCHAT_API_KEY=…`
 in OpenClaw's state-dir `.env` (`~/.openclaw/.env`, mode `0600`), which
-OpenClaw reads at start as its global environment fallback. That file is
-the one place the plugin writes a secret; the writer lives in
-`src/integration/placement.ts` and performs only local filesystem I/O. The
+OpenClaw reads at start as its global environment fallback; the writer
+lives in `src/integration/placement.ts` and performs only local filesystem
+I/O. The key is also the account's `channels.agentchat.apiKey`, which the
+wizard and `openclaw channels add agentchat --token …` hand to OpenClaw and
+OpenClaw persists in `openclaw.json` (OpenClaw's own config write, not the
+plugin's). The hosted-tools entry the plugin writes in
+`mcp.servers.agentchat` holds the `${AGENTCHAT_API_KEY}` reference, never
+the key, and updating it never rewrites the bearer. The
 plugin's other files on disk, under `<state dir>/agentchat/<accountId>/`,
 hold no secret: the served-texts cache (`texts.json`), and the turns in
 flight (`turns.json`, mode `0600`: run ids, session keys, conversation or

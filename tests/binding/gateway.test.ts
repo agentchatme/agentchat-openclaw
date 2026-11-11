@@ -37,7 +37,8 @@ vi.mock('../../src/binding/sdk-client.js', async () => {
   return { getClient: () => client, createSdkClient: () => client }
 })
 
-import { agentchatGatewayAdapter, statusStateFor, updateHostedMcpEntry, waitUntilAbort } from '../../src/binding/gateway.js'
+import { agentchatGatewayAdapter, resetHostedMcpUpdateWarningsForTest, statusStateFor, updateHostedMcpEntry, waitUntilAbort } from '../../src/binding/gateway.js'
+import { resetPluginRuntimeForTest, setPluginRuntime } from '../../src/integration/runtime-holder.js'
 import { hostedMcpServerEntry } from '../../src/integration/mcp.js'
 import { registerIntegration } from '../../src/binding/runtime-registry.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
@@ -401,26 +402,27 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
 describe('gateway start — the hosted-tools entry names this client', () => {
   const OLD_ENTRY = { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}' } }
 
-  function harness(file: { mcp?: unknown }, options: { mutate?: boolean; fail?: string } = {}) {
-    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
+  beforeEach(() => resetHostedMcpUpdateWarningsForTest())
+  afterEach(() => resetPluginRuntimeForTest())
+
+  /** A runtime whose mutateConfigFile behaves as OpenClaw's: the callback's draft is committed unless it throws. */
+  function fakeRuntime(file: { mcp?: unknown }, options: { mutate?: boolean; fail?: Error } = {}) {
     const writes: unknown[] = []
-    const runtime = {
-      config: {
-        current: () => structuredClone(file),
-        ...(options.mutate === false
-          ? {}
-          : {
-              mutateConfigFile: async (params: { afterWrite: unknown; mutate: (draft: never) => unknown }) => {
-                if (options.fail) throw new Error(options.fail)
-                const draft = structuredClone(file)
-                await params.mutate(draft as never)
-                Object.assign(file, draft)
-                writes.push(params.afterWrite)
-                return { result: undefined }
-              },
-            }),
-      },
-    }
+    const mutateConfigFile = vi.fn(async (params: { afterWrite: unknown; mutate: (draft: never) => unknown }) => {
+      if (options.fail) throw options.fail
+      const draft = structuredClone(file)
+      await params.mutate(draft as never)
+      Object.assign(file, draft)
+      writes.push(params.afterWrite)
+      return { result: undefined }
+    })
+    const runtime = { config: { current: () => structuredClone(file), ...(options.mutate === false ? {} : { mutateConfigFile }) } }
+    return { runtime, writes, mutateConfigFile }
+  }
+
+  function harness(file: { mcp?: unknown }, options: { mutate?: boolean; fail?: Error } = {}) {
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
+    const { runtime, writes } = fakeRuntime(file, options)
     return { log, writes, run: () => updateHostedMcpEntry({ accountId: 'default', cfg: {} as never, log: log as never }, 'https://api.agentchat.me', KEY, () => runtime as never) }
   }
 
@@ -430,7 +432,7 @@ describe('gateway start — the hosted-tools entry names this client', () => {
     await h.run()
     expect(h.writes).toEqual([{ mode: 'auto' }])
     expect(file.mcp.servers.agentchat).toEqual(hostedMcpServerEntry())
-    expect(String(h.log.info.mock.calls[0]![0])).toMatch(/^\[agentchat:default\] mcp\.servers\.agentchat now names this client to the hosted tools \(X-AgentChat-Client: openclaw, X-AgentChat-Client-Version: .+\); OpenClaw applies the change without a restart$/)
+    expect(String(h.log.info.mock.calls[0]![0])).toMatch(/^\[agentchat:default\] mcp\.servers\.agentchat now names this client to the hosted tools \(X-AgentChat-Client: openclaw, X-AgentChat-Client-Version: .+\); under the default reload mode OpenClaw applies it without a restart$/)
     await h.run()
     expect(h.writes).toHaveLength(1)
   })
@@ -445,12 +447,35 @@ describe('gateway start — the hosted-tools entry names this client', () => {
     }
   })
 
-  it('a runtime that cannot write, or a failed write, is one warning naming doctor --fix — never a failed start', async () => {
+  it('a runtime that cannot write is one warning naming doctor --fix — never a failed start, and not repeated on the next start', async () => {
     const readOnly = harness({ mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, { mutate: false })
     await expect(readOnly.run()).resolves.toBeUndefined()
     expect(String(readOnly.log.warn.mock.calls[0]![0])).toMatch(/does not name this client \(X-AgentChat-Client: openclaw, .+\) and this OpenClaw cannot update its config from a plugin — run `openclaw doctor --fix`/)
-    const failing = harness({ mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, { fail: 'config is read-only' })
+    await readOnly.run()
+    expect(readOnly.log.warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('a failed write is one warning with the reason; in Nix mode it says to add the headers in the Nix-managed config', async () => {
+    const failing = harness({ mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, { fail: new Error('config is locked') })
     await expect(failing.run()).resolves.toBeUndefined()
-    expect(String(failing.log.warn.mock.calls[0]![0])).toMatch(/could not be updated to name this client \(config is read-only\) — run `openclaw doctor --fix`/)
+    expect(String(failing.log.warn.mock.calls[0]![0])).toMatch(/could not be updated to name this client \(config is locked\) — run `openclaw doctor --fix`/)
+    resetHostedMcpUpdateWarningsForTest()
+    const nix = harness({ mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, { fail: Object.assign(new Error('immutable'), { code: 'OPENCLAW_NIX_MODE_CONFIG_IMMUTABLE' }) })
+    await nix.run()
+    const line = String(nix.log.warn.mock.calls[0]![0])
+    expect(line).toMatch(/read-only here \(Nix mode\) — add X-AgentChat-Client: openclaw and X-AgentChat-Client-Version: .+ to its headers in the Nix-managed config/)
+    expect(line).not.toContain('doctor --fix')
+  })
+
+  it('startAccount runs it: the live config of the plugin runtime shows an old entry, and the start writes the update', async () => {
+    process.env.AGENTCHAT_WAKE = 'off'
+    const file = { mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }
+    const { runtime, mutateConfigFile } = fakeRuntime(file)
+    setPluginRuntime(runtime as never)
+    const { ctx, log } = ctxFor({ channels: { agentchat: { apiKey: KEY } } })
+    await agentchatGatewayAdapter.startAccount!(ctx as never)
+    await vi.waitFor(() => expect(mutateConfigFile).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(log.info.mock.calls.some((c) => String(c[0]).includes('now names this client'))).toBe(true))
+    expect(file.mcp.servers.agentchat).toEqual(hostedMcpServerEntry())
   })
 })
