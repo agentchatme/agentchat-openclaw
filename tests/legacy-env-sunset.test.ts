@@ -8,10 +8,12 @@
  *     closed and the server re-wakes); already ignored, with a warning.
  *
  * Until that date the readers must stay (the contract promises them). From
- * that date this file fails while `src/` or the user-facing docs still name
- * either variable: delete the readers in `src/credentials/read-env.ts`,
+ * that date this file fails while `src/`, the manifest, package.json or the
+ * user-facing docs still name either variable: delete the readers in `src/credentials/read-env.ts`,
  * their callers, the docs lines and the tests that set them, in the release
  * that drops them. The date is UTC midnight, as the contract's dates are.
+ * The contract marks these dates as proposed; if the date moves there, move
+ * it here and in README and RUNBOOK.
  */
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
@@ -30,8 +32,13 @@ const SUNSETS: readonly Sunset[] = [
 ]
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-/** Where the current behaviour lives. CHANGELOG.md is history and keeps the names. */
-const DOCS = ['README.md', 'RUNBOOK.md', 'SECURITY.md']
+/**
+ * Where the current behaviour lives besides `src/`: the manifest and package.json
+ * OpenClaw reads (setup env vars, config hints), and the docs that ship.
+ * CHANGELOG.md is history and keeps the names; the tests break by themselves
+ * once the exports go.
+ */
+const FILES = ['openclaw.plugin.json', 'package.json', 'README.md', 'RUNBOOK.md', 'SECURITY.md']
 
 function removalAt(sunset: Sunset): number {
   const at = Date.parse(`${sunset.removal}T00:00:00Z`)
@@ -47,7 +54,7 @@ function filesUnder(dir: string): string[] {
 }
 
 function readSources(): Map<string, string> {
-  const files = [...filesUnder(join(root, 'src')), ...DOCS.map((doc) => join(root, doc))]
+  const files = [...filesUnder(join(root, 'src')), ...FILES.map((file) => join(root, file))]
   return new Map(files.map((file) => [relative(root, file), readFileSync(file, 'utf8')]))
 }
 

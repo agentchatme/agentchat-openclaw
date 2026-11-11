@@ -7,14 +7,17 @@ name: OpenClaw latest
 # openclaw.compat.pluginApi). That floor stays. But users install the plugin
 # into whatever OpenClaw they run, most often the newest, and ci.yml never
 # sees it. This workflow swaps the dev dependency for the release npm tags
-# `latest` (or a dist-tag or exact version given by hand) and runs the same
-# type-check, tests and build on a Node line that release supports: OpenClaw
+# `latest` (or a dist-tag or exact version given by hand) and runs the tests,
+# the type-check and the build on a Node line that release supports: OpenClaw
 # 2026.9.3 and later declare Node 24 or 26, and 2026.11.3 refuses to start on
 # Node 22.
 #
 # It runs daily as well as on changes, because upstream ships without a
-# commit here: a red scheduled run means a new OpenClaw release broke the
-# plugin's types or tests, before a user finds out.
+# commit here. A red scheduled run means a new OpenClaw release broke the
+# plugin's tests, types or build, or that something dated in the suite came
+# due (from 2027-02-01, the test for the old setting names; ci.yml goes red
+# with it). GitHub turns scheduled workflows off after 60 days without
+# activity in a public repository; the Actions tab then shows it disabled.
 
 on:
   pull_request:
@@ -31,8 +34,10 @@ on:
         required: true
         default: latest
 
+# One group per ref and OpenClaw spec: a manual run for `beta` neither cancels
+# nor waits behind the daily `latest` run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.openclaw || 'latest' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -42,6 +47,7 @@ jobs:
   openclaw-latest:
     name: openclaw@${{ inputs.openclaw || 'latest' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -62,16 +68,27 @@ jobs:
           SPEC: ${{ inputs.openclaw || 'latest' }}
         run: |
           set -euo pipefail
+          # The raw input is never echoed: it could carry a workflow command.
           if [[ ! "${SPEC}" =~ ^[A-Za-z0-9][A-Za-z0-9.+-]*$ ]]; then
-            echo "::error::not a dist-tag or version: ${SPEC}"
+            echo "::error::the openclaw input is not a dist-tag or version"
             exit 1
           fi
-          VERSION="$(npm view "openclaw@${SPEC}" version)"
+          # A registry hiccup is not a red run: three tries, 10 s apart.
+          view() {
+            local out
+            for attempt in 1 2 3; do
+              if out="$(npm view "$@")"; then printf '%s' "${out}"; return 0; fi
+              echo "npm view $* failed (attempt ${attempt})" >&2
+              sleep 10
+            done
+            return 1
+          }
+          VERSION="$(view "openclaw@${SPEC}" version)"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "::error::openclaw@${SPEC} did not resolve to one version: ${VERSION}"
+            echo "::error::openclaw@${SPEC} did not resolve to one version"
             exit 1
           fi
-          ENGINES="$(npm view "openclaw@${VERSION}" engines.node)"
+          ENGINES="$(view "openclaw@${VERSION}" engines.node)"
           NODE="$(node --version)"
           echo "OpenClaw ${VERSION} (openclaw@${SPEC}; engines.node: ${ENGINES}) on Node ${NODE}" | tee -a "${GITHUB_STEP_SUMMARY}"
           # Pinned: a range check, not a new dependency of the plugin.
@@ -82,51 +99,65 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
 
       # `pnpm add` rewrites package.json and the lockfile on the runner only;
-      # nothing is committed. The plugin's `prepare` builds it as usual.
+      # nothing is committed. `--ignore-scripts`: the plugin's own `prepare`
+      # must not build here (the Build step does, after the zod step below).
       - name: Install, with that release as the dev dependency
         env:
           VERSION: ${{ steps.openclaw.outputs.version }}
         run: |
           set -euo pipefail
-          pnpm add --save-dev "openclaw@${VERSION}"
+          pnpm add --ignore-scripts --save-dev "openclaw@${VERSION}"
           INSTALLED="$(node -p "require('./node_modules/openclaw/package.json').version")"
           if [[ "${INSTALLED}" != "${VERSION}" ]]; then
             echo "::error::installed openclaw ${INSTALLED}, expected ${VERSION}"
             exit 1
           fi
 
-      # One zod in the tree, OpenClaw's. The plugin builds its config schema
-      # with its own zod and hands it to OpenClaw's buildChannelConfigSchema,
-      # whose parameter is typed with OpenClaw's zod. Two zod copies, even one
-      # patch apart (the lockfile's 4.6.6 next to the exact 4.6.7 that
-      # OpenClaw 2026.9.37 and 2026.11.5-beta.1 pin), are not assignable to
-      # each other, so tsc and the d.ts build fail on zod's own types rather
-      # than on OpenClaw's API. At run time a user's install always has two
-      # copies, and that works: OpenClaw reads the schema through `_zod`
-      # (its toJSONSchema) and calls the schema's own `safeParse` (the test
-      # suite passed with both copies in place on 2026.11.5-beta.1, including
-      # the generated-schema check against openclaw.plugin.json).
+      # The tests first, in the tree as a user's install has it: the plugin's
+      # zod and OpenClaw's, two copies when their versions differ. The plugin
+      # builds its config schema with its own zod and OpenClaw reads it with
+      # its own (toJSONSchema through `_zod`, then the schema's `safeParse`);
+      # the generated-schema test checks the result against
+      # openclaw.plugin.json.
+      - name: Test (the plugin's zod next to OpenClaw's)
+        run: pnpm run test
+
+      # Then one zod in the tree, OpenClaw's, for the type-check and the
+      # d.ts build. buildChannelConfigSchema's parameter is typed with
+      # OpenClaw's zod, and two zod copies, even one patch apart (the
+      # lockfile's 4.6.6 next to the exact 4.6.7 that OpenClaw 2026.9.37 and
+      # 2026.11.5-beta.1 pin), are not assignable to each other: tsc fails on
+      # zod's own types, not on OpenClaw's API. Aligned only within the zod
+      # range the plugin publishes; outside it the plugin's install would not
+      # share a major with OpenClaw, which needs a decision, not a green run.
       - name: Use OpenClaw's zod in this tree
         run: |
           set -euo pipefail
-          read -r OPENCLAW_ZOD PLUGIN_ZOD < <(node -e '
+          VERSIONS="$(node -e '
             const { createRequire } = require("node:module");
             const { realpathSync } = require("node:fs");
             const version = (from) => { try { return createRequire(from)("zod/package.json").version } catch { return "-" } };
-            console.log(version(realpathSync("node_modules/openclaw") + "/"), version(process.cwd() + "/"));
-          ')
-          echo "zod: OpenClaw ${OPENCLAW_ZOD}, plugin ${PLUGIN_ZOD}"
+            const declared = require("./package.json").dependencies?.zod ?? "-";
+            console.log(version(realpathSync("node_modules/openclaw") + "/"), version(process.cwd() + "/"), declared);
+          ')"
+          read -r OPENCLAW_ZOD PLUGIN_ZOD DECLARED <<< "${VERSIONS}"
+          if [[ -z "${DECLARED:-}" ]]; then
+            echo "::error::could not read the zod versions (got: ${VERSIONS})"
+            exit 1
+          fi
+          echo "zod: OpenClaw ${OPENCLAW_ZOD}, plugin ${PLUGIN_ZOD} (declared ${DECLARED})"
           if [[ "${OPENCLAW_ZOD}" == "-" ]]; then
             echo "::notice::OpenClaw resolves no zod; nothing to align"
           elif [[ "${OPENCLAW_ZOD}" != "${PLUGIN_ZOD}" ]]; then
-            pnpm add "zod@${OPENCLAW_ZOD}"
+            if ! npm exec --yes --package=semver@7.7.3 -- semver -r "${DECLARED}" "${OPENCLAW_ZOD}" > /dev/null; then
+              echo "::error::OpenClaw moved to zod ${OPENCLAW_ZOD}, outside the plugin's zod ${DECLARED}; the config-schema hand-off needs a decision"
+              exit 1
+            fi
+            pnpm add --ignore-scripts "zod@${OPENCLAW_ZOD}"
           fi
 
       - name: Type-check
         run: pnpm run type-check
-
-      - name: Test
-        run: pnpm run test
 
       - name: Build
         run: pnpm run build

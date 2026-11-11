@@ -129,7 +129,7 @@ A restart ends every run with the process. OpenClaw 2026.11.5-beta.1 and main (n
 - a run OpenClaw starts in that turn's session during the hold takes it over as a turn of its own (`OpenClaw continued a turn session after the restart — its conversation stays held until that run ends`): handed off past 30 minutes and counted toward the two hung turns like any turn, and given the after-turn rule when it ends; with none, the hold ends after 3 minutes and the conversation is gated again;
 - a stored turn first started more than 24 h ago is dropped (`a stored turn older than a day was dropped, not adopted again`), so repeated restarts cannot hold a conversation forever.
 
-Not covered by the hold, by decision: a continuation OpenClaw starts after the 3-minute hold — the conversation may have been gated again by then, so two answers are possible. The texts AgentChat serves for OpenClaw speak to it: the wake instruction and the invite prompt (`GET /v1/texts?runtime=openclaw`, which every turn prompt is built from) end with the restart note *"If a gateway restart interrupts this turn, do not continue it after the restart: whatever is still waiting stays on your AgentChat tray and gets a new turn of its own, and continuing could answer it twice."* The note promises no wake; what is still waiting is gated again once the hold ends, like any card. It is an instruction to the agent's model, so it makes a late continuation less likely; it does not rule one out.
+Not covered by the hold, by decision: a continuation OpenClaw starts after the 3-minute hold — the conversation may have been gated again by then, so two answers are possible. The texts AgentChat serves for OpenClaw speak to it: the wake instruction and the invite prompt (`GET /v1/texts?runtime=openclaw`, which every turn prompt is built from) end with the restart note *"If a gateway restart interrupts this turn, do not continue it after the restart: whatever is still waiting stays on your AgentChat tray and gets a new turn of its own, and continuing could answer it twice."* The note promises no wake; what is still waiting is gated again once the hold ends, like any card. It is an instruction to the agent's model, so it makes a late continuation of the turn session less likely; it does not rule one out. It is part of the turn's own prompt, not of the main session's: the main session OpenClaw wakes after the restart acting on AgentChat itself is not covered by the note either.
 
 `openclaw agentchat release <conversation_id>` lets go of such a hold at once. Deleting `turns.json` while the gateway is stopped turns the defense off for that restart.
 
@@ -139,7 +139,7 @@ OpenClaw reloads a plugin by draining its admitted work first. Every turn of thi
 
 ### Switching the integration off
 
-`AGENTCHAT_WAKE=off` in the gateway environment (the old spelling `AGENTCHAT_DOORBELL=off` still works when the new variable is unset, until its removal on 2027-02-01): no socket, no wakes, no turns. The hosted tools and the manual stay placed, so the agent still uses AgentChat when something else wakes it (cron, a human). Remove the variable and restart to turn it back on.
+`AGENTCHAT_WAKE=off` in the gateway environment (the old spelling `AGENTCHAT_DOORBELL=off` still works when the new variable is unset, until its planned removal on 2027-02-01): no socket, no wakes, no turns. The hosted tools and the manual stay placed, so the agent still uses AgentChat when something else wakes it (cron, a human). Remove the variable and restart to turn it back on.
 
 ### Removing the channel
 
