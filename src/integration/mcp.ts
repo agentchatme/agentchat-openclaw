@@ -30,12 +30,30 @@
  * - Tools reach the model as `<server>__<tool>` (see `./turn.ts`), and a
  *   server's `instructions` are injected into the system prompt, capped at
  *   2,000 characters per server.
+ * - `headers` takes any static string header (`McpServerSchema` in
+ *   openclaw/openclaw `src/config/zod-schema.mcp-server.ts`, a record of
+ *   string to string | number | boolean, on 2026.6.10 and 2026.11.3 alike),
+ *   and an `mcp.*` change is applied hot: the gateway drops its MCP clients
+ *   and reconnects, no restart (`src/gateway/config-reload-plan.ts`, rule
+ *   `mcp` → dispose MCP runtimes).
+ *
+ * The entry names this client to the hosted tools: `X-AgentChat-Client:
+ * openclaw` and `X-AgentChat-Client-Version: <this package's version>`,
+ * the headers AgentChat reads on `/mcp` (it does not read MCP's
+ * `clientInfo`). Without them the agent is an unknown client: AgentChat
+ * lists the wake-webhook tools and tells it to register a webhook, a second
+ * wake path next to this plugin's socket. An entry an earlier release wrote
+ * (bearer only) is still ours and is brought up to date in place — at the
+ * gateway's start, by setup and by `openclaw doctor --fix`; a hand-written
+ * or disabled entry is never touched, and doctor and status say when a
+ * hand-written one does not name the client.
  */
 
 import { integration } from 'agentchatme'
 
-import { AGENTCHAT_CLIENT_IDENTITY } from '../client-identity.js'
+import { AGENTCHAT_CLIENT_IDENTITY, AGENTCHAT_CLIENT_NAME } from '../client-identity.js'
 import { API_KEY_ENV } from '../credentials/read-env.js'
+import { PACKAGE_VERSION } from '../version.js'
 import { MCP_SERVER_NAME } from './turn.js'
 
 export const MCP_PATH = '/mcp'
@@ -46,10 +64,30 @@ export function hostedMcpUrl(apiBase: string = DEFAULT_API_BASE): string {
   return `${apiBase.replace(/\/+$/, '')}${MCP_PATH}`
 }
 
+/** The header that names the calling client to AgentChat (the server reads it case-insensitively). */
+export const CLIENT_HEADER = 'X-AgentChat-Client'
+/** The header that carries that client's version: this package's (`src/version.ts`). */
+export const CLIENT_VERSION_HEADER = 'X-AgentChat-Client-Version'
+
 export interface McpServerEntry {
   readonly url: string
   readonly transport: 'streamable-http'
-  readonly headers: { readonly Authorization: string }
+  readonly headers: {
+    readonly Authorization: string
+    readonly [CLIENT_HEADER]: string
+    readonly [CLIENT_VERSION_HEADER]: string
+  }
+}
+
+/** The identity headers this release sends: the client name and this package's version. */
+export function clientIdentityHeaders(): { readonly [CLIENT_HEADER]: string; readonly [CLIENT_VERSION_HEADER]: string } {
+  return { [CLIENT_HEADER]: AGENTCHAT_CLIENT_NAME, [CLIENT_VERSION_HEADER]: PACKAGE_VERSION }
+}
+
+/** `X-AgentChat-Client: openclaw, X-AgentChat-Client-Version: <version>` — for log and status lines. */
+export function clientIdentityText(): string {
+  const identity = clientIdentityHeaders()
+  return `${CLIENT_HEADER}: ${identity[CLIENT_HEADER]}, ${CLIENT_VERSION_HEADER}: ${identity[CLIENT_VERSION_HEADER]}`
 }
 
 /** The `mcp.servers.agentchat` value this plugin places. */
@@ -57,12 +95,13 @@ export function hostedMcpServerEntry(apiBase: string = DEFAULT_API_BASE): McpSer
   return {
     url: hostedMcpUrl(apiBase),
     transport: 'streamable-http',
-    headers: { Authorization: AUTH_HEADER_TEMPLATE },
+    headers: { Authorization: AUTH_HEADER_TEMPLATE, ...clientIdentityHeaders() },
   }
 }
 
 /** The same entry as JSON5, for the README and for operators placing it by hand. */
 export function hostedMcpSnippet(apiBase: string = DEFAULT_API_BASE): string {
+  const identity = clientIdentityHeaders()
   return [
     '{',
     '  mcp: {',
@@ -70,7 +109,11 @@ export function hostedMcpSnippet(apiBase: string = DEFAULT_API_BASE): string {
     `      ${MCP_SERVER_NAME}: {`,
     `        url: "${hostedMcpUrl(apiBase)}",`,
     '        transport: "streamable-http",',
-    `        headers: { Authorization: "${AUTH_HEADER_TEMPLATE}" },`,
+    '        headers: {',
+    `          Authorization: "${AUTH_HEADER_TEMPLATE}",`,
+    `          "${CLIENT_HEADER}": "${identity[CLIENT_HEADER]}",`,
+    `          "${CLIENT_VERSION_HEADER}": "${identity[CLIENT_VERSION_HEADER]}",`,
+    '        },',
     '      },',
     '    },',
     '  },',
@@ -118,13 +161,36 @@ function pointsAtUs(entry: Record<string, unknown>, apiBase: string, apiKey: str
   return apiKey !== undefined && apiKey.length > 0 && auth.trim() === `Bearer ${apiKey}`
 }
 
-export type McpEntryOutcome = 'added' | 'present' | 'user_managed' | 'disabled'
+/**
+ * Whether the `mcp.servers.agentchat` entry names this client:
+ * - `current` — `X-AgentChat-Client: openclaw` and this package's version;
+ * - `outdated` — `openclaw`, but another version (or none);
+ * - `missing` — no `X-AgentChat-Client`, or another client's name (there is
+ *   no entry at all, or it is not an object, is `missing` too).
+ * Header names are matched without regard to case, as HTTP does.
+ */
+export type McpIdentityState = 'current' | 'outdated' | 'missing'
+
+export function describeMcpIdentity(cfg: unknown): McpIdentityState {
+  const entry = agentchatEntry(cfg)
+  const headers = entry && isRecord(entry.headers) ? entry.headers : undefined
+  if (!headers) return 'missing'
+  const want = clientIdentityHeaders()
+  const client = headerValue(headers, CLIENT_HEADER)
+  if (typeof client !== 'string' || client.trim().toLowerCase() !== want[CLIENT_HEADER]) return 'missing'
+  const version = headerValue(headers, CLIENT_VERSION_HEADER)
+  return typeof version === 'string' && version.trim() === want[CLIENT_VERSION_HEADER] ? 'current' : 'outdated'
+}
+
+export type McpEntryOutcome = 'added' | 'updated' | 'present' | 'user_managed' | 'disabled'
 
 /**
- * Return a config with `mcp.servers.agentchat` present. Pure: the caller
- * persists the result through OpenClaw (the wizard returns it; the doctor
- * returns it as a repair). A same-name entry the user wrote themselves
- * always wins and is never modified.
+ * Return a config with `mcp.servers.agentchat` present and naming this
+ * client. Pure: the caller persists the result through OpenClaw (the wizard
+ * returns it; the doctor returns it as a repair). Our entry from an earlier
+ * release is brought up to date in place (`updated`, see
+ * `upgradedHostedMcpEntry`). A same-name entry the user wrote themselves, or
+ * disabled, always wins and is never modified.
  */
 export function withHostedMcpEntry<T extends object>(
   cfg: T | undefined,
@@ -133,14 +199,115 @@ export function withHostedMcpEntry<T extends object>(
 ): { cfg: T; outcome: McpEntryOutcome } {
   const state = describeMcpEntry(cfg, apiBase, apiKey)
   const base = (cfg ?? {}) as T
-  if (state === 'ours') return { cfg: base, outcome: 'present' }
   if (state === 'user_managed') return { cfg: base, outcome: 'user_managed' }
   if (state === 'disabled') return { cfg: base, outcome: 'disabled' }
+  if (state === 'ours' && describeMcpIdentity(base) === 'current') return { cfg: base, outcome: 'present' }
   const mcp = { ...((base as { mcp?: Record<string, unknown> }).mcp ?? {}) }
   const servers = { ...((mcp.servers as Record<string, unknown> | undefined) ?? {}) }
-  servers[MCP_SERVER_NAME] = hostedMcpServerEntry(apiBase)
+  const existing = servers[MCP_SERVER_NAME]
+  servers[MCP_SERVER_NAME] = state === 'ours' && isRecord(existing) ? upgradedHostedMcpEntry(existing, apiBase) : hostedMcpServerEntry(apiBase)
   mcp.servers = servers
-  return { cfg: { ...base, mcp } as T, outcome: 'added' }
+  return { cfg: { ...base, mcp } as T, outcome: state === 'ours' ? 'updated' : 'added' }
+}
+
+/** Header names this plugin owns in its entry (lower case). */
+const OWN_HEADERS = new Set(['authorization', CLIENT_HEADER.toLowerCase(), CLIENT_VERSION_HEADER.toLowerCase()])
+
+/**
+ * Our entry, brought up to date: the identity headers for this release, the
+ * bearer kept as the template it is (`${AGENTCHAT_API_KEY}`) — or put back
+ * as `AUTH_HEADER_TEMPLATE` when a substituted config carries the key
+ * itself, so the key is never written; an entry with no Authorization keeps
+ * none — and everything else the operator added (timeouts, `toolFilter`,
+ * other headers) as it was.
+ */
+export function upgradedHostedMcpEntry(entry: Readonly<Record<string, unknown>>, apiBase: string = DEFAULT_API_BASE): Record<string, unknown> {
+  const headers = isRecord(entry.headers) ? entry.headers : {}
+  const kept = Object.fromEntries(Object.entries(headers).filter(([name]) => !OWN_HEADERS.has(name.toLowerCase())))
+  const auth = headerValue(headers, 'Authorization')
+  const bearer = auth === undefined ? {} : { Authorization: typeof auth === 'string' && auth.includes(`\${${API_KEY_ENV}}`) ? auth : AUTH_HEADER_TEMPLATE }
+  return {
+    ...entry,
+    url: hostedMcpUrl(apiBase),
+    transport: 'streamable-http',
+    headers: { ...kept, ...bearer, ...clientIdentityHeaders() },
+  }
+}
+
+/**
+ * In-place form of the upgrade, for OpenClaw's `mutateConfigFile` draft:
+ * true when our entry was out of date and is now current. Classifies the
+ * draft itself (the config file as it is now), so an entry the operator
+ * took over in the meantime is left alone. Never adds a missing entry.
+ */
+export function upgradeHostedMcpEntryInPlace(draft: unknown, apiBase: string = DEFAULT_API_BASE, apiKey?: string): boolean {
+  if (describeMcpEntry(draft, apiBase, apiKey) !== 'ours' || describeMcpIdentity(draft) === 'current') return false
+  const servers = (draft as { mcp: { servers: Record<string, unknown> } }).mcp.servers
+  const existing = servers[MCP_SERVER_NAME]
+  if (!isRecord(existing)) return false
+  servers[MCP_SERVER_NAME] = upgradedHostedMcpEntry(existing, apiBase)
+  return true
+}
+
+/** What `mutateConfigFile` looks like on `runtime.config` (OpenClaw 2026.6.10 and later). */
+export interface ConfigMutator {
+  mutateConfigFile?: (params: { afterWrite: { mode: 'auto' }; mutate: (draft: never) => unknown }) => Promise<{ result?: unknown } | unknown>
+}
+
+export type McpRefreshOutcome = 'updated' | 'current' | 'not_ours' | 'unsupported' | 'failed'
+
+/**
+ * At the gateway's start: bring our `mcp.servers.agentchat` up to date when
+ * the live config shows it out of date (an install from an earlier release,
+ * or a version change). One focused write through OpenClaw's
+ * `runtime.config.mutateConfigFile` on the config file as it is (templates
+ * intact), with `afterWrite: auto` — OpenClaw applies an `mcp.*` change hot.
+ * Nothing is written when the entry is current, missing (setup and
+ * `doctor --fix` add it), disabled or hand-written. Never throws.
+ */
+export async function refreshHostedMcpEntry(params: {
+  liveCfg: unknown
+  config: ConfigMutator | undefined
+  apiBase?: string
+  apiKey?: string
+}): Promise<{ outcome: McpRefreshOutcome; error?: string }> {
+  const apiBase = params.apiBase ?? DEFAULT_API_BASE
+  if (describeMcpEntry(params.liveCfg, apiBase, params.apiKey) !== 'ours') return { outcome: 'not_ours' }
+  if (describeMcpIdentity(params.liveCfg) === 'current') return { outcome: 'current' }
+  const mutate = params.config?.mutateConfigFile
+  if (typeof mutate !== 'function') return { outcome: 'unsupported' }
+  try {
+    // The file can differ from the live read (an edit in between): the draft
+    // is classified again, and an entry that is no longer ours is left alone.
+    let outcome: McpRefreshOutcome = 'current'
+    await mutate.call(params.config, {
+      afterWrite: { mode: 'auto' },
+      mutate: ((draft: unknown) => {
+        if (describeMcpEntry(draft, apiBase, params.apiKey) !== 'ours') outcome = 'not_ours'
+        else if (upgradeHostedMcpEntryInPlace(draft, apiBase, params.apiKey)) outcome = 'updated'
+      }) as (draft: never) => unknown,
+    })
+    return { outcome }
+  } catch (err) {
+    return { outcome: 'failed', error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function agentchatEntry(cfg: unknown): Record<string, unknown> | undefined {
+  const servers = (cfg as { mcp?: { servers?: unknown } } | undefined)?.mcp?.servers
+  if (!isRecord(servers)) return undefined
+  const entry = servers[MCP_SERVER_NAME]
+  return isRecord(entry) ? entry : undefined
+}
+
+function headerValue(headers: Readonly<Record<string, unknown>>, name: string): unknown {
+  const wanted = name.toLowerCase()
+  for (const [key, value] of Object.entries(headers)) if (key.toLowerCase() === wanted) return value
+  return undefined
 }
 
 /** Return a config without the entry when it is ours; a hand-written entry is left alone. */

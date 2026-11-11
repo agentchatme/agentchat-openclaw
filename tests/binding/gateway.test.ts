@@ -37,7 +37,8 @@ vi.mock('../../src/binding/sdk-client.js', async () => {
   return { getClient: () => client, createSdkClient: () => client }
 })
 
-import { agentchatGatewayAdapter, statusStateFor, waitUntilAbort } from '../../src/binding/gateway.js'
+import { agentchatGatewayAdapter, statusStateFor, updateHostedMcpEntry, waitUntilAbort } from '../../src/binding/gateway.js'
+import { hostedMcpServerEntry } from '../../src/integration/mcp.js'
 import { registerIntegration } from '../../src/binding/runtime-registry.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
 import { parseChannelConfig } from '../../src/config-schema.js'
@@ -394,5 +395,62 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
     const plain = ctxFor({ channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } })
     await agentchatGatewayAdapter.startAccount!(plain.ctx as never)
     expect(plain.log.warn.mock.calls.length).toBe(0)
+  })
+})
+
+describe('gateway start — the hosted-tools entry names this client', () => {
+  const OLD_ENTRY = { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}' } }
+
+  function harness(file: { mcp?: unknown }, options: { mutate?: boolean; fail?: string } = {}) {
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() }
+    const writes: unknown[] = []
+    const runtime = {
+      config: {
+        current: () => structuredClone(file),
+        ...(options.mutate === false
+          ? {}
+          : {
+              mutateConfigFile: async (params: { afterWrite: unknown; mutate: (draft: never) => unknown }) => {
+                if (options.fail) throw new Error(options.fail)
+                const draft = structuredClone(file)
+                await params.mutate(draft as never)
+                Object.assign(file, draft)
+                writes.push(params.afterWrite)
+                return { result: undefined }
+              },
+            }),
+      },
+    }
+    return { log, writes, run: () => updateHostedMcpEntry({ accountId: 'default', cfg: {} as never, log: log as never }, 'https://api.agentchat.me', KEY, () => runtime as never) }
+  }
+
+  it('brings an entry an earlier release wrote up to date at start, once, and says so', async () => {
+    const file = { mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }
+    const h = harness(file)
+    await h.run()
+    expect(h.writes).toEqual([{ mode: 'auto' }])
+    expect(file.mcp.servers.agentchat).toEqual(hostedMcpServerEntry())
+    expect(String(h.log.info.mock.calls[0]![0])).toMatch(/^\[agentchat:default\] mcp\.servers\.agentchat now names this client to the hosted tools \(X-AgentChat-Client: openclaw, X-AgentChat-Client-Version: .+\); OpenClaw applies the change without a restart$/)
+    await h.run()
+    expect(h.writes).toHaveLength(1)
+  })
+
+  it('writes nothing for a current, missing or hand-written entry', async () => {
+    for (const file of [{ mcp: { servers: { agentchat: hostedMcpServerEntry() } } }, {}, { mcp: { servers: { agentchat: { url: 'https://proxy/mcp', transport: 'streamable-http' } } } }]) {
+      const h = harness(file as { mcp?: unknown })
+      await h.run()
+      expect(h.writes).toHaveLength(0)
+      expect(h.log.info).not.toHaveBeenCalled()
+      expect(h.log.warn).not.toHaveBeenCalled()
+    }
+  })
+
+  it('a runtime that cannot write, or a failed write, is one warning naming doctor --fix — never a failed start', async () => {
+    const readOnly = harness({ mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, { mutate: false })
+    await expect(readOnly.run()).resolves.toBeUndefined()
+    expect(String(readOnly.log.warn.mock.calls[0]![0])).toMatch(/does not name this client \(X-AgentChat-Client: openclaw, .+\) and this OpenClaw cannot update its config from a plugin — run `openclaw doctor --fix`/)
+    const failing = harness({ mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, { fail: 'config is read-only' })
+    await expect(failing.run()).resolves.toBeUndefined()
+    expect(String(failing.log.warn.mock.calls[0]![0])).toMatch(/could not be updated to name this client \(config is read-only\) — run `openclaw doctor --fix`/)
   })
 })

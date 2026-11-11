@@ -163,7 +163,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
     }
     if (probe.mcp) lines.push({ text: probe.mcp.detail, tone: probe.mcp.ok ? 'success' : 'error' })
     for (const check of probe.placement ?? []) {
-      lines.push({ text: `${check.name}: ${check.detail}`, tone: check.ok ? 'muted' : 'warn' })
+      lines.push({ text: `${check.name}: ${check.detail}`, tone: check.ok && !check.notice ? 'muted' : 'warn' })
     }
     if (probe.refusal) lines.push({ text: `integration not started — ${probe.refusal}`, tone: 'error' })
     if (probe.integration) {
