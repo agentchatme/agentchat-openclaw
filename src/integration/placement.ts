@@ -27,7 +27,17 @@ import * as path from 'node:path'
 
 import { API_KEY_ENV } from '../credentials/read-env.js'
 import { resolveBoundAgentId, resolveOpenClawDefaultAgentId, resolveOpenClawStateDir } from '../openclaw-layout.js'
-import { describeMcpEntry, hostedMcpUrl, withHostedMcpEntry, withoutHostedMcpEntry, type McpEntryOutcome } from './mcp.js'
+import {
+  CLIENT_HEADER,
+  clientIdentityHeaders,
+  clientIdentityText,
+  describeMcpEntry,
+  describeMcpIdentity,
+  hostedMcpUrl,
+  withHostedMcpEntry,
+  withoutHostedMcpEntry,
+  type McpEntryOutcome,
+} from './mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, withLlmAgentOverrideOptIn } from './model.js'
 import { writeAgentsAnchor, agentsAnchorPath, hasAgentsAnchorFor, readAgentsAnchor, removeAgentsAnchor } from '../binding/agents-anchor.js'
 import {
@@ -174,6 +184,7 @@ export function applyIntegrationConfig<TCfg extends object>(cfg: TCfg, params: I
   const mcp = withHostedMcpEntry(next, params.apiBase, params.apiKey)
   next = mcp.cfg
   if (mcp.outcome === 'added') changes.push(`mcp.servers.agentchat → ${hostedMcpUrl(params.apiBase)} (bearer template on ${API_KEY_ENV})`)
+  if (mcp.outcome === 'updated') changes.push(`mcp.servers.agentchat names this client (${clientIdentityText()})`)
   const bound = resolveBoundAgentId(next, AGENTCHAT_CHANNEL_ID, params.accountId)
   const ambient = resolveOpenClawDefaultAgentId(next)
   if (bound && bound !== (ambient ?? bound)) {
@@ -360,6 +371,8 @@ export function describeMcpOutcome(outcome: McpEntryOutcome, apiBase: string): P
   switch (outcome) {
     case 'added':
       return { name: 'mcp', status: 'changed', detail: `hosted tools registered as mcp.servers.agentchat → ${hostedMcpUrl(apiBase)} (bearer template on ${API_KEY_ENV})` }
+    case 'updated':
+      return { name: 'mcp', status: 'changed', detail: `mcp.servers.agentchat now names this client to the hosted tools (${clientIdentityText()})` }
     case 'present':
       return { name: 'mcp', status: 'ok', detail: 'hosted tools already registered as mcp.servers.agentchat' }
     case 'disabled':
@@ -380,6 +393,10 @@ export interface PlacementCheck {
   readonly name: 'key' | 'anchor' | 'manual' | 'mcp'
   readonly ok: boolean
   readonly detail: string
+  /** Works, but should be fixed: doctor warns and status shows it, without failing the check. */
+  readonly notice?: boolean
+  /** `openclaw doctor --fix` repairs it. */
+  readonly repair?: boolean
 }
 
 export function checkPlacement<TCfg extends object>(params: {
@@ -440,20 +457,50 @@ export function checkPlacement<TCfg extends object>(params: {
 
   checks.push({ name: 'manual', ok: true, detail: 'manual bundled as the agentchat skill' })
 
-  const mcpState = describeMcpEntry(params.cfg, params.apiBase, params.apiKey)
-  checks.push({
-    name: 'mcp',
-    ok: mcpState === 'ours' || mcpState === 'user_managed',
-    detail:
-      mcpState === 'ours'
-        ? 'hosted tools registered as mcp.servers.agentchat'
-        : mcpState === 'user_managed'
-          ? 'mcp.servers.agentchat is managed by hand'
-          : mcpState === 'disabled'
-            ? 'mcp.servers.agentchat is disabled — the agent has no AgentChat tools'
-            : `mcp.servers.agentchat missing — ${remedy('run openclaw doctor --fix (or openclaw channels add agentchat)')}`,
-  })
+  checks.push(checkMcpEntry(params.cfg, params.apiBase, params.apiKey, remedy))
   return checks
+}
+
+/**
+ * The tools entry: present and enabled, and naming this client. An entry
+ * of ours from an earlier release works but names no client; the gateway
+ * adds the header at its next start and `doctor --fix` does now. A hand-written entry that names no client works too, but
+ * AgentChat then treats the agent as an unknown client and lists the
+ * wake-webhook tools; only the operator can change it, so the line says how.
+ */
+function checkMcpEntry(cfg: unknown, apiBase: string, apiKey: string | undefined, remedy: (forEnabled: string) => string): PlacementCheck {
+  const unknownClient = 'AgentChat treats the agent as an unknown client and lists the webhook-setup tools it does not need'
+  switch (describeMcpEntry(cfg, apiBase, apiKey)) {
+    case 'ours': {
+      const identity = describeMcpIdentity(cfg)
+      if (identity === 'current') return { name: 'mcp', ok: true, detail: 'hosted tools registered as mcp.servers.agentchat' }
+      return {
+        name: 'mcp',
+        ok: true,
+        notice: true,
+        repair: true,
+        detail:
+          `hosted tools registered as mcp.servers.agentchat, without ${CLIENT_HEADER} — ${unknownClient}; ` +
+          `the gateway adds ${clientIdentityText()} to the entry when it starts (its log says if it could not), and openclaw doctor --fix does now`,
+      }
+    }
+    case 'user_managed': {
+      if (describeMcpIdentity(cfg) === 'current') return { name: 'mcp', ok: true, detail: 'mcp.servers.agentchat is managed by hand' }
+      const identity = clientIdentityHeaders()
+      return {
+        name: 'mcp',
+        ok: true,
+        notice: true,
+        detail:
+          `mcp.servers.agentchat is managed by hand and does not name this client, so ${unknownClient} — ` +
+          `add "${CLIENT_HEADER}": "${identity[CLIENT_HEADER]}" to its headers`,
+      }
+    }
+    case 'disabled':
+      return { name: 'mcp', ok: false, detail: 'mcp.servers.agentchat is disabled — the agent has no AgentChat tools' }
+    case 'missing':
+      return { name: 'mcp', ok: false, repair: true, detail: `mcp.servers.agentchat missing — ${remedy('run openclaw doctor --fix (or openclaw channels add agentchat)')}` }
+  }
 }
 
 export { agentsAnchorPath }

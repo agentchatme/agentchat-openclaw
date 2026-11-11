@@ -7,7 +7,8 @@
  * checked against the last served copy when one is cached. `repairConfig`
  * (`openclaw doctor --fix` only — OpenClaw never calls it in preview) adds
  * the `mcp.servers.agentchat` entry (a template on `AGENTCHAT_API_KEY`,
- * never the key; hand-written entries are left alone), persists
+ * never the key; hand-written entries are left alone) or brings ours up to
+ * date (the header that names this client), persists
  * `agentHandle`, writes the llm opt-in for a non-default bound agent, and
  * places a missing identity line for the configured handle — fetching the
  * served text first (server, then the cached copy). An identity line
@@ -33,7 +34,7 @@ import { getIntegration, listActiveAccounts } from './runtime-registry.js'
 import { findAccountTurns, hungTurnsReason, overdueTurnLines, restartHoldLines } from '../integration/running.js'
 import { cycleTroubleLine } from '../integration/loop.js'
 import { checkPlacement, resolvePlacementAgentId, restoreIdentityLine } from '../integration/placement.js'
-import { DEFAULT_API_BASE, withHostedMcpEntry } from '../integration/mcp.js'
+import { DEFAULT_API_BASE, clientIdentityText, withHostedMcpEntry } from '../integration/mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, readLlmAgentOverrideOptIn, withLlmAgentOverrideOptIn } from '../integration/model.js'
 import { cachedIdentityLine, loadIdentityLine } from '../integration/texts.js'
 import { resolveBoundAgentId, resolveOpenClawDefaultAgentId } from '../openclaw-layout.js'
@@ -54,8 +55,8 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
       const handle = readAgentchatConfigField(cfg, accountId, 'agentHandle')
       const agentId = resolvePlacementAgentId(cfg, accountId)
       for (const check of checkPlacement({ cfg, handle, apiKey, apiBase, identityLine: cachedIdentityLine(accountId), agentId, accountId, env })) {
-        if (check.ok) continue
-        const fix = check.name === 'mcp' ? ` (${doctorFixCommand} adds it)` : ''
+        if (check.ok && !check.notice) continue
+        const fix = check.name === 'mcp' && check.repair && !check.ok ? ` (${doctorFixCommand} adds it)` : ''
         warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${check.name}: ${check.detail}${fix}`)
       }
       const bound = resolveBoundAgentId(cfg, AGENTCHAT_CHANNEL_ID, accountId)
@@ -138,6 +139,7 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
       const result = withHostedMcpEntry(next, apiBase, apiKey)
       next = result.cfg
       if (result.outcome === 'added') changes.push(`added mcp.servers.agentchat → ${apiBase}/mcp (bearer template on AGENTCHAT_API_KEY)`)
+      if (result.outcome === 'updated') changes.push(`updated mcp.servers.agentchat to name this client (${clientIdentityText()})`)
     }
     return { config: next, changes, ...(warnings.length > 0 ? { warnings } : {}) }
   },

@@ -6,6 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -23,16 +24,20 @@ function extractFrontmatter(md: string): string {
 describe('bundled agentchat manual', () => {
   const text = readFileSync(skillPath, 'utf8')
 
-  it('starts with the published frontmatter: name, version 2.2.2, description, homepage', () => {
+  it('is manual 2.3.1 byte for byte: the sha256 AgentChat serves and pins (MANUAL_SHA256)', () => {
+    // The bundled copy is re-fetched at release time; bump this and the version below with it.
+    expect(createHash('sha256').update(readFileSync(skillPath)).digest('hex')).toBe('2471bccbc91a22c6bd74b21346ddf3146e2245b62e18f7db1ca4ec4656386090')
+  })
+
+  it('starts with the published frontmatter: name, version 2.3.1, description, homepage', () => {
     const fm = extractFrontmatter(text)
     expect(fm).toMatch(/^name:\s*agentchat\s*$/m)
-    // The bundled copy is re-fetched at release time; bump this with it.
-    expect(fm).toMatch(/^version:\s*2\.2\.2\s*$/m)
+    expect(fm).toMatch(/^version:\s*2\.3\.1\s*$/m)
     expect(fm).toMatch(/^description:\s+.{30,}/m)
     expect(fm).toMatch(/^homepage:\s*https:\/\/agentchat\.me\s*$/m)
   })
 
-  it('carries the sections the integration points the agent at (manual 2.2.2 wording)', () => {
+  it('carries the sections the integration points the agent at (manual 2.3.1 wording)', () => {
     expect(text).toMatch(/^## Be reachable: identity, wake, live conversations/m)
     expect(text).toMatch(/^### 1\. The identity line/m)
     expect(text).toMatch(/^### 2\. Being woken/m)

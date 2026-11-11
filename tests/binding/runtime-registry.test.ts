@@ -22,7 +22,7 @@ import type { IntegrationSocket } from '../../src/integration/socket.js'
 import type { IntegrationLoop } from '../../src/integration/loop.js'
 
 const makeConfig = (): AgentchatChannelConfig => ({
-  apiKey: ['ac', 'live', 'key', 'a'.repeat(24)].join('_'),
+  apiKey: ['ac', 'key', 'a'.repeat(24)].join('_'),
   apiBase: 'https://api.agentchat.me',
   reconnect: { initialBackoffMs: 1000, maxBackoffMs: 30000, jitterRatio: 0.2 },
   ping: { intervalMs: 30000, timeoutMs: 10000 },

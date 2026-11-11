@@ -45,6 +45,7 @@ import { readAgentChatCalls } from '../integration/run.js'
 import { getPluginRuntime } from '../integration/runtime-holder.js'
 import { removeOldStateFiles } from '../integration/state.js'
 import { refreshIdentityLine } from '../integration/placement.js'
+import { NIX_MODE_ERROR_CODE, clientIdentityText, refreshHostedMcpEntry, type ConfigMutator } from '../integration/mcp.js'
 import {
   createRuntimeModelCall,
   createRuntimeTurnStarter,
@@ -130,6 +131,52 @@ export async function waitUntilAbort(signal: AbortSignal, onAbort: () => Promise
   await onAbort()
 }
 
+/** Accounts already told, in this process, that their entry could not be updated (one warning, not one per start). */
+const mcpUpdateWarned = new Set<string>()
+
+/**
+ * `refreshHostedMcpEntry` for this account, with its log line. The live
+ * config decides whether anything is written; the write goes through
+ * OpenClaw's `runtime.config.mutateConfigFile`. Never rejects.
+ */
+export async function updateHostedMcpEntry(
+  ctx: Pick<ChannelGatewayContext, 'accountId' | 'cfg' | 'log'>,
+  apiBase: string,
+  apiKey: string,
+  runtime: () => ReturnType<typeof getPluginRuntime> = getPluginRuntime,
+): Promise<void> {
+  const prefix = `[agentchat:${ctx.accountId}]`
+  const warnOnce = (line: string) => {
+    if (mcpUpdateWarned.has(ctx.accountId)) return
+    mcpUpdateWarned.add(ctx.accountId)
+    ctx.log?.warn?.(`${prefix} ${line}`)
+  }
+  try {
+    const { cfg: liveCfg } = readLiveConfig(ctx.cfg, runtime)
+    const config = (runtime() as { config?: ConfigMutator } | null)?.config
+    const result = await refreshHostedMcpEntry({ liveCfg, config, apiBase, apiKey })
+    if (result.outcome === 'updated') {
+      mcpUpdateWarned.delete(ctx.accountId)
+      ctx.log?.info?.(`${prefix} mcp.servers.agentchat now names this client to the hosted tools (${clientIdentityText()}); under the default reload mode OpenClaw applies it without a restart`)
+    } else if (result.outcome === 'unsupported') {
+      warnOnce(`mcp.servers.agentchat does not name this client (${clientIdentityText()}) and this OpenClaw cannot update its config from a plugin — run \`openclaw doctor --fix\``)
+    } else if (result.outcome === 'failed') {
+      warnOnce(
+        result.code === NIX_MODE_ERROR_CODE
+          ? `mcp.servers.agentchat does not name this client and OpenClaw's config is read-only here (Nix mode) — add ${clientIdentityText()} to its headers in the Nix-managed config`
+          : `mcp.servers.agentchat could not be updated to name this client (${result.error ?? 'unknown error'}) — run \`openclaw doctor --fix\``,
+      )
+    }
+  } catch (err) {
+    warnOnce(`mcp.servers.agentchat check failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+/** Test seam: forget which accounts were warned. */
+export function resetHostedMcpUpdateWarningsForTest(): void {
+  mcpUpdateWarned.clear()
+}
+
 export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAccount> = {
   async startAccount(ctx) {
     const account = ctx.account
@@ -147,6 +194,12 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       createLogger({ level: config.observability.logLevel, redactKeys: config.observability.redactKeys })
 
     ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: false }, 'starting'))
+
+    // Our hosted-tools entry from a release before 0.10.1 names no client:
+    // add the header once, so AgentChat knows the agent runs on OpenClaw and
+    // does not list the wake-webhook tools. Off the start path, whatever the
+    // wake mode (the tools stay in use either way).
+    void updateHostedMcpEntry(ctx, config.apiBase, config.apiKey)
 
     const wakeMode = readWakeModeFromEnv()
     if (wakeMode.mode === 'off') {

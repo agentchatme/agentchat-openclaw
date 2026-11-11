@@ -131,9 +131,9 @@ export function resolveAgentchatAccount(
 const uiHints: Record<string, ChannelConfigUiHint> = {
   apiKey: {
     label: 'AgentChat API key',
-    placeholder: 'ac_live_...',
+    placeholder: 'ac_…',
     sensitive: true,
-    help: 'The setup wizard registers you via email OTP and mints a key, recovers a lost key (handle + email OTP), or accepts an existing ac_live_… key.',
+    help: 'The setup wizard registers you via email OTP and mints a key, recovers a lost key (handle + email OTP), or accepts an existing ac_… key.',
   },
   apiBase: {
     label: 'API base URL',
@@ -434,8 +434,14 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
     nativeCommands: false,
   },
 
+  // OpenClaw matches a reload prefix as `path === prefix` or `path` starting
+  // with `prefix.` (src/gateway/config-reload-plan.ts), so the prefix carries
+  // no trailing dot: `channels.agentchat.` matched nothing, and every
+  // channels.agentchat change restarted the gateway (2026.6.x–2026.8.x) or
+  // reloaded the plugin (2026.11.x). With this one OpenClaw restarts just the
+  // channel, after a running turn has ended.
   reload: {
-    configPrefixes: [`channels.${AGENTCHAT_CHANNEL_ID}.`],
+    configPrefixes: [`channels.${AGENTCHAT_CHANNEL_ID}`],
   },
 
   configSchema: buildChannelConfigSchema(agentchatChannelConfigSchema, { uiHints }),

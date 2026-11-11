@@ -23,7 +23,7 @@ import { capturingLogger } from '../helpers/logger.js'
 import { MockWebSocket, MockWebSocketCtor, messageNew, sentFrames, flushAsync } from '../helpers/mock-websocket.js'
 import { SERVED_TEXTS, staticTexts } from '../helpers/texts.js'
 
-const KEY = ['ac', 'live', 'w'.repeat(24)].join('_')
+const KEY = ['ac', 'w'.repeat(24)].join('_')
 
 /** The server as the loop sees it: the cards and invites waiting, what was recorded. */
 function fakeServer() {

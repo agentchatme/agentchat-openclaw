@@ -15,7 +15,9 @@ concurrency:
 
 jobs:
   # ─── Build, test, type-check ──────────────────────────────────────────────
-  # Matrix: Node 20 (LTS, our engines floor) and Node 22 (current LTS).
+  # Node 22, the plugin's engines floor, against the lockfile's openclaw
+  # (2026.6.10, the oldest release the plugin claims). The newest OpenClaw
+  # release is covered by openclaw-latest.yml.
   # Single OS — Node behavior is consistent across OSes for our surface
   # (no native modules, no path quirks); a 3×OS matrix would burn minutes
   # for zero signal. Cross-OS coverage moves to the upstream OpenClaw repo

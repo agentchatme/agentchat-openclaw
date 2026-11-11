@@ -59,9 +59,11 @@
  * when it ends it gets the after-turn rule. A stored turn first started more
  * than `STORED_TURN_MAX_AGE_MS` ago is dropped, so a restart storm cannot
  * re-adopt it forever. Not covered (accepted): a continuation that starts
- * after the hold, when the conversation may have been gated again; the wake
- * text AgentChat serves for OpenClaw is to tell the agent not to resume an
- * AgentChat turn after a restart (a server change). A plugin reload waits for the runs (OpenClaw drains a plugin's
+ * after the hold, when the conversation may have been gated again. The wake
+ * instruction and invite prompt AgentChat serves for OpenClaw end with a
+ * restart note telling the agent not to continue an interrupted turn after a
+ * restart (it promises no wake); that lowers the odds, it is no guarantee.
+ * A plugin reload waits for the runs (OpenClaw drains a plugin's
  * admitted work first, and every turn holds it until it ends).
  */
 

@@ -110,8 +110,20 @@ describe('non-interactive setup — prepare → apply → after', () => {
     }
     expect(next.channels.agentchat.apiKey).toBe(KEY)
     expect(next.channels.agentchat.agentHandle).toBe('alice')
-    expect(next.mcp.servers.agentchat).toEqual({ url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}' } })
+    expect(next.mcp.servers.agentchat).toEqual({
+      url: 'https://api.agentchat.me/mcp',
+      transport: 'streamable-http',
+      headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw' },
+    })
     expect(next.plugins).toBeUndefined()
+  })
+
+  it('applyAccountConfig brings the entry an earlier release wrote up to date in the same write', () => {
+    const old = { channels: {}, mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}' } } } } }
+    const next = agentchatPlugin.setup!.applyAccountConfig({ cfg: old as never, accountId: 'default', input: { token: KEY, agentHandle: '@alice' } as never }) as unknown as {
+      mcp: { servers: { agentchat: { headers: Record<string, string> } } }
+    }
+    expect(next.mcp.servers.agentchat.headers).toEqual({ Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw' })
   })
 
   it('applyAccountConfig without a learnt handle (older OpenClaw) still registers the hosted tools', () => {

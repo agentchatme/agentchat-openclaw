@@ -32,8 +32,9 @@ import { placeIntegration } from '../../src/integration/placement.js'
 import { loadIdentityLine } from '../../src/integration/texts.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
 import { testKey } from '../helpers/keys.js'
+import { hostedMcpServerEntry } from '../../src/integration/mcp.js'
 
-const KEY = ['ac', 'live', 'd'.repeat(24)].join('_')
+const KEY = ['ac', 'd'.repeat(24)].join('_')
 
 describe('doctor adapter', () => {
   let workspace: string
@@ -190,15 +191,57 @@ describe('doctor adapter — the llm override opt-in for a non-default bound age
   })
 
   it('classifies the env-substituted entry as ours (no spurious "managed by hand" warning)', async () => {
+    const current = hostedMcpServerEntry()
     const substituted = {
       ...bound,
       bindings: [],
-      mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: `Bearer ${KEY2}` } } } },
+      mcp: { servers: { agentchat: { ...current, headers: { ...current.headers, Authorization: `Bearer ${KEY2}` } } } },
     }
     const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: substituted as never, doctorFixCommand: 'fix', env: {} })
     expect(warnings.some((w) => w.includes('mcp:'))).toBe(false)
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: substituted as never, doctorFixCommand: 'fix', env: {} })
     expect(fixed.changes.some((c) => c.includes('mcp.servers'))).toBe(false)
+  })
+
+  it('our entry from an earlier release (bearer only): one notice, and --fix brings it up to date leaving the bearer as it is', async () => {
+    const substituted = {
+      ...bound,
+      bindings: [],
+      mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: `Bearer ${KEY2}` } } } },
+    }
+    const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: substituted as never, doctorFixCommand: 'openclaw doctor --fix', env: {} })
+    const mcp = warnings.filter((w) => w.includes('mcp:'))
+    expect(mcp).toHaveLength(1)
+    expect(mcp[0]).toMatch(/without X-AgentChat-Client — AgentChat treats the agent as an unknown client and lists the webhook-setup tools/)
+    expect(mcp[0]).toContain('the gateway adds X-AgentChat-Client: openclaw to the entry when it starts (its log says if it could not), and openclaw doctor --fix does now')
+    expect(mcp[0]).not.toMatch(/adds it\)$/)
+    const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: substituted as never, doctorFixCommand: 'fix', env: {} })
+    expect(fixed.changes).toContain('updated mcp.servers.agentchat to name this client (X-AgentChat-Client: openclaw)')
+    // only the client header is added; the substituted bearer goes back as it came, so OpenClaw's write restores the file's ${VAR}
+    expect((fixed.config as unknown as { mcp: { servers: { agentchat: unknown } } }).mcp.servers.agentchat).toEqual({
+      ...hostedMcpServerEntry(),
+      headers: { ...hostedMcpServerEntry().headers, Authorization: `Bearer ${KEY2}` },
+    })
+    const again = await agentchatDoctorAdapter.repairConfig!({ cfg: fixed.config, doctorFixCommand: 'fix', env: {} })
+    expect(again.changes.some((c) => c.includes('mcp.servers'))).toBe(false)
+  })
+
+  it('a hand-written entry that names no client: a notice saying how to add the headers, and --fix leaves it alone', async () => {
+    const hand = { url: 'https://proxy.example/mcp', transport: 'streamable-http', headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}' } }
+    const cfg = { ...bound, bindings: [], mcp: { servers: { agentchat: hand } } }
+    const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: cfg as never, doctorFixCommand: 'openclaw doctor --fix', env: {} })
+    const mcp = warnings.filter((w) => w.includes('mcp:'))
+    expect(mcp).toHaveLength(1)
+    expect(mcp[0]).toContain(`managed by hand and does not name this client`)
+    expect(mcp[0]).toContain('add "X-AgentChat-Client": "openclaw" to its headers')
+    expect(mcp[0]).not.toContain('--fix')
+    const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: cfg as never, doctorFixCommand: 'fix', env: {} })
+    expect(fixed.changes.some((c) => c.includes('mcp.servers'))).toBe(false)
+    expect((fixed.config as unknown as { mcp: { servers: { agentchat: unknown } } }).mcp.servers.agentchat).toEqual(hand)
+    // once it names the client, no notice (any other header there, a version included, is the operator's)
+    const named = { ...cfg, mcp: { servers: { agentchat: { ...hand, headers: { ...hand.headers, 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': '0.9.0' } } } } }
+    const quiet = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: named as never, doctorFixCommand: 'fix', env: {} })
+    expect(quiet.some((w) => w.includes('mcp:'))).toBe(false)
   })
 
   it('a turn the running integration has held past 30 minutes is a warning naming the conversation and the run deadline', async () => {
