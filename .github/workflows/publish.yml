@@ -36,11 +36,18 @@ name: Publish
 #     There is no `clawhub login` here: without a matching trusted
 #     publisher the publish fails loudly instead of falling back to a token.
 #
-# Why npm first, ClawHub second: ClawHub source-links the GitHub repo at
-# the published commit, so npm being current is irrelevant to ClawHub's
-# build — but if ClawHub's scanner blocks, we want npm to have the version
-# already so users on `npm install` are unaffected. The recovery path
-# (`clawhub-only`) lets us retry ClawHub without re-tagging.
+# One artifact, two registries: the ClawHub job packs the plugin with
+# `npm pack` (lifecycle scripts on, so `prepack` strips devDependencies and
+# peerDependencies exactly as for npm) and publishes that tarball. Handing
+# `clawhub package publish` the folder instead makes the CLI run its own
+# `npm pack --ignore-scripts`, which skips `prepack`; that tarball kept our
+# devDependencies, and OpenClaw's dependency install (npm 10 on Node 22)
+# crashed on them. The release still links to source: --source-repo,
+# --source-commit and --source-ref are passed explicitly.
+#
+# Why npm first, ClawHub second: if ClawHub's scanner blocks, we want npm
+# to have the version already so users on `npm install` are unaffected. The
+# recovery path (`clawhub-only`) lets us retry ClawHub without re-tagging.
 #
 # Approval: both publish jobs run in the `npm-publish` environment, which
 # requires the maintainer. A normal release asks twice (npm, then ClawHub);
@@ -172,15 +179,39 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      # ClawHub source-links the repo and runs `npm install` on the raw
-      # source — it does NOT consume the npm tarball. That means
-      # `prepublishOnly` (which runs `verify-source-installs.mjs`) doesn't
-      # gate it. Run the same verification explicitly here so a
-      # `workspace:`/`file:`/`link:`/`catalog:` spec slipping into a
-      # runtime dep section can't reach ClawHub end-users either. Same
-      # check, different trigger.
+      # `npm pack` does not run `prepublishOnly` (which runs
+      # `verify-source-installs.mjs`), so run the same verification here: a
+      # `workspace:`/`file:`/`link:`/`catalog:` spec slipping into a runtime
+      # dep section can't reach ClawHub end-users either. Same check,
+      # different trigger.
       - name: Verify source-install cleanliness
         run: pnpm run test:install-source
+
+      - run: pnpm run build
+
+      # The ClawHub artifact is the npm artifact. `npm pack` runs `prepack`
+      # (scripts/strip-publish-fields.mjs apply) and `postpack` (restore),
+      # the same lifecycle `npm publish` runs. Do not pass the folder to
+      # `clawhub package publish`: clawhub@0.25.0 then packs it itself with
+      # `npm pack --ignore-scripts` (packages/clawhub/src/cli/commands/
+      # packages.ts, createClawPackFromFolder), which skips `prepack` and
+      # ships devDependencies — `npm install` crashed on those under Node 22
+      # ("Cannot read properties of null (reading 'edgesOut')").
+      - name: Pack the plugin (the npm tarball)
+        id: pack
+        run: |
+          set -euo pipefail
+          DEST="${RUNNER_TEMP}/clawpack"
+          mkdir -p "${DEST}"
+          npm pack --pack-destination "${DEST}"
+          TARBALL="$(ls "${DEST}"/*.tgz)"
+          tar -xOzf "${TARBALL}" package/package.json | node -e '
+            const pkg = JSON.parse(require("fs").readFileSync(0, "utf8"));
+            const left = ["devDependencies", "peerDependencies", "peerDependenciesMeta"].filter((k) => k in pkg);
+            if (left.length) { console.error(`packed package.json still has: ${left.join(", ")}`); process.exit(1); }
+            if (!pkg.openclaw?.compat?.pluginApi) { console.error("packed package.json lost openclaw.compat.pluginApi"); process.exit(1); }
+          '
+          echo "tarball=${TARBALL}" >> "${GITHUB_OUTPUT}"
 
       # Pinned: this tool receives the publish credential, so a new release
       # of it is a deliberate bump, not whatever `latest` is on release day.
@@ -212,7 +243,7 @@ jobs:
           set -euo pipefail
           PKG_VERSION="$(node -p "require('./package.json').version")"
           echo "Publishing @agentchatme/openclaw@${PKG_VERSION} to ClawHub"
-          clawhub package publish . \
+          clawhub package publish "${{ steps.pack.outputs.tarball }}" \
             --family code-plugin \
             --name "@agentchatme/openclaw" \
             --version "${PKG_VERSION}" \

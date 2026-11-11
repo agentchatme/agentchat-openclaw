@@ -11,6 +11,13 @@
  *   install on a stock end-user machine, surfacing as `npm install failed:`
  *   with the stderr swallowed by the `--silent` flag.
  *
+ *   `--omit=dev` does not make devDependencies harmless either: npm 10 (Node
+ *   22) still builds them into the dependency tree, and our devDependencies
+ *   (`openclaw` among them) crash it with `Cannot read properties of null
+ *   (reading 'edgesOut')`. That is what broke the 0.10.0 ClawHub artifact,
+ *   which was packed with `--ignore-scripts` and so never reached `apply`.
+ *   The ClawHub job in publish.yml now packs through this lifecycle too.
+ *
  *   `@openclaw/matrix` (the first-party reference plugin) sidesteps this by
  *   stripping `devDependencies`, `peerDependencies`, `peerDependenciesMeta`
  *   from the published tarball at publish time. We mirror that.
