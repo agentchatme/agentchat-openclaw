@@ -64,8 +64,16 @@ describe('plugin — shape', () => {
     expect(agentchatPlugin.agentPrompt).toBeUndefined()
   })
 
-  it('declares reload prefixes so config hot-reload targets our section', () => {
-    expect(agentchatPlugin.reload?.configPrefixes).toContain('channels.agentchat.')
+  it('declares a reload prefix OpenClaw matches against our section, so a change there restarts only the channel', () => {
+    const prefixes = agentchatPlugin.reload?.configPrefixes ?? []
+    expect(prefixes).toEqual(['channels.agentchat'])
+    // OpenClaw's rule (src/gateway/config-reload-plan.ts): the path itself, or a path under it.
+    const matches = (path: string) => prefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}.`))
+    expect(matches('channels.agentchat')).toBe(true)
+    expect(matches('channels.agentchat.apiKey')).toBe(true)
+    expect(matches('channels.agentchat.reconnect.initialBackoffMs')).toBe(true)
+    expect(matches('channels.agentchatter.apiKey')).toBe(false)
+    expect(matches('channels.telegram.botToken')).toBe(false)
   })
 })
 

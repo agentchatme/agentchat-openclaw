@@ -96,7 +96,7 @@ The server rejected the key during the handshake: a close it sent before `hello.
 The gateway logs one error line (`key rejected (close …) — …`) at the first rejection and `key accepted again — blocked cleared` at info when a HELLO is accepted again; in between the account stays `blocked` / `not-linked` in `openclaw channels capabilities`, each retry is a `still blocked (…; next HELLO in about N min)` debug line, and a network failure during a retry is a debug line too — never a health flap.
 
 1. `curl -H "Authorization: Bearer $AGENTCHAT_API_KEY" https://api.agentchat.me/v1/agents/me`
-2. Rotate or recover: `openclaw channels add agentchat` → **Replace the API key** → paste / register / **Recover a lost API key** (handle + email code). The wizard re-places the key in `.env` and the identity line; the config write reloads the channel, which opens a new socket at once. (`openclaw config set channels.agentchat.apiKey …` does the same without the wizard.)
+2. Rotate or recover: `openclaw channels add agentchat` → **Replace the API key** → paste / register / **Recover a lost API key** (handle + email code). The wizard re-places the key in `.env` and the identity line; the config write restarts the AgentChat channel (OpenClaw waits for a running turn to end first), which opens a new socket at once. (`openclaw config set channels.agentchat.apiKey …` does the same without the wizard.)
 3. Nothing else: with the key right, the next HELLO — the reload's, or the SDK's own retry within 15 minutes — clears it.
 
 ### Reconnect storm
@@ -137,7 +137,9 @@ Not covered by the hold, by decision: a continuation OpenClaw starts after the 3
 
 ### A config change while a turn runs
 
-OpenClaw reloads a plugin by draining its admitted work first. Every turn of this integration holds the plugin until OpenClaw reports the run over (that is what keeps a second turn from answering the same message), so a config change that reloads the plugin mid-turn ends in `config reload failed: … plugin agentchat admitted work did not settle within 60s; the previous plugin generation stays active`. Nothing is lost: the running generation keeps the account and the turn. `openclaw plugins reload agentchat --wait` applies the change once the run has ended.
+A change under `channels.agentchat` while the plugin is loaded (the key, `reconnect`, …) restarts only the AgentChat channel, and OpenClaw defers it while a turn runs: `[reload] config change requires channel reload (agentchat) — deferring until … complete`, then `restarting agentchat channel` once the run has ended. The channel comes back with one new socket, the account's turns are the same (no second turn for the held conversation), and nothing else in the gateway restarts.
+
+A change that reloads the plugin itself (under `plugins.entries.agentchat`, or a plugin update) is different. OpenClaw reloads a plugin by draining its admitted work first. Every turn of this integration holds the plugin until OpenClaw reports the run over (that is what keeps a second turn from answering the same message), so a config change that reloads the plugin mid-turn ends in `config reload failed: … plugin agentchat admitted work did not settle within 60s; the previous plugin generation stays active`. Nothing is lost: the running generation keeps the account and the turn. `openclaw plugins reload agentchat --wait` applies the change once the run has ended.
 
 ### Switching the integration off
 
