@@ -432,7 +432,7 @@ describe('gateway start — the hosted-tools entry names this client', () => {
     await h.run()
     expect(h.writes).toEqual([{ mode: 'auto' }])
     expect(file.mcp.servers.agentchat).toEqual(hostedMcpServerEntry())
-    expect(String(h.log.info.mock.calls[0]![0])).toMatch(/^\[agentchat:default\] mcp\.servers\.agentchat now names this client to the hosted tools \(X-AgentChat-Client: openclaw, X-AgentChat-Client-Version: .+\); under the default reload mode OpenClaw applies it without a restart$/)
+    expect(String(h.log.info.mock.calls[0]![0])).toMatch(/^\[agentchat:default\] mcp\.servers\.agentchat now names this client to the hosted tools \(X-AgentChat-Client: openclaw\); under the default reload mode OpenClaw applies it without a restart$/)
     await h.run()
     expect(h.writes).toHaveLength(1)
   })
@@ -450,7 +450,7 @@ describe('gateway start — the hosted-tools entry names this client', () => {
   it('a runtime that cannot write is one warning naming doctor --fix — never a failed start, and not repeated on the next start', async () => {
     const readOnly = harness({ mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, { mutate: false })
     await expect(readOnly.run()).resolves.toBeUndefined()
-    expect(String(readOnly.log.warn.mock.calls[0]![0])).toMatch(/does not name this client \(X-AgentChat-Client: openclaw, .+\) and this OpenClaw cannot update its config from a plugin — run `openclaw doctor --fix`/)
+    expect(String(readOnly.log.warn.mock.calls[0]![0])).toMatch(/does not name this client \(X-AgentChat-Client: openclaw\) and this OpenClaw cannot update its config from a plugin — run `openclaw doctor --fix`/)
     await readOnly.run()
     expect(readOnly.log.warn).toHaveBeenCalledTimes(1)
   })
@@ -463,7 +463,7 @@ describe('gateway start — the hosted-tools entry names this client', () => {
     const nix = harness({ mcp: { servers: { agentchat: { ...OLD_ENTRY } } } }, { fail: Object.assign(new Error('immutable'), { code: 'OPENCLAW_NIX_MODE_CONFIG_IMMUTABLE' }) })
     await nix.run()
     const line = String(nix.log.warn.mock.calls[0]![0])
-    expect(line).toMatch(/read-only here \(Nix mode\) — add X-AgentChat-Client: openclaw and X-AgentChat-Client-Version: .+ to its headers in the Nix-managed config/)
+    expect(line).toMatch(/read-only here \(Nix mode\) — add X-AgentChat-Client: openclaw to its headers in the Nix-managed config/)
     expect(line).not.toContain('doctor --fix')
   })
 

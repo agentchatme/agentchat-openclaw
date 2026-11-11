@@ -163,7 +163,7 @@ export async function updateHostedMcpEntry(
     } else if (result.outcome === 'failed') {
       warnOnce(
         result.code === NIX_MODE_ERROR_CODE
-          ? `mcp.servers.agentchat does not name this client and OpenClaw's config is read-only here (Nix mode) — add ${clientIdentityText().replace(', ', ' and ')} to its headers in the Nix-managed config`
+          ? `mcp.servers.agentchat does not name this client and OpenClaw's config is read-only here (Nix mode) — add ${clientIdentityText()} to its headers in the Nix-managed config`
           : `mcp.servers.agentchat could not be updated to name this client (${result.error ?? 'unknown error'}) — run \`openclaw doctor --fix\``,
       )
     }
@@ -195,10 +195,10 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
 
     ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: false }, 'starting'))
 
-    // Our hosted-tools entry from an earlier release names no client (or an
-    // older version): bring it up to date, so AgentChat knows the agent runs
-    // on OpenClaw and does not list the wake-webhook tools. Off the start
-    // path, whatever the wake mode (the tools stay in use either way).
+    // Our hosted-tools entry from a release before 0.10.1 names no client:
+    // add the header once, so AgentChat knows the agent runs on OpenClaw and
+    // does not list the wake-webhook tools. Off the start path, whatever the
+    // wake mode (the tools stay in use either way).
     void updateHostedMcpEntry(ctx, config.apiBase, config.apiKey)
 
     const wakeMode = readWakeModeFromEnv()

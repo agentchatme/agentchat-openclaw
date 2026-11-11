@@ -29,7 +29,6 @@ import { API_KEY_ENV } from '../credentials/read-env.js'
 import { resolveBoundAgentId, resolveOpenClawDefaultAgentId, resolveOpenClawStateDir } from '../openclaw-layout.js'
 import {
   CLIENT_HEADER,
-  CLIENT_VERSION_HEADER,
   clientIdentityHeaders,
   clientIdentityText,
   describeMcpEntry,
@@ -464,9 +463,8 @@ export function checkPlacement<TCfg extends object>(params: {
 
 /**
  * The tools entry: present and enabled, and naming this client. An entry
- * of ours from an earlier release works but names no client (or an older
- * version); the gateway updates it at its next start and `doctor --fix`
- * does now. A hand-written entry that names no client works too, but
+ * of ours from an earlier release works but names no client; the gateway
+ * adds the header at its next start and `doctor --fix` does now. A hand-written entry that names no client works too, but
  * AgentChat then treats the agent as an unknown client and lists the
  * wake-webhook tools; only the operator can change it, so the line says how.
  */
@@ -482,12 +480,12 @@ function checkMcpEntry(cfg: unknown, apiBase: string, apiKey: string | undefined
         notice: true,
         repair: true,
         detail:
-          `hosted tools registered as mcp.servers.agentchat, ${identity === 'outdated' ? 'naming another version of this client' : `without ${CLIENT_HEADER}`} — ` +
-          `${identity === 'missing' ? `${unknownClient}; ` : ''}the gateway updates the entry when it starts (its log says if it could not), and openclaw doctor --fix does now (${clientIdentityText()})`,
+          `hosted tools registered as mcp.servers.agentchat, without ${CLIENT_HEADER} — ${unknownClient}; ` +
+          `the gateway adds ${clientIdentityText()} to the entry when it starts (its log says if it could not), and openclaw doctor --fix does now`,
       }
     }
     case 'user_managed': {
-      if (describeMcpIdentity(cfg) !== 'missing') return { name: 'mcp', ok: true, detail: 'mcp.servers.agentchat is managed by hand' }
+      if (describeMcpIdentity(cfg) === 'current') return { name: 'mcp', ok: true, detail: 'mcp.servers.agentchat is managed by hand' }
       const identity = clientIdentityHeaders()
       return {
         name: 'mcp',
@@ -495,7 +493,7 @@ function checkMcpEntry(cfg: unknown, apiBase: string, apiKey: string | undefined
         notice: true,
         detail:
           `mcp.servers.agentchat is managed by hand and does not name this client, so ${unknownClient} — ` +
-          `add "${CLIENT_HEADER}": "${identity[CLIENT_HEADER]}" and "${CLIENT_VERSION_HEADER}": "${identity[CLIENT_VERSION_HEADER]}" to its headers`,
+          `add "${CLIENT_HEADER}": "${identity[CLIENT_HEADER]}" to its headers`,
       }
     }
     case 'disabled':

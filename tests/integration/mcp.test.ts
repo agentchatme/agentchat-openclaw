@@ -17,7 +17,6 @@ import {
   probeHostedMcp,
   AUTH_HEADER_TEMPLATE,
   CLIENT_HEADER,
-  CLIENT_VERSION_HEADER,
 } from '../../src/integration/mcp.js'
 import { PACKAGE_VERSION } from '../../src/version.js'
 import { testKey } from '../helpers/keys.js'
@@ -34,23 +33,21 @@ describe('hosted MCP entry', () => {
     expect(hostedMcpServerEntry()).toEqual({
       url: 'https://api.agentchat.me/mcp',
       transport: 'streamable-http',
-      headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION },
+      headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw' },
     })
     expect(AUTH_HEADER_TEMPLATE).toBe('Bearer ${AGENTCHAT_API_KEY}')
     expect(hostedMcpSnippet()).toContain('transport: "streamable-http"')
     expect(hostedMcpSnippet()).toContain('Authorization: "Bearer ${AGENTCHAT_API_KEY}"')
     expect(hostedMcpSnippet()).toContain('"X-AgentChat-Client": "openclaw"')
-    expect(hostedMcpSnippet()).toContain(`"X-AgentChat-Client-Version": "${PACKAGE_VERSION}"`)
+    expect(hostedMcpSnippet()).not.toContain('Version')
   })
 
-  it('names the client with the header names AgentChat reads, and the version header tracks the package version', () => {
-    // AgentChat reads these two headers (any case) to name the client and its version
+  it('names the client with the header AgentChat reads, and is the same entry in every release (no version in it)', () => {
+    // AgentChat reads this header (any case) to name the client
     expect(CLIENT_HEADER.toLowerCase()).toBe('x-agentchat-client')
-    expect(CLIENT_VERSION_HEADER.toLowerCase()).toBe('x-agentchat-client-version')
-    expect(PACKAGE_VERSION).toBe(PACKAGE_JSON_VERSION)
-    expect(hostedMcpServerEntry().headers['X-AgentChat-Client-Version']).toBe(PACKAGE_JSON_VERSION)
-    // the server keeps a version only when it is a short build identifier
-    expect(PACKAGE_VERSION).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,63}$/)
+    // static: nothing in the entry or the snippet depends on the package version, so an upgrade never rewrites it
+    expect(JSON.stringify(hostedMcpServerEntry())).not.toContain(PACKAGE_VERSION)
+    expect(hostedMcpSnippet()).not.toContain(PACKAGE_JSON_VERSION)
   })
 
   it('the README shows the entry exactly as the plugin writes it', () => {
@@ -84,7 +81,7 @@ describe('hosted MCP entry', () => {
     // brought up to date, the bearer stays exactly as it was (OpenClaw restores the file's ${VAR} on an unchanged path)
     const updated = withHostedMcpEntry(substituted, 'https://api.agentchat.me', key)
     expect(updated.outcome).toBe('updated')
-    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ Authorization: `Bearer ${key}`, 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION })
+    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ Authorization: `Bearer ${key}`, 'X-AgentChat-Client': 'openclaw' })
     // a current entry, substituted, is left as it is
     const current = { mcp: { servers: { agentchat: { ...hostedMcpServerEntry(), headers: { ...hostedMcpServerEntry().headers, Authorization: `Bearer ${key}` } } } } }
     expect(withHostedMcpEntry(current, 'https://api.agentchat.me', key)).toEqual({ cfg: current, outcome: 'present' })
@@ -116,7 +113,7 @@ describe('hosted MCP entry', () => {
       transport: 'streamable-http',
       requestTimeoutMs: 20000,
       toolFilter: { exclude: ['agentchat_report_agent'] },
-      headers: { 'X-Trace': 'on', Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION },
+      headers: { 'X-Trace': 'on', Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw' },
     })
     expect(updated.cfg.mcp.servers.other).toEqual({ url: 'https://x/mcp' })
     expect(cfg.mcp.servers.agentchat.headers).toEqual({ ...OLD_ENTRY.headers, 'X-Trace': 'on' }) // pure: the input is not touched
@@ -124,16 +121,18 @@ describe('hosted MCP entry', () => {
     expect(withHostedMcpEntry(updated.cfg).outcome).toBe('present')
   })
 
-  it('an older version in our entry is outdated and is updated; header names match without regard to case', () => {
-    const older = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'x-agentchat-client': 'openclaw', 'x-agentchat-client-version': '0.10.0' } } } } }
-    expect(describeMcpIdentity(older)).toBe('outdated')
-    const updated = withHostedMcpEntry(older)
+  it('a version header in an entry is harmless: it is ours, current when it names the client, and never rewritten to drop it; names match in any case', () => {
+    const withVersion = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'x-agentchat-client': 'OpenClaw', 'x-agentchat-client-version': '0.10.0' } } } } }
+    expect(describeMcpEntry(withVersion)).toBe('ours')
+    expect(describeMcpIdentity(withVersion)).toBe('current')
+    expect(withHostedMcpEntry(withVersion)).toEqual({ cfg: withVersion, outcome: 'present' })
+    expect(upgradeHostedMcpEntryInPlace(withVersion)).toBe(false)
+    // without the client name it gains the header; the version header stays as it was
+    const versionOnly = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client-Version': '0.10.0' } } } } }
+    expect(describeMcpIdentity(versionOnly)).toBe('missing')
+    const updated = withHostedMcpEntry(versionOnly)
     expect(updated.outcome).toBe('updated')
-    // one spelling of each identity header, not two; the bearer keeps its own spelling and value
-    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION })
-    const sameVersionOtherCase = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'x-agentchat-client': 'OpenClaw', 'x-agentchat-client-version': PACKAGE_VERSION } } } } }
-    expect(describeMcpIdentity(sameVersionOtherCase)).toBe('current')
-    expect(withHostedMcpEntry(sameVersionOtherCase).outcome).toBe('present')
+    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client-Version': '0.10.0', 'X-AgentChat-Client': 'openclaw' })
     // another client's name is no identity of ours
     expect(describeMcpIdentity({ mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { ...OLD_ENTRY.headers, 'X-AgentChat-Client': 'hermes' } } } } })).toBe('missing')
   })
@@ -161,22 +160,20 @@ describe('hosted MCP entry', () => {
     const upgraded = withHostedMcpEntry(twoClients)
     expect(upgraded.outcome).toBe('updated')
     expect(upgraded.cfg.mcp.servers.agentchat.headers).toEqual(hostedMcpServerEntry().headers)
-    const twoVersions = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { ...hostedMcpServerEntry().headers, 'x-agentchat-client-version': '0.9.0' } } } } }
-    expect(describeMcpIdentity(twoVersions)).toBe('outdated')
   })
 
   it('a bearer template the operator spelled differently is kept as written', () => {
     const custom = { mcp: { servers: { agentchat: { ...OLD_ENTRY, headers: { authorization: 'Bearer  ${AGENTCHAT_API_KEY}' } } } } }
     const updated = withHostedMcpEntry(custom)
     expect(updated.outcome).toBe('updated')
-    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ authorization: 'Bearer  ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION })
+    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ authorization: 'Bearer  ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw' })
   })
 
   it('an entry of ours without an Authorization header gets the client headers and no bearer it did not have', () => {
     const bare = { mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { 'x-api-key': '${AGENTCHAT_API_KEY}' } } } } }
     const updated = withHostedMcpEntry(bare)
     expect(updated.outcome).toBe('updated')
-    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ 'x-api-key': '${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION })
+    expect(updated.cfg.mcp.servers.agentchat.headers).toEqual({ 'x-api-key': '${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw' })
   })
 
   it('a hand-written or disabled entry is never touched, with or without the client headers', () => {

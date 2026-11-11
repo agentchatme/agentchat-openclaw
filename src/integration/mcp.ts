@@ -38,22 +38,24 @@
  *   `mcp` → dispose MCP runtimes).
  *
  * The entry names this client to the hosted tools: `X-AgentChat-Client:
- * openclaw` and `X-AgentChat-Client-Version: <this package's version>`,
- * the headers AgentChat reads on `/mcp` (it does not read MCP's
- * `clientInfo`). Without them the agent is an unknown client: AgentChat
- * lists the wake-webhook tools and tells it to register a webhook, a second
- * wake path next to this plugin's socket. An entry an earlier release wrote
- * (bearer only) is still ours and is brought up to date in place — at the
- * gateway's start, by setup and by `openclaw doctor --fix`; a hand-written
- * or disabled entry is never touched, and doctor and status say when a
- * hand-written one does not name the client.
+ * openclaw`, the header AgentChat reads on `/mcp` (it does not read MCP's
+ * `clientInfo`). Without it the agent is an unknown client: AgentChat lists
+ * the wake-webhook tools and tells it to register a webhook, a second wake
+ * path next to this plugin's socket. The entry is static — the same in
+ * every release, no version in it (AgentChat learns the plugin's version
+ * from its socket and REST traffic) — so an install is brought up to date
+ * at most once and the plugin never rewrites the operator's config on an
+ * upgrade. An entry an earlier release wrote (bearer only) is still ours
+ * and gains the header in place — at the gateway's start, by setup and by
+ * `openclaw doctor --fix`; a hand-written or disabled entry is never
+ * touched, and doctor and status say when a hand-written one does not name
+ * the client.
  */
 
 import { integration } from 'agentchatme'
 
 import { AGENTCHAT_CLIENT_IDENTITY, AGENTCHAT_CLIENT_NAME } from '../client-identity.js'
 import { API_KEY_ENV } from '../credentials/read-env.js'
-import { PACKAGE_VERSION } from '../version.js'
 import { MCP_SERVER_NAME } from './turn.js'
 
 export const MCP_PATH = '/mcp'
@@ -66,8 +68,6 @@ export function hostedMcpUrl(apiBase: string = DEFAULT_API_BASE): string {
 
 /** The header that names the calling client to AgentChat (the server reads it case-insensitively). */
 export const CLIENT_HEADER = 'X-AgentChat-Client'
-/** The header that carries that client's version: this package's (`src/version.ts`). */
-export const CLIENT_VERSION_HEADER = 'X-AgentChat-Client-Version'
 
 export interface McpServerEntry {
   readonly url: string
@@ -75,19 +75,17 @@ export interface McpServerEntry {
   readonly headers: {
     readonly Authorization: string
     readonly [CLIENT_HEADER]: string
-    readonly [CLIENT_VERSION_HEADER]: string
   }
 }
 
-/** The identity headers this release sends: the client name and this package's version. */
-export function clientIdentityHeaders(): { readonly [CLIENT_HEADER]: string; readonly [CLIENT_VERSION_HEADER]: string } {
-  return { [CLIENT_HEADER]: AGENTCHAT_CLIENT_NAME, [CLIENT_VERSION_HEADER]: PACKAGE_VERSION }
+/** The identity header the entry carries: the client's name, the same in every release. */
+export function clientIdentityHeaders(): { readonly [CLIENT_HEADER]: string } {
+  return { [CLIENT_HEADER]: AGENTCHAT_CLIENT_NAME }
 }
 
-/** `X-AgentChat-Client: openclaw, X-AgentChat-Client-Version: <version>` — for log and status lines. */
+/** `X-AgentChat-Client: openclaw` — for log and status lines. */
 export function clientIdentityText(): string {
-  const identity = clientIdentityHeaders()
-  return `${CLIENT_HEADER}: ${identity[CLIENT_HEADER]}, ${CLIENT_VERSION_HEADER}: ${identity[CLIENT_VERSION_HEADER]}`
+  return `${CLIENT_HEADER}: ${AGENTCHAT_CLIENT_NAME}`
 }
 
 /** The `mcp.servers.agentchat` value this plugin places. */
@@ -112,7 +110,6 @@ export function hostedMcpSnippet(apiBase: string = DEFAULT_API_BASE): string {
     '        headers: {',
     `          Authorization: "${AUTH_HEADER_TEMPLATE}",`,
     `          "${CLIENT_HEADER}": "${identity[CLIENT_HEADER]}",`,
-    `          "${CLIENT_VERSION_HEADER}": "${identity[CLIENT_VERSION_HEADER]}",`,
     '        },',
     '      },',
     '    },',
@@ -166,13 +163,14 @@ function pointsAtUs(entry: Record<string, unknown>, apiBase: string, apiKey: str
 
 /**
  * Whether the `mcp.servers.agentchat` entry names this client:
- * - `current` — `X-AgentChat-Client: openclaw` and this package's version;
- * - `outdated` — `openclaw`, but another version (or none);
- * - `missing` — no `X-AgentChat-Client`, or another client's name (there is
- *   no entry at all, or it is not an object, is `missing` too).
+ * - `current` — one `X-AgentChat-Client: openclaw` (any other header, a
+ *   version header included, is the entry's business and left alone);
+ * - `missing` — no `X-AgentChat-Client`, another client's name, or two
+ *   spellings of it (there is no entry at all, or it is not an object, is
+ *   `missing` too).
  * Header names are matched without regard to case, as HTTP does.
  */
-export type McpIdentityState = 'current' | 'outdated' | 'missing'
+export type McpIdentityState = 'current' | 'missing'
 
 export function describeMcpIdentity(cfg: unknown): McpIdentityState {
   const entry = agentchatEntry(cfg)
@@ -183,10 +181,7 @@ export function describeMcpIdentity(cfg: unknown): McpIdentityState {
   // which names no client it knows: as good as none.
   const clients = headerValues(headers, CLIENT_HEADER)
   const client = clients[0]
-  if (clients.length !== 1 || typeof client !== 'string' || client.trim().toLowerCase() !== want[CLIENT_HEADER]) return 'missing'
-  const versions = headerValues(headers, CLIENT_VERSION_HEADER)
-  const version = versions[0]
-  return versions.length === 1 && typeof version === 'string' && version.trim() === want[CLIENT_VERSION_HEADER] ? 'current' : 'outdated'
+  return clients.length === 1 && typeof client === 'string' && client.trim().toLowerCase() === want[CLIENT_HEADER] ? 'current' : 'missing'
 }
 
 export type McpEntryOutcome = 'added' | 'updated' | 'present' | 'user_managed' | 'disabled'
@@ -217,14 +212,11 @@ export function withHostedMcpEntry<T extends object>(
   return { cfg: { ...base, mcp } as T, outcome: state === 'ours' ? 'updated' : 'added' }
 }
 
-/** The identity header names (lower case), replaced in every spelling on an upgrade. */
-const IDENTITY_HEADERS = new Set([CLIENT_HEADER.toLowerCase(), CLIENT_VERSION_HEADER.toLowerCase()])
-
 /**
- * Our entry, brought up to date: the identity headers for this release, in
- * one spelling each, and everything else exactly as it was — the bearer
- * included (same header name, same value), timeouts, `toolFilter`, other
- * headers. The bearer is never rewritten: the config OpenClaw hands a plugin
+ * Our entry, brought up to date: one `X-AgentChat-Client: openclaw` (every
+ * other spelling of it dropped), and everything else exactly as it was —
+ * the bearer included (same header name, same value), timeouts,
+ * `toolFilter`, other headers. The bearer is never rewritten: the config OpenClaw hands a plugin
  * (and the draft `mutateConfigFile` gives it) is env-substituted, so the
  * value seen may be the key itself; written back unchanged, OpenClaw
  * restores the `${VAR}` reference the file had at that path, and an operator
@@ -232,7 +224,7 @@ const IDENTITY_HEADERS = new Set([CLIENT_HEADER.toLowerCase(), CLIENT_VERSION_HE
  */
 export function upgradedHostedMcpEntry(entry: Readonly<Record<string, unknown>>, apiBase: string = DEFAULT_API_BASE): Record<string, unknown> {
   const headers = isRecord(entry.headers) ? entry.headers : {}
-  const kept = Object.fromEntries(Object.entries(headers).filter(([name]) => !IDENTITY_HEADERS.has(name.toLowerCase())))
+  const kept = Object.fromEntries(Object.entries(headers).filter(([name]) => name.toLowerCase() !== CLIENT_HEADER.toLowerCase()))
   return {
     ...entry,
     url: hostedMcpUrl(apiBase),
@@ -276,8 +268,9 @@ export const NIX_MODE_ERROR_CODE = 'OPENCLAW_NIX_MODE_CONFIG_IMMUTABLE'
 
 /**
  * At the gateway's start: bring our `mcp.servers.agentchat` up to date when
- * the live config shows it out of date (an install from an earlier release,
- * or a version change). One focused write through OpenClaw's
+ * the live config shows it does not name the client (an install from a
+ * release before 0.10.1) — once per install, since the entry is the same in
+ * every release from then on. One focused write through OpenClaw's
  * `runtime.config.mutateConfigFile` (its draft is the file as it is now,
  * env-substituted; OpenClaw restores `${VAR}` references on the paths left
  * unchanged), with `afterWrite: auto` — under the default reload mode

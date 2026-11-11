@@ -33,7 +33,6 @@ import { loadIdentityLine } from '../../src/integration/texts.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
 import { testKey } from '../helpers/keys.js'
 import { hostedMcpServerEntry } from '../../src/integration/mcp.js'
-import { PACKAGE_VERSION } from '../../src/version.js'
 
 const KEY = ['ac', 'd'.repeat(24)].join('_')
 
@@ -214,11 +213,11 @@ describe('doctor adapter — the llm override opt-in for a non-default bound age
     const mcp = warnings.filter((w) => w.includes('mcp:'))
     expect(mcp).toHaveLength(1)
     expect(mcp[0]).toMatch(/without X-AgentChat-Client — AgentChat treats the agent as an unknown client and lists the webhook-setup tools/)
-    expect(mcp[0]).toContain('the gateway updates the entry when it starts (its log says if it could not), and openclaw doctor --fix does now')
+    expect(mcp[0]).toContain('the gateway adds X-AgentChat-Client: openclaw to the entry when it starts (its log says if it could not), and openclaw doctor --fix does now')
     expect(mcp[0]).not.toMatch(/adds it\)$/)
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: substituted as never, doctorFixCommand: 'fix', env: {} })
-    expect(fixed.changes).toContain(`updated mcp.servers.agentchat to name this client (X-AgentChat-Client: openclaw, X-AgentChat-Client-Version: ${PACKAGE_VERSION})`)
-    // only the identity headers change; the substituted bearer goes back as it came, so OpenClaw's write restores the file's ${VAR}
+    expect(fixed.changes).toContain('updated mcp.servers.agentchat to name this client (X-AgentChat-Client: openclaw)')
+    // only the client header is added; the substituted bearer goes back as it came, so OpenClaw's write restores the file's ${VAR}
     expect((fixed.config as unknown as { mcp: { servers: { agentchat: unknown } } }).mcp.servers.agentchat).toEqual({
       ...hostedMcpServerEntry(),
       headers: { ...hostedMcpServerEntry().headers, Authorization: `Bearer ${KEY2}` },
@@ -234,12 +233,12 @@ describe('doctor adapter — the llm override opt-in for a non-default bound age
     const mcp = warnings.filter((w) => w.includes('mcp:'))
     expect(mcp).toHaveLength(1)
     expect(mcp[0]).toContain(`managed by hand and does not name this client`)
-    expect(mcp[0]).toContain(`add "X-AgentChat-Client": "openclaw" and "X-AgentChat-Client-Version": "${PACKAGE_VERSION}" to its headers`)
+    expect(mcp[0]).toContain('add "X-AgentChat-Client": "openclaw" to its headers')
     expect(mcp[0]).not.toContain('--fix')
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: cfg as never, doctorFixCommand: 'fix', env: {} })
     expect(fixed.changes.some((c) => c.includes('mcp.servers'))).toBe(false)
     expect((fixed.config as unknown as { mcp: { servers: { agentchat: unknown } } }).mcp.servers.agentchat).toEqual(hand)
-    // once it names the client, no notice (an older version there is the operator's to keep)
+    // once it names the client, no notice (any other header there, a version included, is the operator's)
     const named = { ...cfg, mcp: { servers: { agentchat: { ...hand, headers: { ...hand.headers, 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': '0.9.0' } } } } }
     const quiet = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: named as never, doctorFixCommand: 'fix', env: {} })
     expect(quiet.some((w) => w.includes('mcp:'))).toBe(false)

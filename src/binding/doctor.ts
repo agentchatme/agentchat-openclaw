@@ -8,7 +8,7 @@
  * (`openclaw doctor --fix` only — OpenClaw never calls it in preview) adds
  * the `mcp.servers.agentchat` entry (a template on `AGENTCHAT_API_KEY`,
  * never the key; hand-written entries are left alone) or brings ours up to
- * date (the headers that name this client), persists
+ * date (the header that names this client), persists
  * `agentHandle`, writes the llm opt-in for a non-default bound agent, and
  * places a missing identity line for the configured handle — fetching the
  * served text first (server, then the cached copy). An identity line

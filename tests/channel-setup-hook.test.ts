@@ -39,7 +39,6 @@ import { agentchatChannelConfigSchema } from '../src/config-schema.js'
 import { writeAgentsAnchor } from '../src/binding/agents-anchor.js'
 import { getPluginRuntime, setPluginRuntime, isUsablePluginRuntime, resetPluginRuntimeForTest } from '../src/integration/runtime-holder.js'
 import { testKey } from './helpers/keys.js'
-import { PACKAGE_VERSION } from '../src/version.js'
 
 const KEY = testKey('n'.repeat(24))
 const liveAgent = { handle: 'alice', email: 'a@x', displayName: null, createdAt: 'now' }
@@ -114,7 +113,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
     expect(next.mcp.servers.agentchat).toEqual({
       url: 'https://api.agentchat.me/mcp',
       transport: 'streamable-http',
-      headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION },
+      headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw' },
     })
     expect(next.plugins).toBeUndefined()
   })
@@ -124,7 +123,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
     const next = agentchatPlugin.setup!.applyAccountConfig({ cfg: old as never, accountId: 'default', input: { token: KEY, agentHandle: '@alice' } as never }) as unknown as {
       mcp: { servers: { agentchat: { headers: Record<string, string> } } }
     }
-    expect(next.mcp.servers.agentchat.headers).toEqual({ Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw', 'X-AgentChat-Client-Version': PACKAGE_VERSION })
+    expect(next.mcp.servers.agentchat.headers).toEqual({ Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw' })
   })
 
   it('applyAccountConfig without a learnt handle (older OpenClaw) still registers the hosted tools', () => {
