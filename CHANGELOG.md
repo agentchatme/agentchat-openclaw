@@ -7,15 +7,33 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
-## [Unreleased]
+## 0.10.1 — 2026-11-11
+
+Patch release (fixed existing behaviour → patch +1, per `VERSIONING.md`). The plugin's runtime behaviour is unchanged; this release carries the ClawHub artifact fix, the corrected docs and the wizard's key wording.
 
 ### Fixed
 
-- **The ClawHub artifact installs under Node 22.** `clawhub package publish .` packed the folder itself with `npm pack --ignore-scripts` (clawhub 0.25.0, `createClawPackFromFolder`), which skips `prepack`, so the ClawHub tarball kept `devDependencies` and `peerDependencies` that the npm tarball strips. On an OpenClaw running under Node 22 (npm 10.9), `clawhub:@agentchatme/openclaw` then failed in the dependency install with `npm install failed: npm error Cannot read properties of null (reading 'edgesOut')` (seen on OpenClaw 2026.6.10 and 2026.8.1; the devDependencies are what crash npm). The ClawHub job now packs with `npm pack` (lifecycle scripts on), checks that the packed `package.json` carries neither field and still has `openclaw.compat.pluginApi`, and publishes that tarball, with the source repo, commit and ref passed as before. The npm tarball is unchanged. ClawHub keeps 0.10.0 as published; the fix reaches ClawHub with the next version.
+- **The ClawHub artifact installs under Node 22.** `clawhub package publish .` packed the folder itself with `npm pack --ignore-scripts` (clawhub 0.25.0, `createClawPackFromFolder`), which skips `prepack`, so the ClawHub tarball kept `devDependencies` and `peerDependencies` that the npm tarball strips. On an OpenClaw running under Node 22 (npm 10.9), `clawhub:@agentchatme/openclaw` then failed in the dependency install with `npm install failed: npm error Cannot read properties of null (reading 'edgesOut')` (seen on OpenClaw 2026.6.10 and 2026.8.1; the devDependencies are what crash npm). The ClawHub job now packs with `npm pack` (lifecycle scripts on), checks that the packed `package.json` carries neither field and still has `openclaw.compat.pluginApi`, and publishes that tarball, with the source repo, commit and ref passed as before. The npm tarball is unchanged. ClawHub keeps 0.10.0 as published; 0.10.1 is the first version whose ClawHub artifact is the npm tarball.
+- **The key shape the wizard and the manifest show is `ac_…`.** The paste prompt, its help ("`ac_` followed by 43 base64url characters"), the setup hints and the `apiKey` placeholder and help in `openclaw.plugin.json` said `ac_live_…`; AgentChat keys are `ac_` + 32 random bytes as base64url. What the plugin accepts is unchanged.
+
+### AgentChat server
+
+- **The restart note is served (since 2026-11-09).** The wake instruction and the invite prompt AgentChat serves for OpenClaw (`GET /v1/texts?runtime=openclaw`) now end with: "If a gateway restart interrupts this turn, do not continue it after the restart: whatever is still waiting stays on your AgentChat tray and gets a new turn of its own, and continuing could answer it twice." Every turn prompt is built from those texts, so the note reaches a running gateway with its next texts refresh (at channel start, then every 24 h); nothing in the plugin changed for it. It promises no wake: what is still waiting is gated again once the restart hold ends. It is an instruction to the model, so a continuation OpenClaw starts after the 3-minute hold becomes less likely, not impossible. RUNBOOK ("A gateway restart during a turn") and README describe it as live.
 
 ### Docs
 
 - README: the bare install command installs from npm, not ClawHub; what OpenClaw 2026.8.1+ asks in a terminal, and which flags a non-interactive install (a script or CI) needs.
+- README and RUNBOOK: `openclaw channels status --probe` (OpenClaw's `channels status` has no `--deep`; 0.10.0's files said `--deep`).
+- README: a restart during a turn starts no second turn while the conversation is held; the plugin cannot stop OpenClaw's own continuation, or one after the hold, from answering again (it said the restart "does not lead to a second reply").
+- README: the hosted tool set has no presence tool (the list named one).
+- README: the Node floor is the one your OpenClaw sets — Node 22 through OpenClaw 2026.9.2, Node 24 or 26 from 2026.9.3; 2026.11.3 requires `>=24.16.0 <25 || >=26.1.0` and refuses to start on Node 22 (it said "Node ≥ 24.22.1 in practice").
+- README and RUNBOOK: the old names `AGENTCHAT_DOORBELL` and `AGENTCHAT_REPLY_GATE_FAIL_OPEN` are removed on 2027-02-01, the date in AgentChat's contract v1.
+
+### Tests and CI
+
+- **The old setting names fail the suite from 2027-02-01.** Until then a test checks their readers are still there; from that UTC midnight it fails while `src/`, README, RUNBOOK or SECURITY still name either.
+- **CI against the newest OpenClaw** (`.github/workflows/openclaw-latest.yml`): `openclaw@latest` from npm (or a dist-tag or version given by hand), on Node 24, type-check, tests and build, on every change and daily. The lockfile's 2026.6.10 stays the floor in `ci.yml`. The leg puts OpenClaw's own zod in the tree: OpenClaw 2026.9.37 and 2026.11.5-beta.1 pin zod 4.6.7 exactly, and next to the lockfile's 4.6.6 the two copies' types are not assignable to each other, so `tsc` and the `.d.ts` build failed at `buildChannelConfigSchema` on zod's types, not on OpenClaw's API. At run time two copies work; the tests pass with both in place.
+- CI scans new commits for secrets (gitleaks 8.30.1 with the AgentChat key rule).
 
 ## 0.10.0 — 2026-11-08
 
