@@ -33,7 +33,7 @@ import { loadIdentityLine } from '../../src/integration/texts.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
 import { testKey } from '../helpers/keys.js'
 
-const KEY = ['ac', 'live', 'd'.repeat(24)].join('_')
+const KEY = ['ac', 'd'.repeat(24)].join('_')
 
 describe('doctor adapter', () => {
   let workspace: string

@@ -81,7 +81,7 @@ describe('hosted MCP entry', () => {
 describe('probeHostedMcp — the kit probe with the plugin identity', () => {
   const initResult = { protocolVersion: '2025-06-18', serverInfo: { name: 'agentchat', version: '0.1.1' }, capabilities: {} }
   const toolsResult = { tools: [{ name: 'agentchat_inbox' }, { name: 'agentchat_decide' }, { name: 'agentchat_send_message' }] }
-  const key = ['ac', 'live', 'k'.repeat(24)].join('_')
+  const key = ['ac', 'k'.repeat(24)].join('_')
 
   function server(answers: { tools?: unknown; status?: number; sse?: boolean } = {}) {
     const seen: Array<{ url: string; init: RequestInit }> = []

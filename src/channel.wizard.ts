@@ -40,7 +40,7 @@
  *
  * Writes go through `applyAgentchatAccountPatch` — the same helper backing
  * `setup.applyAccountConfig`, so the non-interactive `openclaw setup --token
- * ac_live_…` path and the interactive wizard path converge on the same config
+ * ac_…` path and the interactive wizard path converge on the same config
  * shape and stay round-trippable.
  *
  * `disable` wires `setSetupChannelEnabled` so `openclaw channels remove
@@ -927,7 +927,7 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
         {
           value: 'paste',
           label: 'I already have an API key',
-          hint: 'paste ac_live_… on the next prompt',
+          hint: 'paste ac_… on the next prompt',
         },
         {
           value: 'recover',
@@ -1020,10 +1020,10 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
       preferredEnvVar: 'AGENTCHAT_API_KEY',
       envPrompt: 'AGENTCHAT_API_KEY detected in env. Use it?',
       keepPrompt: 'AgentChat API key already configured. Keep it?',
-      inputPrompt: 'Paste your AgentChat API key (ac_live_…)',
+      inputPrompt: 'Paste your AgentChat API key (ac_…)',
       helpTitle: 'AgentChat API key',
       helpLines: [
-        'Format: ac_live_<base64>, ≥20 chars. Validated against',
+        'Format: ac_ followed by 43 base64url characters. Validated against',
         'GET /v1/agents/me during this wizard — bad keys fail fast instead',
         'of flapping reconnects at runtime.',
       ],

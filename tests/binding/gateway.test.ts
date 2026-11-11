@@ -54,7 +54,7 @@ async function disposeBuilt(result: { loop: { stop(): Promise<void> } | null; te
 }
 import { IDENTITY_LINE } from '../helpers/texts.js'
 
-const KEY = ['ac', 'live', 'g'.repeat(24)].join('_')
+const KEY = ['ac', 'g'.repeat(24)].join('_')
 
 function config() {
   return {

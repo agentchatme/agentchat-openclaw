@@ -73,7 +73,7 @@ import {
 } from '../src/channel-account.js'
 
 // Key-shaped test values are built at run time so no secret-shaped literal sits in the repository.
-const testKey = (tail: string): string => ['ac', 'live', tail].join('_')
+const testKey = (tail: string): string => ['ac', tail].join('_')
 const KEY_PASTED = testKey('abcdef0123456789abcd')
 const KEY_EXISTING = testKey('0123456789abcdef0123')
 const KEY_BAD = testKey('bad00000000000000000')

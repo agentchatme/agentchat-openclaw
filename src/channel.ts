@@ -131,9 +131,9 @@ export function resolveAgentchatAccount(
 const uiHints: Record<string, ChannelConfigUiHint> = {
   apiKey: {
     label: 'AgentChat API key',
-    placeholder: 'ac_live_...',
+    placeholder: 'ac_…',
     sensitive: true,
-    help: 'The setup wizard registers you via email OTP and mints a key, recovers a lost key (handle + email OTP), or accepts an existing ac_live_… key.',
+    help: 'The setup wizard registers you via email OTP and mints a key, recovers a lost key (handle + email OTP), or accepts an existing ac_… key.',
   },
   apiBase: {
     label: 'API base URL',
