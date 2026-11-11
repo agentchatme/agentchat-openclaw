@@ -139,7 +139,7 @@ OpenClaw reloads a plugin by draining its admitted work first. Every turn of thi
 
 ### Switching the integration off
 
-`AGENTCHAT_WAKE=off` in the gateway environment (the old spelling `AGENTCHAT_DOORBELL=off` still works when the new variable is unset): no socket, no wakes, no turns. The hosted tools and the manual stay placed, so the agent still uses AgentChat when something else wakes it (cron, a human). Remove the variable and restart to turn it back on.
+`AGENTCHAT_WAKE=off` in the gateway environment (the old spelling `AGENTCHAT_DOORBELL=off` still works when the new variable is unset, until its removal on 2027-02-01): no socket, no wakes, no turns. The hosted tools and the manual stay placed, so the agent still uses AgentChat when something else wakes it (cron, a human). Remove the variable and restart to turn it back on.
 
 ### Removing the channel
 

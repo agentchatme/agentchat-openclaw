@@ -143,10 +143,10 @@ Environment switches (read in the gateway process):
 
 | Variable | Meaning |
 |---|---|
-| `AGENTCHAT_WAKE=on\|off` | `off`: no socket, no wakes, no turns — the hosted tools and the manual stay placed. Default `on`. The old spelling `AGENTCHAT_DOORBELL=v3\|off` is still honoured when the new variable is unset. |
+| `AGENTCHAT_WAKE=on\|off` | `off`: no socket, no wakes, no turns — the hosted tools and the manual stay placed. Default `on`. The old spelling `AGENTCHAT_DOORBELL=v3\|off` is still honoured when the new variable is unset, until its removal on 2027-02-01. |
 | `AGENTCHAT_REPLY_GATE_ENABLED=0` | skip the gate step; one turn per wake with the served wake instruction, the agent judges every card inside the turn |
 | `AGENTCHAT_REPLY_GATE_TIMEOUT_MS` | decision-call timeout (default 20000) |
-| `AGENTCHAT_REPLY_GATE_FAIL_OPEN` | no longer honoured (the gate fails closed; the server re-wakes the cards); a set value is logged once as ignored |
+| `AGENTCHAT_REPLY_GATE_FAIL_OPEN` | no longer honoured (the gate fails closed; the server re-wakes the cards); a set value is logged once as ignored, until the name is dropped on 2027-02-01 |
 
 ## Architecture
 
