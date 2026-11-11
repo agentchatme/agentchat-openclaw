@@ -15,7 +15,7 @@ This package is in pre-1.0 development.
 
 ### Docs
 
-- README: the bare install command installs from npm, not ClawHub; what OpenClaw 2026.8.1+ asks in a terminal and which flags a non-interactive install needs; a short "Upgrading from 0.7.x" section.
+- README: the bare install command installs from npm, not ClawHub; what OpenClaw 2026.8.1+ asks in a terminal, and which flags a non-interactive install (a script or CI) needs.
 
 ## 0.10.0 — 2026-11-08
 
