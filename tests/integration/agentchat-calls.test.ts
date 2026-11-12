@@ -15,28 +15,35 @@ import { integration } from 'agentchatme'
 import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 
 import { createRunWatcher } from '../../src/integration/model.js'
-import { countAgentChatCalls, readAgentChatCalls, TRANSCRIPT_READ_LIMIT, type AgentChatCalls } from '../../src/integration/run.js'
+import { countAgentChatCalls, openclawVersionAtLeast, readAgentChatCalls, TRANSCRIPT_READ_LIMIT, type AgentChatCalls } from '../../src/integration/run.js'
 import { card, invite, tray } from '../helpers/fake-client.js'
 import {
   assistantCalls,
   assistantText,
   blocked,
   codeModeExec,
+  codeModeExecLarge,
   codeModeWait,
   codexMirrored,
   compaction,
   DISPATCHER,
   dispatchCall,
   dispatchOk,
+  dispatchOkLarge,
   dispatchServerError,
+  dispatchServerErrorLarge,
   dispatchThrew,
   LINES,
   mcpOk,
+  mcpOkLarge,
   mcpServerError,
+  mcpServerErrorLarge,
+  nestedCall,
   mcpThrew,
   notRun,
   oversized,
   ranBy,
+  sessionsSpawn,
   shellExec,
   tail,
   toolSearchCode,
@@ -333,5 +340,140 @@ describe('a session that holds more than one run (a turn OpenClaw resumed after 
     const watch = createRunWatcher({ runtime: () => runtime })
     const outcome = await watch({ runId: 'run_resumed', sessionKey: 'agent:main:subagent:agentchat-wake-x' })
     expect(outcome).toMatchObject({ ran: true, runId: 'run_resumed', status: 'ok', agentchatCalls: null })
+  })
+})
+
+describe.each(LINES)('OpenClaw %s — a direct call whose details were over 8 KiB keeps its failure marks: read exactly', (line) => {
+  const turn = (row: Row) => withSeq([userPrompt(), assistantCalls([call('call_conv', 'agentchat_get_conversation')]), row, assistantText('done')])
+
+  it('a large success is ok', () => {
+    expect(countAgentChatCalls(turn(mcpOkLarge(line, 'call_conv', 'agentchat_get_conversation')))).toEqual({ made: 1, failed: 0 })
+  })
+
+  it('a large server failure is failed', () => {
+    expect(countAgentChatCalls(turn(mcpServerErrorLarge(line, 'call_conv', 'agentchat_get_conversation')))).toEqual({ made: 1, failed: 1 })
+  })
+})
+
+describe('a Tool Search call whose details were over 8 KiB', () => {
+  const turn = (line: OpenClawLine, row: Row) => withSeq([userPrompt(), dispatchCall(line, 'call_dispatch', 'agentchat_get_conversation'), row, assistantText('done')])
+
+  it('2026.11.3 (dispatch_action): a success is ok — not unknown — and the second silent look dismisses', () => {
+    const counted = countAgentChatCalls(turn('2026.11.3', dispatchOkLarge('2026.11.3', 'call_dispatch')))
+    expect(counted).toEqual({ made: 1, failed: 0 })
+    expect(secondSilentLook(counted)).toBe('record_dismiss')
+  })
+
+  it('2026.11.3: a server failure keeps the dispatcher status: failed', () => {
+    expect(countAgentChatCalls(turn('2026.11.3', dispatchServerErrorLarge('2026.11.3', 'call_dispatch')))).toEqual({ made: 1, failed: 1 })
+  })
+
+  it('2026.6.10: the failure was nested and is lost — unknown, success or not', () => {
+    expect(countAgentChatCalls(turn('2026.6.10', dispatchOkLarge('2026.6.10', 'call_dispatch')))).toBeNull()
+    expect(countAgentChatCalls(turn('2026.6.10', dispatchServerErrorLarge('2026.6.10', 'call_dispatch')))).toBeNull()
+  })
+
+  it('a `tool_call` dispatcher does not show the release: the host’s OpenClaw version decides', () => {
+    const rows = withSeq([userPrompt(), dispatchCall('2026.6.10', 'call_dispatch', 'agentchat_get_conversation'), { ...dispatchOkLarge('2026.6.10', 'call_dispatch') }, assistantText('done')])
+    expect(countAgentChatCalls(rows, undefined, { openclawVersion: '2026.9.37' })).toEqual({ made: 1, failed: 0 })
+    expect(countAgentChatCalls(rows, undefined, { openclawVersion: '2026.9.3' })).toEqual({ made: 1, failed: 0 })
+    expect(countAgentChatCalls(rows, undefined, { openclawVersion: '2026.9.2' })).toBeNull()
+    expect(countAgentChatCalls(rows, undefined, { openclawVersion: '2026.9.3-beta.1' })).toBeNull()
+    expect(countAgentChatCalls(rows, undefined, { openclawVersion: 'unknown' })).toBeNull()
+    expect(countAgentChatCalls(rows)).toBeNull()
+  })
+})
+
+describe('OpenClaw 2026.11.3 — nested calls are rows of their own: counted exactly', () => {
+  it('a Tool Search call: the nested row is the call, the dispatcher row is not counted again', () => {
+    const rows = withSeq([
+      userPrompt(),
+      dispatchCall('2026.11.3', 'call_0', 'agentchat_inbox'),
+      nestedCall('call_0', 'agentchat_inbox', 'ok'),
+      dispatchOkLarge('2026.11.3', 'call_0'),
+      assistantText('done'),
+    ])
+    const counted = countAgentChatCalls(rows)
+    expect(counted).toEqual({ made: 1, failed: 0 })
+    expect(secondSilentLook(counted)).toBe('record_dismiss')
+  })
+
+  it('a Code Mode turn (a preferred model): the script’s calls are counted, and a failed one is failed', () => {
+    const [exec, execResult] = codeModeExecLarge('call_0') as [Row, Row]
+    const ok = withSeq([userPrompt(), exec, nestedCall('call_0', 'agentchat_inbox', 'ok'), execResult, assistantText('done')])
+    expect(countAgentChatCalls(ok)).toEqual({ made: 1, failed: 0 })
+    expect(secondSilentLook(countAgentChatCalls(ok))).toBe('record_dismiss')
+
+    const failedSend = withSeq([userPrompt(), exec, nestedCall('call_0', 'agentchat_inbox', 'ok'), nestedCall('call_0', 'agentchat_send_message', 'server_error'), execResult, assistantText('done')])
+    const counted = countAgentChatCalls(failedSend)
+    expect(counted).toEqual({ made: 2, failed: 1 })
+    expect(secondSilentLook(counted)).toBe('record_defer')
+    expect(secondSilentInviteLook(counted)).toBe('none')
+  })
+
+  it('a nested result over 32 KiB keeps only isError, which is OpenClaw’s own reading: ok', () => {
+    const [exec, execResult] = codeModeExecLarge('call_0') as [Row, Row]
+    expect(countAgentChatCalls(withSeq([userPrompt(), exec, nestedCall('call_0', 'agentchat_get_conversation', 'omitted'), execResult]))).toEqual({ made: 1, failed: 0 })
+  })
+
+  it('a Code Mode turn with no nested rows: the host’s version says whether there were nested calls', () => {
+    const rows = withSeq([userPrompt(), ...codeModeExecLarge('call_0'), assistantText('done')])
+    // 2026.9.3+ records every nested call, so there were none: the turn looked at nothing.
+    expect(countAgentChatCalls(rows, undefined, { openclawVersion: '2026.11.3' })).toEqual({ made: 0, failed: 0 })
+    expect(countAgentChatCalls(rows, undefined, { openclawVersion: '2026.6.10' })).toBeNull()
+    expect(countAgentChatCalls(rows)).toBeNull()
+  })
+
+  it('nested rows of another run make the session more than one run: unknown', () => {
+    const [exec, execResult] = codeModeExecLarge('call_0') as [Row, Row]
+    const rows = withSeq([userPrompt(), ...ranBy('run_1', [exec]), nestedCall('call_0', 'agentchat_inbox', 'ok', 'run_other'), ...ranBy('run_1', [execResult])])
+    expect(countAgentChatCalls(rows, 'run_1')).toBeNull()
+    expect(countAgentChatCalls(withSeq([userPrompt(), ...ranBy('run_1', [exec]), nestedCall('call_0', 'agentchat_inbox', 'ok', 'run_1'), ...ranBy('run_1', [execResult])]), 'run_1')).toEqual({ made: 1, failed: 0 })
+  })
+
+  it('a nested call to another tool is not an AgentChat call', () => {
+    const [exec, execResult] = codeModeExecLarge('call_0') as [Row, Row]
+    const other = { ...nestedCall('call_0', 'agentchat_inbox', 'ok'), details: { ...(nestedCall('call_0', 'agentchat_inbox', 'ok').details as Row), toolName: 'web_search' } }
+    expect(countAgentChatCalls(withSeq([userPrompt(), exec, other, nestedCall('call_0', 'agentchat_inbox', 'ok'), execResult]))).toEqual({ made: 1, failed: 0 })
+  })
+
+  it('readAgentChatCalls passes the host’s OpenClaw version (`runtime.version`)', async () => {
+    const rows = withSeq([userPrompt(), ...codeModeExecLarge('call_0'), assistantText('done')])
+    const runtime = (version: string) => ({ version, subagent: { getSessionMessages: async () => ({ messages: rows }) } }) as unknown as PluginRuntime
+    expect(await readAgentChatCalls(runtime('2026.11.3'), 'k')).toEqual({ made: 0, failed: 0 })
+    expect(await readAgentChatCalls(runtime('2026.6.10'), 'k')).toBeNull()
+  })
+})
+
+describe.each(LINES)('OpenClaw %s — a turn that spawned a child session is unknown (the child’s calls are in its own session)', (line) => {
+  const withInbox = (...more: Row[]) => withSeq([userPrompt(), assistantCalls([call('call_inbox', 'agentchat_inbox')]), mcpOk(line, 'call_inbox', 'agentchat_inbox'), ...more, assistantText('done')])
+
+  it('sessions_spawn called directly', () => {
+    const counted = countAgentChatCalls(withInbox(...sessionsSpawn(line, 'call_spawn')))
+    expect(counted).toBeNull()
+    expect(secondSilentLook(counted)).toBe('record_defer')
+  })
+
+  it('sessions_spawn through Tool Search', () => {
+    const ask = assistantCalls([{ id: 'call_spawn', name: DISPATCHER[line], arguments: { id: 'openclaw:core:sessions_spawn', args: { task: 'Answer it.' } } }])
+    expect(countAgentChatCalls(withInbox(ask, { ...dispatchThrew(line, 'call_spawn') }))).toBeNull()
+  })
+
+  it('sessions_spawn from a script (a nested row)', () => {
+    const [exec, execResult] = codeModeExecLarge('call_0') as [Row, Row]
+    expect(countAgentChatCalls(withInbox(exec, nestedCall('call_0', 'sessions_spawn', 'ok'), execResult), undefined, { openclawVersion: '2026.11.3' })).toBeNull()
+  })
+})
+
+describe('openclawVersionAtLeast', () => {
+  it('compares YYYY.M.N numerically; a prerelease is below its release; anything else is below everything', () => {
+    expect(openclawVersionAtLeast('2026.9.3', '2026.9.3')).toBe(true)
+    expect(openclawVersionAtLeast('2026.9.33', '2026.9.3')).toBe(true)
+    expect(openclawVersionAtLeast('2026.10.1', '2026.9.3')).toBe(true)
+    expect(openclawVersionAtLeast('2026.9.2', '2026.9.3')).toBe(false)
+    expect(openclawVersionAtLeast('2026.8.35', '2026.9.3')).toBe(false)
+    expect(openclawVersionAtLeast('2026.11.5-beta.2', '2026.9.3')).toBe(true)
+    expect(openclawVersionAtLeast('2026.9.3-beta.1', '2026.9.3')).toBe(false)
+    expect(openclawVersionAtLeast('unknown', '2026.9.3')).toBe(false)
   })
 })

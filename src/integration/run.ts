@@ -223,8 +223,10 @@ export interface AgentChatCalls {
  *     or reset marker or an oversized-message placeholder, which stand for
  *     rows that are not there;
  *   - an AgentChat call's outcome cannot be read from its row (`callVerdict`);
- *   - the turn used Code Mode (`usedCodeMode`): the calls a Code Mode script
- *     makes, hosted ones included, leave no rows of their own;
+ *   - the turn used Code Mode (`usedCodeMode`) on a release that does not
+ *     record the calls a script makes (see the nested rows below);
+ *   - the turn handed work to a child session (`sessions_spawn`): the
+ *     child's calls are in its own session;
  *   - the session holds rows of another run (`__openclaw.runId`, which
  *     OpenClaw writes on assistant and tool rows from the 2026.8 line on —
  *     `attachSessionTranscriptRunId`, `src/sessions/transcript-events.ts`):
@@ -260,10 +262,37 @@ export interface AgentChatCalls {
  *             then read from the assistant's call (`arguments.id` / `toolId`
  *             / `name`, as `src/agents/tool-search.ts` reads it).
  *
+ *   A nested call — a call a Tool Search dispatcher or a Code Mode script
+ *   made, recorded by the release as its own row (`role: 'custom'`,
+ *   `customType: 'openclaw.nested-tool.v1'`, `details: { runId,
+ *   parentToolCallId, toolCallId, toolName, result, isError, … }`;
+ *   `src/sessions/nested-tool-activity.ts`, written by
+ *   `src/agents/embedded-agent-runner/run/attempt-tool-search-executor.ts`
+ *   from the 2026.8 line on). Its `isError` is OpenClaw's reading of the
+ *   result (`isError || isToolResultError(result)`, `handleToolExecutionEnd`,
+ *   `src/agents/embedded-agent-subscribe.handlers.tools.ts`); the result is
+ *   kept up to 32 KiB. A dispatcher row with nested rows under it is not
+ *   counted itself: its call is the nested row.
+ *
+ *   A row whose details were too large to store — over 8 KiB, the
+ *   persistence guard keeps `{ persistedDetailsTruncated, originalDetailKeys }`
+ *   and the top-level `status` / `error` / `success`
+ *   (`src/agents/session-tool-result-guard.payload.ts`). A direct call keeps
+ *   its failure marks at the top level on every release, so it is still
+ *   read exactly. A dispatcher row keeps only its own top-level status,
+ *   which says failure from 2026.9.3 on: there `isError: false` with no
+ *   status is a success; before, the failure was nested and is lost, so the
+ *   row is unknown.
+ *
+ * Which release wrote the rows is read from the rows where they show it —
+ * a nested row (the release records nested calls), a `dispatch_action`
+ * dispatcher (2026.10.10 and later) — and otherwise from `openclawVersion`,
+ * the host's OpenClaw version (`runtime.version`).
+ *
  * Failure in `details` is read with OpenClaw's own rule
  * (`isToolResultError`, `src/agents/tool-result-error.ts`).
  */
-export function countAgentChatCalls(messages: readonly unknown[], runId?: string): AgentChatCalls | null {
+export function countAgentChatCalls(messages: readonly unknown[], runId?: string, host: { readonly openclawVersion?: string } = {}): AgentChatCalls | null {
   if (messages.length === 0) return null
   const rows: Record<string, unknown>[] = []
   for (const row of messages) {
@@ -274,12 +303,24 @@ export function countAgentChatCalls(messages: readonly unknown[], runId?: string
   if (!coversWholeSession(rows)) return null
   if (runId && rows.some((row) => isOtherRun(row, runId))) return null
   const calls = assistantToolCalls(rows)
-  if (usedCodeMode(rows, calls)) return null
+  const nested = rows.flatMap((row) => {
+    const call = nestedCallOf(row)
+    return call ? [call] : []
+  })
+  const release = releaseOf(rows, calls, nested, host.openclawVersion)
+  if (delegatedToChild(rows, calls, nested)) return null
+  if (usedCodeMode(rows, calls) && !release.recordsNestedCalls) return null
+  // A dispatcher (or Code Mode) row whose calls have nested rows: the nested rows are those calls.
+  const parents = new Set(nested.flatMap((call) => (typeof call.parentToolCallId === 'string' ? [call.parentToolCallId] : [])))
   let made = 0
   let failed = 0
   for (const message of rows) {
-    if (message.role !== 'toolResult' && message.role !== 'tool') continue
-    const verdict = callVerdict(message, calls)
+    let verdict: CallVerdict
+    const call = nestedCallOf(message)
+    if (call) verdict = nestedVerdict(call)
+    else if (message.role !== 'toolResult' && message.role !== 'tool') continue
+    else if (typeof message.toolCallId === 'string' && parents.has(message.toolCallId)) continue
+    else verdict = callVerdict(message, calls, release)
     if (verdict === 'not_agentchat') continue
     if (verdict === 'unknown') return null
     made += 1
@@ -299,7 +340,8 @@ export async function readAgentChatCalls(runtime: PluginRuntime | null, sessionK
   try {
     const result = await runtime.subagent.getSessionMessages({ sessionKey, limit: TRANSCRIPT_READ_LIMIT })
     const messages: unknown = result?.messages
-    return Array.isArray(messages) ? countAgentChatCalls(messages, runId) : null
+    const openclawVersion = typeof runtime.version === 'string' ? runtime.version : undefined
+    return Array.isArray(messages) ? countAgentChatCalls(messages, runId, openclawVersion ? { openclawVersion } : {}) : null
   } catch {
     return null
   }
@@ -352,7 +394,7 @@ function coversWholeSession(rows: readonly Record<string, unknown>[]): boolean {
 
 /** A row OpenClaw attributes to a run other than `runId`. */
 function isOtherRun(row: Record<string, unknown>, runId: string): boolean {
-  const tagged = asRecord(row.__openclaw)?.runId
+  const tagged = asRecord(row.__openclaw)?.runId ?? nestedCallOf(row)?.runId
   return typeof tagged === 'string' && tagged.trim().length > 0 && tagged.trim() !== runId
 }
 
@@ -405,9 +447,76 @@ function assistantToolCalls(rows: readonly Record<string, unknown>[]): ReadonlyM
   return calls
 }
 
+/** What a release is known to write. */
+interface Release {
+  /** Nested calls get rows of their own (`openclaw.nested-tool.v1`). */
+  readonly recordsNestedCalls: boolean
+  /** A failed call's row says so at its top level: `isError`, and a dispatcher's own `status` (2026.9.3). */
+  readonly marksFailedRows: boolean
+}
+
+/** The first release this code trusts by version alone: failures marked on the row (openclaw/openclaw#139758) and nested calls recorded. */
+const TRUSTED_RELEASE = '2026.9.3'
+
+function releaseOf(rows: readonly Record<string, unknown>[], calls: ReadonlyMap<string, Record<string, unknown>>, nested: readonly Record<string, unknown>[], version: string | undefined): Release {
+  const byVersion = version !== undefined && openclawVersionAtLeast(version, TRUSTED_RELEASE)
+  // `dispatch_action` is the dispatcher's name from 2026.10.10 on.
+  const dispatchAction = rows.some((row) => toolNameOf(row) === 'dispatch_action') || [...calls.values()].some((call) => call.name === 'dispatch_action')
+  return { recordsNestedCalls: nested.length > 0 || dispatchAction || byVersion, marksFailedRows: dispatchAction || byVersion }
+}
+
+/** `a >= b` for OpenClaw's `YYYY.M.N` versions; a prerelease is below its release, anything unreadable is below everything. */
+export function openclawVersionAtLeast(a: string, b: string): boolean {
+  const parse = (v: string) => {
+    const match = /^(\d+)\.(\d+)\.(\d+)(-.+)?$/.exec(v.trim())
+    return match ? { parts: [Number(match[1]), Number(match[2]), Number(match[3])], pre: match[4] !== undefined } : null
+  }
+  const [x, y] = [parse(a), parse(b)]
+  if (!x || !y) return false
+  for (let i = 0; i < 3; i += 1) {
+    const d = (x.parts[i] ?? 0) - (y.parts[i] ?? 0)
+    if (d !== 0) return d > 0
+  }
+  return !x.pre || y.pre
+}
+
+function toolNameOf(row: Record<string, unknown>): string {
+  return typeof row.toolName === 'string' ? row.toolName : typeof row.name === 'string' ? row.name : ''
+}
+
+/** OpenClaw's nested-call row (`NESTED_TOOL_ACTIVITY_CUSTOM_TYPE`, `src/sessions/nested-tool-activity.ts`): its details. */
+const NESTED_TOOL_ACTIVITY = 'openclaw.nested-tool.v1'
+
+function nestedCallOf(row: Record<string, unknown>): Record<string, unknown> | null {
+  if (row.role !== 'custom' || row.customType !== NESTED_TOOL_ACTIVITY) return null
+  return asRecord(row.details)
+}
+
+/** A nested call: `isError` is OpenClaw's own reading of the result, and the result's details are read too when kept. */
+function nestedVerdict(call: Record<string, unknown>): CallVerdict {
+  const toolName = typeof call.toolName === 'string' ? call.toolName : ''
+  if (!toolName.startsWith(TOOL_PREFIX)) return 'not_agentchat'
+  const result = asRecord(call.result)
+  if (call.isError === true || (result !== null && failedResult(result.isError, asRecord(result.details)))) return 'failed'
+  return call.isError === false ? 'ok' : 'unknown'
+}
+
+/** The tool `sessions_spawn` hands work to a child session (`src/agents/tools/sessions-spawn-tool.ts`). */
+const CHILD_SESSION_TOOL = 'sessions_spawn'
+
+/** Whether the turn spawned a child session — called directly, through Tool Search, or from a script. */
+function delegatedToChild(rows: readonly Record<string, unknown>[], calls: ReadonlyMap<string, Record<string, unknown>>, nested: readonly Record<string, unknown>[]): boolean {
+  for (const call of calls.values()) {
+    if (call.name === CHILD_SESSION_TOOL) return true
+    if (typeof call.name === 'string' && DISPATCHER_TOOL_NAMES.has(call.name) && dispatchTarget(call) === CHILD_SESSION_TOOL) return true
+  }
+  if (nested.some((call) => call.toolName === CHILD_SESSION_TOOL)) return true
+  return rows.some((row) => toolNameOf(row) === CHILD_SESSION_TOOL || asRecord(asRecord(row.details)?.tool)?.name === CHILD_SESSION_TOOL)
+}
+
 /** What one tool row says about an AgentChat call (see `countAgentChatCalls` for the shapes). */
-function callVerdict(message: Record<string, unknown>, calls: ReadonlyMap<string, Record<string, unknown>>): CallVerdict {
-  const toolName = typeof message.toolName === 'string' ? message.toolName : typeof message.name === 'string' ? message.name : ''
+function callVerdict(message: Record<string, unknown>, calls: ReadonlyMap<string, Record<string, unknown>>, release: Release): CallVerdict {
+  const toolName = toolNameOf(message)
   const details = asRecord(message.details)
   if (toolName.startsWith(TOOL_PREFIX)) return directVerdict(message.isError, details)
   const entry = asRecord(details?.tool)
@@ -418,13 +527,29 @@ function callVerdict(message: Record<string, unknown>, calls: ReadonlyMap<string
   const target = dispatchTarget(typeof message.toolCallId === 'string' ? calls.get(message.toolCallId) : undefined)
   if (target === null) return 'unknown'
   if (!target.startsWith(TOOL_PREFIX)) return 'not_agentchat'
-  return failedResult(message.isError, details) ? 'failed' : 'unknown'
+  if (failedResult(message.isError, details)) return 'failed'
+  // Details over 8 KiB: from 2026.9.3 a failure keeps its top-level status, so none is a success.
+  if (release.marksFailedRows && isTruncated(details) && message.isError === false && details?.status === undefined) return 'ok'
+  return 'unknown'
+}
+
+/** Details the persistence guard replaced (`persistedDetailsTruncated`). */
+function isTruncated(details: Record<string, unknown> | null): boolean {
+  return details?.persistedDetailsTruncated === true
 }
 
 /** A direct hosted-tool row. */
 function directVerdict(isError: unknown, details: Record<string, unknown> | null): CallVerdict {
   if (failedResult(isError, details)) return 'failed'
-  return isError === false && isHostedSuccessDetails(details) ? 'ok' : 'unknown'
+  if (isError !== false) return 'unknown'
+  if (isTruncated(details)) return details?.status === undefined && wasHostedResult(details) ? 'ok' : 'unknown'
+  return isHostedSuccessDetails(details) ? 'ok' : 'unknown'
+}
+
+/** A truncated row whose original details were the MCP materializer's (their keys are kept). */
+function wasHostedResult(details: Record<string, unknown> | null): boolean {
+  const keys = Array.isArray(details?.originalDetailKeys) ? (details.originalDetailKeys as unknown[]) : []
+  return keys.includes('mcpServer') && (keys.includes('mcpTool') || keys.includes('mcpOperation'))
 }
 
 /** A dispatcher row whose catalog entry is an AgentChat tool. */

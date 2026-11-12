@@ -14,8 +14,8 @@ import { integration } from 'agentchatme'
 
 import { countAgentChatCalls } from '../../src/integration/run.js'
 import { card, tray } from '../helpers/fake-client.js'
-import { mcpOk, mcpServerError, mcpThrew, withSeq, type OpenClawLine } from '../helpers/openclaw-rows.js'
-import { installedOpenClaw, runHostedCalls, versionAtLeast } from '../helpers/openclaw-session.js'
+import { dispatchOkLarge, dispatchServerErrorLarge, mcpOk, mcpServerError, mcpThrew, withSeq, type OpenClawLine } from '../helpers/openclaw-rows.js'
+import { installedOpenClaw, RUN_ID, runHostedCalls, versionAtLeast } from '../helpers/openclaw-session.js'
 
 const openclaw = installedOpenClaw()
 /** From 2026.9.3 OpenClaw sets `isError` from the result details (openclaw/openclaw#139758). */
@@ -78,5 +78,26 @@ describe(`OpenClaw ${openclaw.version} (installed) — hosted-call rows`, () => 
     const counted = countAgentChatCalls(withSeq(messages))
     expect(counted).toEqual({ made: 2, failed: 0 })
     expect(secondSilentLook(counted)).toBe('record_dismiss')
+  })
+})
+
+describe(`OpenClaw ${openclaw.version} (installed) — Tool Search results over 8 KiB, stored through the persistence guard`, () => {
+  const stored = (row: Record<string, unknown> | undefined) => ({ toolName: row?.toolName, details: row?.details, isError: row?.isError })
+
+  it(`a success: ${marksFailures ? 'ok — the dispatcher row says failure at its top level' : 'unknown — a failure would have been nested and lost'}`, async () => {
+    const messages = await runHostedCalls(openclaw, [{ tool: 'agentchat_get_conversation', outcome: 'ok' }], { toolSearch: true, guard: true, textBytes: 9_000 })
+    const dispatched = messages.find((message) => message.role === 'toolResult')
+    expect(stored(dispatched)).toEqual(stored(dispatchOkLarge(line, 'call_0')))
+    const counted = countAgentChatCalls(withSeq(messages), RUN_ID, { openclawVersion: openclaw.version })
+    expect(counted).toEqual(marksFailures ? { made: 1, failed: 0 } : null)
+  })
+
+  it(`a server failure: ${marksFailures ? 'failed' : 'unknown'} — never ok`, async () => {
+    const messages = await runHostedCalls(openclaw, [{ tool: 'agentchat_get_conversation', outcome: 'server_error' }], { toolSearch: true, guard: true, textBytes: 9_000 })
+    const dispatched = messages.find((message) => message.role === 'toolResult')
+    expect(stored(dispatched)).toEqual(stored(dispatchServerErrorLarge(line, 'call_0')))
+    const counted = countAgentChatCalls(withSeq(messages), RUN_ID, { openclawVersion: openclaw.version })
+    expect(counted).toEqual(marksFailures ? { made: 1, failed: 1 } : null)
+    expect(secondSilentLook(counted)).not.toBe('record_dismiss')
   })
 })

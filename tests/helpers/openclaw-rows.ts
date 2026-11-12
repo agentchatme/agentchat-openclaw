@@ -113,29 +113,33 @@ export function blocked(id: string, tool: string, reason = 'blocked by policy'):
 /**
  * The catalog entry a Tool Search call names (2026.6.10 `src/agents/tool-search.ts`
  * `compactEntry`, id from `makeCatalogId`; 2026.11.3 and main
- * `src/agents/tool-search-catalog.ts` `compactToolSearchCatalogEntry`).
+ * `src/agents/tool-search-catalog.ts` `compactToolSearchCatalogEntry`). As
+ * the real runs stored it: on 2026.11.3 the MCP source is named after the
+ * server and the entry carries an `input` hint.
  */
-function catalogEntry(tool: string): Row {
+function catalogEntry(line: OpenClawLine, tool: string): Row {
+  const sourceName = line === '2026.6.10' ? 'bundle-mcp' : 'agentchat'
   return {
-    id: `mcp:bundle-mcp:${hosted(tool)}`,
+    id: `mcp:${sourceName}:${hosted(tool)}`,
     source: 'mcp',
-    sourceName: 'bundle-mcp',
+    sourceName,
     mcp: { serverName: 'agentchat', safeServerName: 'agentchat', toolName: tool, operation: 'tool' },
     name: hosted(tool),
     label: tool,
     description: tool,
+    ...(line === '2026.11.3' ? { input: 'unknown' } : {}),
   }
 }
 
 /** The assistant's call to the dispatcher (`{ id, args }`, read by `readCallArgs` / `readToolSearchCallArgs`). */
 export function dispatchCall(line: OpenClawLine, id: string, tool: string): Row {
-  return assistantCalls([{ id, name: DISPATCHER[line], arguments: { id: `mcp:bundle-mcp:${hosted(tool)}`, args: {} } }])
+  return assistantCalls([{ id, name: DISPATCHER[line], arguments: { id: catalogEntry(line, tool).id, args: {} } }])
 }
 
 /** A hosted call through the dispatcher that succeeded: `details` is `{ tool, result }` (2026.6.10 `src/agents/tool-search.ts`; 2026.11.3 and main the same file). */
 export function dispatchOk(line: OpenClawLine, id: string, tool: string): Row {
   const result = { content: [{ type: 'text', text: '{"conversations":[]}' }], details: { mcpServer: 'agentchat', mcpTool: tool } }
-  return toolResult(line, id, DISPATCHER[line], [{ type: 'text', text: '{}' }], { tool: catalogEntry(tool), result }, false)
+  return toolResult(line, id, DISPATCHER[line], [{ type: 'text', text: '{}' }], { tool: catalogEntry(line, tool), result }, false)
 }
 
 /**
@@ -145,7 +149,7 @@ export function dispatchOk(line: OpenClawLine, id: string, tool: string): Row {
 export function dispatchServerError(line: OpenClawLine, id: string, tool: string): Row {
   const result = { content: [{ type: 'text', text: 'AWAITING_REPLY' }], details: { mcpServer: 'agentchat', mcpTool: tool, status: 'error' } }
   const marked = MARKS_ADAPTED_FAILURES[line]
-  return toolResult(line, id, DISPATCHER[line], [{ type: 'text', text: '{}' }], { tool: catalogEntry(tool), result, ...(marked ? { status: 'failed' } : {}) }, marked)
+  return toolResult(line, id, DISPATCHER[line], [{ type: 'text', text: '{}' }], { tool: catalogEntry(line, tool), result, ...(marked ? { status: 'failed' } : {}) }, marked)
 }
 
 /** The hosted call through the dispatcher threw: the dispatcher threw too, and the adapter's error result names only the dispatcher. */
@@ -243,6 +247,94 @@ export function ranBy(runId: string, rows: readonly Row[]): Row[] {
     const meta = row.__openclaw && typeof row.__openclaw === 'object' ? (row.__openclaw as Row) : {}
     return { ...row, __openclaw: { ...meta, runId } }
   })
+}
+
+/**
+ * Details over 8 KiB, as the persistence guard stores them: the original
+ * keys and the top-level `status` / `error` it keeps
+ * (`src/agents/session-tool-result-guard.payload.ts`
+ * `sanitizeToolResultDetailsForPersistence`; the same on 2026.6.10 and 2026.11.3).
+ */
+function truncated(keys: string[], kept: Row = {}): Row {
+  return { persistedDetailsTruncated: true, originalDetailsBytesAtLeast: 8193, originalDetailKeys: keys, ...kept }
+}
+
+/** A Tool Search call whose result was over 8 KiB, stored with truncated details (the real 2026.6.10 and 2026.11.3 runs). */
+export function dispatchOkLarge(line: OpenClawLine, id: string): Row {
+  return toolResult(line, id, DISPATCHER[line], [{ type: 'text', text: '{}' }], truncated(['tool', 'result']), false)
+}
+
+/** …and one the server failed: 2026.11.3 keeps the dispatcher's `status: 'failed'`; 2026.6.10 had only the nested status, which is lost. */
+export function dispatchServerErrorLarge(line: OpenClawLine, id: string): Row {
+  const marked = MARKS_ADAPTED_FAILURES[line]
+  return toolResult(line, id, DISPATCHER[line], [{ type: 'text', text: '{}' }], truncated(['tool', 'result', ...(marked ? ['status'] : [])], marked ? { status: 'failed' } : {}), marked)
+}
+
+/** A direct call whose `structuredContent` took its details over 8 KiB. */
+export function mcpOkLarge(line: OpenClawLine, id: string, tool: string): Row {
+  return toolResult(line, id, hosted(tool), [{ type: 'text', text: '{}' }], truncated(['mcpServer', 'mcpTool', 'structuredContent']), false)
+}
+
+/** …and one the server failed: the materializer's `status: 'error'` is kept. */
+export function mcpServerErrorLarge(line: OpenClawLine, id: string, tool: string): Row {
+  return toolResult(line, id, hosted(tool), [{ type: 'text', text: 'AWAITING_REPLY' }], truncated(['mcpServer', 'mcpTool', 'structuredContent', 'status'], { status: 'error' }), MARKS_ADAPTED_FAILURES[line])
+}
+
+/**
+ * A call a dispatcher or a Code Mode script made, as 2026.11.3 records it
+ * and `sessions.get` returns it (the real runs; schema
+ * `src/sessions/nested-tool-activity.ts`, written by
+ * `attempt-tool-search-executor.ts`). `isError` is OpenClaw's reading of the
+ * result; a result over 32 KiB is replaced by a notice without details.
+ */
+export function nestedCall(parentToolCallId: string, tool: string, outcome: 'ok' | 'server_error' | 'omitted', runId = 'run_1'): Row {
+  const toolName = tool.includes('__') || tool.startsWith('sessions_') ? tool : hosted(tool)
+  const result =
+    outcome === 'omitted'
+      ? { content: [{ type: 'text', text: '[Nested tool output omitted: exceeds display limit]' }] }
+      : outcome === 'server_error'
+        ? { content: [{ type: 'text', text: 'AWAITING_REPLY' }], details: { mcpServer: 'agentchat', mcpTool: tool, status: 'error' } }
+        : { content: [{ type: 'text', text: '{"conversations":[]}' }], details: { mcpServer: 'agentchat', mcpTool: tool } }
+  const toolCallId = `tool_call:${parentToolCallId}:${toolName}:1`
+  return {
+    role: 'custom',
+    customType: 'openclaw.nested-tool.v1',
+    display: true,
+    excludeFromContext: true,
+    content: '',
+    details: {
+      runId,
+      scopeId: 'scope_1',
+      afterEntryId: 'entry_1',
+      startOrder: 0,
+      parentToolCallId,
+      toolCallId,
+      toolName,
+      input: {},
+      result,
+      isError: outcome === 'server_error',
+      startedAt: T,
+      timestamp: T,
+    },
+    timestamp: T,
+    idempotencyKey: `scope_1:${toolCallId}`,
+  }
+}
+
+/** A Code Mode `exec` row whose details were over 8 KiB (the real 2026.11.3 run): only its keys and status are kept. */
+export function codeModeExecLarge(id: string): Row[] {
+  return [
+    assistantCalls([{ id, name: 'exec', arguments: { title: 'Read the inbox', code: 'const [inbox] = await catalog.search("agentchat_inbox"); return await inbox({});' } }]),
+    toolResult('2026.11.3', id, 'exec', [{ type: 'text', text: '{}' }], truncated(['status', 'replaySafe', 'telemetry', 'output', 'value'], { status: 'completed' }), false),
+  ]
+}
+
+/** A child session started by `sessions_spawn` (`src/agents/tools/sessions-spawn-tool.ts`: `task`; result `status: 'accepted'`). */
+export function sessionsSpawn(line: OpenClawLine, id: string): Row[] {
+  return [
+    assistantCalls([{ id, name: 'sessions_spawn', arguments: { task: 'Answer the AgentChat conversation.' } }]),
+    toolResult(line, id, 'sessions_spawn', [{ type: 'text', text: '{}' }], { status: 'accepted', childSessionKey: 'agent:main:subagent:child', runId: 'run_child', mode: 'run' }, false),
+  ]
 }
 
 /** A compaction marker in the read (`src/gateway/session-utils.fs.ts` 2026.6.10; `session-transcript-entry-message.ts` 2026.11.3). */
