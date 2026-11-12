@@ -315,7 +315,12 @@ export function countAgentChatCalls(messages: readonly unknown[], runId?: string
   })
   const release = releaseOf(rows, calls, nested, host.openclawVersion)
   if (delegatedToChild(rows, calls, nested)) return null
-  if (usedCodeMode(rows, calls) && !release.recordsNestedCalls) return null
+  if (usedCodeMode(rows, calls)) {
+    if (!release.recordsNestedCalls) return null
+    // Counted from its nested rows only when every script ran to completion:
+    // a script that failed or is still waiting may have stopped before a call.
+    if (!codeModeScriptsCompleted(rows, calls)) return null
+  }
   // A dispatcher (or Code Mode) row whose calls have nested rows: the nested rows are those calls.
   const parents = new Set(nested.flatMap((call) => (typeof call.parentToolCallId === 'string' ? [call.parentToolCallId] : [])))
   let made = 0
@@ -418,17 +423,39 @@ const CODE_MODE_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set(['tool_search_cod
  * Code Mode — never as a turn without it.
  */
 function usedCodeMode(rows: readonly Record<string, unknown>[], calls: ReadonlyMap<string, Record<string, unknown>>): boolean {
-  for (const call of calls.values()) {
-    const name = typeof call.name === 'string' ? call.name : ''
-    if (CODE_MODE_ONLY_TOOL_NAMES.has(name)) return true
-    if (name === 'exec' && typeof callArguments(call)?.code === 'string') return true
+  return [...calls.values()].some(isCodeModeCall) || rows.some((row) => isCodeModeResult(row, calls))
+}
+
+/**
+ * Whether every Code Mode call has a result row that says its script
+ * completed: `isError` not true and `details.status: 'completed'` (kept
+ * when the details are truncated). A script that threw before a call it
+ * meant to make (`status: 'failed'`, `isError: true`), or that returned
+ * `waiting` with a call still pending, does not show every call it meant to
+ * make. A waiting script later resumed by `wait` counts the same way: the
+ * truncated rows keep no run id to pair them by.
+ */
+function codeModeScriptsCompleted(rows: readonly Record<string, unknown>[], calls: ReadonlyMap<string, Record<string, unknown>>): boolean {
+  const results = new Map<string, Record<string, unknown>>()
+  for (const row of rows) {
+    if ((row.role === 'toolResult' || row.role === 'tool') && typeof row.toolCallId === 'string') results.set(row.toolCallId, row)
   }
-  return rows.some((row) => {
-    if (row.role !== 'toolResult' && row.role !== 'tool') return false
-    const name = typeof row.toolName === 'string' ? row.toolName : typeof row.name === 'string' ? row.name : ''
-    if (CODE_MODE_ONLY_TOOL_NAMES.has(name)) return true
-    return name === 'exec' && !isShellExecResult(row, calls)
-  })
+  const completed = (row: Record<string, unknown> | undefined) => row !== undefined && row.isError !== true && asRecord(row.details)?.status === 'completed'
+  for (const [id, call] of calls) {
+    if (isCodeModeCall(call) && !completed(results.get(id))) return false
+  }
+  return rows.every((row) => !isCodeModeResult(row, calls) || completed(row))
+}
+
+function isCodeModeCall(call: Record<string, unknown>): boolean {
+  const name = typeof call.name === 'string' ? call.name : ''
+  return CODE_MODE_ONLY_TOOL_NAMES.has(name) || (name === 'exec' && typeof callArguments(call)?.code === 'string')
+}
+
+function isCodeModeResult(row: Record<string, unknown>, calls: ReadonlyMap<string, Record<string, unknown>>): boolean {
+  if (row.role !== 'toolResult' && row.role !== 'tool') return false
+  const name = toolNameOf(row)
+  return CODE_MODE_ONLY_TOOL_NAMES.has(name) || (name === 'exec' && !isShellExecResult(row, calls))
 }
 
 function isShellExecResult(row: Record<string, unknown>, calls: ReadonlyMap<string, Record<string, unknown>>): boolean {
@@ -464,17 +491,37 @@ interface Release {
 /** The first release this code trusts by version alone: failures marked on the row (openclaw/openclaw#139758) and nested calls recorded. */
 const TRUSTED_RELEASE = '2026.9.3'
 
+/**
+ * The release, by the host's OpenClaw version when it is readable — the
+ * rows are then only data. When it is not, from what only that release
+ * writes: a nested row (it records nested calls), and `dispatch_action`
+ * (2026.10.10 and later) as the release itself wrote it — a dispatcher row
+ * carrying its catalog entry, or a dispatcher call with nested rows under it.
+ * A model's call to `dispatch_action` alone proves nothing: a model can
+ * name a tool the release never offered.
+ */
 function releaseOf(rows: readonly Record<string, unknown>[], calls: ReadonlyMap<string, Record<string, unknown>>, nested: readonly Record<string, unknown>[], version: string | undefined): Release {
-  const byVersion = version !== undefined && openclawVersionAtLeast(version, TRUSTED_RELEASE)
-  // `dispatch_action` is the dispatcher's name from 2026.10.10 on.
-  const dispatchAction = rows.some((row) => toolNameOf(row) === 'dispatch_action') || [...calls.values()].some((call) => call.name === 'dispatch_action')
-  return { recordsNestedCalls: nested.length > 0 || dispatchAction || byVersion, marksFailedRows: dispatchAction || byVersion }
+  if (version !== undefined && isOpenClawVersion(version)) {
+    const trusted = openclawVersionAtLeast(version, TRUSTED_RELEASE)
+    return { recordsNestedCalls: trusted, marksFailedRows: trusted }
+  }
+  const parents = new Set(nested.map((call) => call.parentToolCallId))
+  const dispatchAction =
+    rows.some((row) => (row.role === 'toolResult' || row.role === 'tool') && toolNameOf(row) === 'dispatch_action' && asRecord(asRecord(row.details)?.tool) !== null) ||
+    [...calls].some(([id, call]) => call.name === 'dispatch_action' && parents.has(id))
+  return { recordsNestedCalls: nested.length > 0 || dispatchAction, marksFailedRows: dispatchAction }
+}
+
+const OPENCLAW_VERSION = /^(\d+)\.(\d+)\.(\d+)(-.+)?$/
+
+function isOpenClawVersion(value: string): boolean {
+  return OPENCLAW_VERSION.test(value.trim())
 }
 
 /** `a >= b` for OpenClaw's `YYYY.M.N` versions; a prerelease is below its release, anything unreadable is below everything. */
 export function openclawVersionAtLeast(a: string, b: string): boolean {
   const parse = (v: string) => {
-    const match = /^(\d+)\.(\d+)\.(\d+)(-.+)?$/.exec(v.trim())
+    const match = OPENCLAW_VERSION.exec(v.trim())
     return match ? { parts: [Number(match[1]), Number(match[2]), Number(match[3])], pre: match[4] !== undefined } : null
   }
   const [x, y] = [parse(a), parse(b)]

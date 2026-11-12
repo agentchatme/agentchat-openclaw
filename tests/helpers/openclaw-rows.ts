@@ -329,6 +329,48 @@ export function codeModeExecLarge(id: string): Row[] {
   ]
 }
 
+/** Code Mode's telemetry as 2026.11.3 stores it on an `exec` row (the real runs). */
+const CODE_MODE_TELEMETRY_11 = { catalogSize: 44, sources: { openclaw: 42, mcp: 2, client: 0 }, counterScope: 'c4bbc2e584b1af56c2d9f27f', searchCount: 1, describeCount: 0, callCount: 1, visibleTools: ['exec', 'wait'] }
+
+/**
+ * A Code Mode script that threw after a call (the real 2026.11.3 run: the
+ * inbox read, then a ReferenceError before the send): `isError: true`,
+ * `status: 'failed'`.
+ */
+export function codeModeExecFailed(id: string): Row[] {
+  const code = 'const [inbox] = await catalog.search("agentchat_inbox"); await inbox({}); await sendMessage({ to: "@bob", text: "hi" }); return null;'
+  const details = {
+    status: 'failed',
+    code: 'internal_error',
+    failurePhase: 'guest',
+    bridgeDispatchStarted: true,
+    replaySafe: false,
+    telemetry: CODE_MODE_TELEMETRY_11,
+    output: [],
+    error: 'ReferenceError: sendMessage is not defined\n    at openclaw-code-mode:user.js:1:75',
+  }
+  return [assistantCalls([{ id, name: 'exec', arguments: { title: 'Answer', code } }]), toolResult('2026.11.3', id, 'exec', [{ type: 'text', text: '{}' }], details, true)]
+}
+
+/**
+ * A Code Mode script left waiting on a call slower than the cell budget (the
+ * real 2026.11.3 run): `status: 'waiting'` with the call still pending — it
+ * has no nested row, and gets none once the run has ended.
+ */
+export function codeModeExecWaiting(id: string): Row[] {
+  const code = 'const [inbox] = await catalog.search("agentchat_inbox"); await inbox({}); const [send] = await catalog.search("agentchat_send_message"); return await send({});'
+  const details = {
+    status: 'waiting',
+    runId: 'cm_9efde101-9ead-434b-aed4-44a1be6301dc',
+    reason: 'pending_tools',
+    pendingToolCalls: [{ id: 'bridge:namespace:2', method: 'namespace' }],
+    replaySafe: false,
+    telemetry: { ...CODE_MODE_TELEMETRY_11, searchCount: 2, callCount: 2 },
+    output: [],
+  }
+  return [assistantCalls([{ id, name: 'exec', arguments: { title: 'Answer', code } }]), toolResult('2026.11.3', id, 'exec', [{ type: 'text', text: '{}' }], details, false)]
+}
+
 /** A child session started by `sessions_spawn` (`src/agents/tools/sessions-spawn-tool.ts`: `task`; result `status: 'accepted'`). */
 export function sessionsSpawn(line: OpenClawLine, id: string): Row[] {
   return [

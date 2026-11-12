@@ -22,7 +22,9 @@ import {
   assistantText,
   blocked,
   codeModeExec,
+  codeModeExecFailed,
   codeModeExecLarge,
+  codeModeExecWaiting,
   codeModeWait,
   codexMirrored,
   compaction,
@@ -359,14 +361,19 @@ describe.each(LINES)('OpenClaw %s — a direct call whose details were over 8 Ki
 describe('a Tool Search call whose details were over 8 KiB', () => {
   const turn = (line: OpenClawLine, row: Row) => withSeq([userPrompt(), dispatchCall(line, 'call_dispatch', 'agentchat_get_conversation'), row, assistantText('done')])
 
-  it('2026.11.3 (dispatch_action): a success is ok — not unknown — and the second silent look dismisses', () => {
-    const counted = countAgentChatCalls(turn('2026.11.3', dispatchOkLarge('2026.11.3', 'call_dispatch')))
+  it('2026.11.3: a success is ok — not unknown — and the second silent look dismisses', () => {
+    const counted = countAgentChatCalls(turn('2026.11.3', dispatchOkLarge('2026.11.3', 'call_dispatch')), undefined, { openclawVersion: '2026.11.3' })
     expect(counted).toEqual({ made: 1, failed: 0 })
     expect(secondSilentLook(counted)).toBe('record_dismiss')
   })
 
   it('2026.11.3: a server failure keeps the dispatcher status: failed', () => {
-    expect(countAgentChatCalls(turn('2026.11.3', dispatchServerErrorLarge('2026.11.3', 'call_dispatch')))).toEqual({ made: 1, failed: 1 })
+    expect(countAgentChatCalls(turn('2026.11.3', dispatchServerErrorLarge('2026.11.3', 'call_dispatch')), undefined, { openclawVersion: '2026.11.3' })).toEqual({ made: 1, failed: 1 })
+  })
+
+  it('without a readable version, a truncated row with no catalog entry and no nested row does not show the release: unknown', () => {
+    expect(countAgentChatCalls(turn('2026.11.3', dispatchOkLarge('2026.11.3', 'call_dispatch')))).toBeNull()
+    expect(countAgentChatCalls(turn('2026.11.3', dispatchOkLarge('2026.11.3', 'call_dispatch')), undefined, { openclawVersion: 'unknown' })).toBeNull()
   })
 
   it('2026.6.10: the failure was nested and is lost — unknown, success or not', () => {
@@ -382,6 +389,50 @@ describe('a Tool Search call whose details were over 8 KiB', () => {
     expect(countAgentChatCalls(rows, undefined, { openclawVersion: '2026.9.3-beta.1' })).toBeNull()
     expect(countAgentChatCalls(rows, undefined, { openclawVersion: 'unknown' })).toBeNull()
     expect(countAgentChatCalls(rows)).toBeNull()
+  })
+})
+
+describe('the release is the host’s version when it is readable; a model’s call proves nothing', () => {
+  // A model that names `dispatch_action` on 2026.6.10 (which never offered it), and a
+  // `tool_call` result over 8 KiB that the server failed (its nested failure is lost there).
+  const stray = () =>
+    withSeq([
+      userPrompt(),
+      assistantCalls([{ id: 'call_stray', name: 'dispatch_action', arguments: { id: 'web_search', args: {} } }]),
+      notRun('2026.6.10', 'call_stray', 'dispatch_action', 'Tool dispatch_action not found'),
+      dispatchCall('2026.6.10', 'call_dispatch', 'agentchat_send_message'),
+      dispatchServerErrorLarge('2026.6.10', 'call_dispatch'),
+      assistantText('done'),
+    ])
+
+  it('2026.6.10 + a stray dispatch_action call + a truncated failed tool_call row: unknown, not dismissed', () => {
+    const counted = countAgentChatCalls(stray(), undefined, { openclawVersion: '2026.6.10' })
+    expect(counted).toBeNull()
+    expect(secondSilentLook(counted)).toBe('record_defer')
+  })
+
+  it('…and with no readable version, the stray call is not evidence either', () => {
+    expect(countAgentChatCalls(stray())).toBeNull()
+  })
+
+  it('a readable version below 2026.9.3 is believed over nested rows (2026.8.35 and 2026.9.2 write them too)', () => {
+    const [exec, execResult] = codeModeExecLarge('call_0') as [Row, Row]
+    const rows = withSeq([userPrompt(), exec, nestedCall('call_0', 'agentchat_inbox', 'ok'), execResult])
+    expect(countAgentChatCalls(rows, undefined, { openclawVersion: '2026.9.2' })).toBeNull()
+    expect(countAgentChatCalls(rows, undefined, { openclawVersion: '2026.9.3' })).toEqual({ made: 1, failed: 0 })
+    // No readable version: the nested row shows the release records nested calls.
+    expect(countAgentChatCalls(rows)).toEqual({ made: 1, failed: 0 })
+  })
+
+  it('with no readable version, a dispatch_action row carrying its catalog entry shows the release', () => {
+    const rows = withSeq([
+      userPrompt(),
+      dispatchCall('2026.11.3', 'call_a', 'agentchat_inbox'),
+      dispatchOk('2026.11.3', 'call_a', 'agentchat_inbox'),
+      dispatchCall('2026.11.3', 'call_b', 'agentchat_get_conversation'),
+      dispatchOkLarge('2026.11.3', 'call_b'),
+    ])
+    expect(countAgentChatCalls(rows)).toEqual({ made: 2, failed: 0 })
   })
 })
 
@@ -410,6 +461,29 @@ describe('OpenClaw 2026.11.3 — nested calls are rows of their own: counted exa
     expect(counted).toEqual({ made: 2, failed: 1 })
     expect(secondSilentLook(counted)).toBe('record_defer')
     expect(secondSilentInviteLook(counted)).toBe('none')
+  })
+
+  it('a script that threw after its inbox read (before its send): unknown — not dismissed', () => {
+    const [exec, execResult] = codeModeExecFailed('call_0') as [Row, Row]
+    const counted = countAgentChatCalls(withSeq([userPrompt(), exec, nestedCall('call_0', 'agentchat_inbox', 'ok'), execResult, assistantText('done')]), undefined, { openclawVersion: '2026.11.3' })
+    expect(counted).toBeNull()
+    expect(secondSilentLook(counted)).toBe('record_defer')
+    expect(secondSilentInviteLook(counted)).toBe('none')
+  })
+
+  it('a script left waiting with a call pending: unknown — and still unknown after a later wait completed (the rows keep nothing to pair them by)', () => {
+    const [exec, execResult] = codeModeExecWaiting('call_0') as [Row, Row]
+    const waiting = withSeq([userPrompt(), exec, nestedCall('call_0', 'agentchat_inbox', 'ok'), execResult, assistantText('done')])
+    expect(countAgentChatCalls(waiting, undefined, { openclawVersion: '2026.11.3' })).toBeNull()
+    expect(secondSilentLook(countAgentChatCalls(waiting, undefined, { openclawVersion: '2026.11.3' }))).toBe('record_defer')
+    const resumed = withSeq([userPrompt(), exec, nestedCall('call_0', 'agentchat_inbox', 'ok'), execResult, ...codeModeWait('2026.11.3', 'call_1'), assistantText('done')])
+    expect(countAgentChatCalls(resumed, undefined, { openclawVersion: '2026.11.3' })).toBeNull()
+  })
+
+  it('a wait that did not complete is unknown too', () => {
+    const [ask, result] = codeModeWait('2026.11.3', 'call_1') as [Row, Row]
+    const stillWaiting = { ...result, details: { ...(result.details as Row), status: 'waiting' } }
+    expect(countAgentChatCalls(withSeq([userPrompt(), ask, stillWaiting]), undefined, { openclawVersion: '2026.11.3' })).toBeNull()
   })
 
   it('a nested result over 32 KiB keeps only isError, which is OpenClaw’s own reading: ok', () => {

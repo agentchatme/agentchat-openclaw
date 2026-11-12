@@ -25,9 +25,11 @@ export interface AgentTurnPlan {
   /** The tool calls the model makes in its first response (it stops after the results). */
   readonly calls: ReadonlyArray<{ readonly name: string; readonly arguments: Record<string, unknown> }>
   /** The `agentchat` MCP server's tools: answered (with `bytes` of padding) or failed by the server. */
-  readonly tools: Readonly<Record<string, { readonly outcome: 'ok' | 'server_error'; readonly bytes?: number }>>
+  readonly tools: Readonly<Record<string, { readonly outcome: 'ok' | 'server_error'; readonly bytes?: number; readonly delayMs?: number }>>
   /** The model declares Code Mode preferred (`compat.codeMode: 'preferred'`), as flagship models do. */
   readonly codeModePreferred?: boolean
+  /** Code Mode's per-cell budget (`tools.codeMode.timeoutMs`); a call slower than it leaves the script `waiting`. */
+  readonly codeModeTimeoutMs?: number
 }
 
 export interface AgentTurn {
@@ -75,6 +77,7 @@ export async function runAgentTurn(openclaw: InstalledOpenClaw, plan: AgentTurnP
         },
       },
       agents: { defaults: { model: { primary: 'mock/mock-model' }, workspace: join(home, 'workspace') } },
+      ...(plan.codeModeTimeoutMs !== undefined ? { tools: { codeMode: { enabled: 'auto', timeoutMs: plan.codeModeTimeoutMs } } } : {}),
       mcp: { servers: { agentchat: { url: `http://127.0.0.1:${mcp.port}/mcp`, transport: 'streamable-http' } } },
     }),
   )
@@ -153,11 +156,12 @@ async function mcpServer(openclaw: InstalledOpenClaw, plan: AgentTurnPlan): Prom
       void (async () => {
         const server = new McpServer({ name: 'agentchat', version: '1.0.0' })
         for (const [tool, spec] of Object.entries(plan.tools)) {
-          server.registerTool(tool, { description: `AgentChat ${tool}`, inputSchema: {} }, async () =>
-            spec.outcome === 'server_error'
+          server.registerTool(tool, { description: `AgentChat ${tool}`, inputSchema: {} }, async () => {
+            if (spec.delayMs) await new Promise((resolve) => setTimeout(resolve, spec.delayMs))
+            return spec.outcome === 'server_error'
               ? { content: [{ type: 'text', text: 'AWAITING_REPLY' }], isError: true }
-              : { content: [{ type: 'text', text: `{"conversations":[]}${' '.repeat(spec.bytes ?? 0)}` }] },
-          )
+              : { content: [{ type: 'text', text: `{"conversations":[]}${' '.repeat(spec.bytes ?? 0)}` }] }
+          })
         }
         const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true })
         res.on('close', () => {

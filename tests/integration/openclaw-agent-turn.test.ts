@@ -100,4 +100,47 @@ describe.skipIf(!supported)(`OpenClaw ${openclaw.version} (installed) — a real
     },
     120_000,
   )
+
+  it(
+    'a Code Mode script that reads the inbox, then throws before its send: unknown — not dismissed',
+    async () => {
+      const { rows } = await runAgentTurn(
+        openclaw,
+        {
+          codeModePreferred: true,
+          calls: [{ name: 'exec', arguments: { title: 'Answer', code: 'const [inbox] = await catalog.search("agentchat_inbox"); await inbox({}); await sendMessage({ to: "@bob", text: "hi" }); return null;' } }],
+          tools: { agentchat_inbox: { outcome: 'ok' }, agentchat_send_message: { outcome: 'ok' } },
+        },
+        TRANSCRIPT_READ_LIMIT,
+      )
+      expect(nestedRows(rows)).toMatchObject([{ toolName: 'agentchat__agentchat_inbox', isError: false }])
+      expect(rows.find((row) => row.role === 'toolResult' && row.toolName === 'exec')).toMatchObject({ isError: true, details: { status: 'failed' } })
+      const counted = countAgentChatCalls(rows, runIdOf(rows), { openclawVersion: openclaw.version })
+      expect(counted).toBeNull()
+      expect(secondSilentLook(counted)).toBe('record_defer')
+    },
+    120_000,
+  )
+
+  it(
+    'a Code Mode script left waiting on a slow send: unknown — not dismissed',
+    async () => {
+      const { rows } = await runAgentTurn(
+        openclaw,
+        {
+          codeModePreferred: true,
+          codeModeTimeoutMs: 500,
+          calls: [{ name: 'exec', arguments: { title: 'Answer', code: 'const [inbox] = await catalog.search("agentchat_inbox"); await inbox({}); const [send] = await catalog.search("agentchat_send_message"); return await send({});' } }],
+          tools: { agentchat_inbox: { outcome: 'ok' }, agentchat_send_message: { outcome: 'ok', delayMs: 2_500 } },
+        },
+        TRANSCRIPT_READ_LIMIT,
+      )
+      expect(nestedRows(rows)).toMatchObject([{ toolName: 'agentchat__agentchat_inbox', isError: false }])
+      expect(rows.find((row) => row.role === 'toolResult' && row.toolName === 'exec')).toMatchObject({ isError: false, details: { status: 'waiting' } })
+      const counted = countAgentChatCalls(rows, runIdOf(rows), { openclawVersion: openclaw.version })
+      expect(counted).toBeNull()
+      expect(secondSilentLook(counted)).toBe('record_defer')
+    },
+    120_000,
+  )
 })
