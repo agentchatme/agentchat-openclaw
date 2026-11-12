@@ -22,6 +22,8 @@ import {
 } from '../../src/integration/texts.js'
 import { spellToolsForOpenClaw } from '../../src/integration/turn.js'
 import { removeOldStateFiles } from '../../src/integration/state.js'
+import type { Texts } from 'agentchatme'
+
 import { SERVED_TEXTS, textsClient } from '../helpers/texts.js'
 
 const dirs: string[] = []
@@ -136,6 +138,31 @@ describe('the re-speller stays (a rolled-back server serves bare names again)', 
     spelledCache.stop()
     expect(new OpenClawTexts(spelledCache).current()).toEqual(SERVED_TEXTS)
     expect(spellTextsForOpenClaw(SERVED_TEXTS)).toEqual(SERVED_TEXTS)
+  })
+
+  it('reply_turn_template (contract v1; absent on older servers) is spelled too, its <conversation_id> placeholder kept', async () => {
+    const bareTemplate =
+      'AgentChat started this run for ONE conversation, <conversation_id>: your triage of the tray decided it needs a reply from you. ' +
+      'Open it with agentchat_get_conversation to read what was said; if it needs an answer, answer with agentchat_send_message. ' +
+      'Only after the send, record agentchat_decide reply through the newest message you read.'
+    const spelledTemplate =
+      'AgentChat started this run for ONE conversation, <conversation_id>: your triage of the tray decided it needs a reply from you. ' +
+      'Open it with agentchat__agentchat_get_conversation to read what was said; if it needs an answer, answer with agentchat__agentchat_send_message. ' +
+      'Only after the send, record agentchat__agentchat_decide reply through the newest message you read.'
+    const withTemplate = (template: string) => ({ ...SERVED_TEXTS, reply_turn_template: template }) as Texts
+    const template = (texts: Texts | null) => (texts as (Texts & { reply_turn_template?: unknown }) | null)?.reply_turn_template
+
+    expect(template(spellTextsForOpenClaw(withTemplate(bareTemplate)))).toBe(spelledTemplate)
+    expect(spellTextsForOpenClaw(withTemplate(spelledTemplate))).toEqual(withTemplate(spelledTemplate))
+    expect('reply_turn_template' in spellTextsForOpenClaw(SERVED_TEXTS)).toBe(false)
+
+    // Through the kit's cache, as the loop reads it; the stored copy stays verbatim.
+    const dir = stateDir()
+    const cache = createTextsCache({ client: textsClient({ texts: withTemplate(bareTemplate) }), accountId: 'default', stateDir: dir })
+    await cache.start()
+    cache.stop()
+    expect(template(new OpenClawTexts(cache).current())).toBe(spelledTemplate)
+    expect((JSON.parse(fs.readFileSync(textsCachePath('default', dir), 'utf8')) as { texts: { reply_turn_template: string } }).texts.reply_turn_template).toBe(bareTemplate)
   })
 })
 
