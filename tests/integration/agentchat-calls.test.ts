@@ -43,6 +43,7 @@ import {
   notRun,
   oversized,
   ranBy,
+  sessionsSend,
   sessionsSpawn,
   shellExec,
   tail,
@@ -462,6 +463,27 @@ describe.each(LINES)('OpenClaw %s — a turn that spawned a child session is unk
   it('sessions_spawn from a script (a nested row)', () => {
     const [exec, execResult] = codeModeExecLarge('call_0') as [Row, Row]
     expect(countAgentChatCalls(withInbox(exec, nestedCall('call_0', 'sessions_spawn', 'ok'), execResult), undefined, { openclawVersion: '2026.11.3' })).toBeNull()
+  })
+})
+
+describe.each(LINES)('OpenClaw %s — a turn that sent work to another session (sessions_send) is unknown (that run’s calls are in its session)', (line) => {
+  const withInbox = (...more: Row[]) => withSeq([userPrompt(), assistantCalls([call('call_inbox', 'agentchat_inbox')]), mcpOk(line, 'call_inbox', 'agentchat_inbox'), ...more, assistantText('done')])
+
+  it('sessions_send called directly', () => {
+    const counted = countAgentChatCalls(withInbox(...sessionsSend(line, 'call_send_session')))
+    expect(counted).toBeNull()
+    expect(secondSilentLook(counted)).toBe('record_defer')
+    expect(secondSilentInviteLook(counted)).toBe('none')
+  })
+
+  it('sessions_send through Tool Search', () => {
+    const ask = assistantCalls([{ id: 'call_send_session', name: DISPATCHER[line], arguments: { id: 'openclaw:core:sessions_send', args: { sessionKey: 'agent:main:main', message: 'Answer it.' } } }])
+    expect(countAgentChatCalls(withInbox(ask, { ...dispatchThrew(line, 'call_send_session') }))).toBeNull()
+  })
+
+  it('sessions_send from a script (a nested row)', () => {
+    const [exec, execResult] = codeModeExecLarge('call_0') as [Row, Row]
+    expect(countAgentChatCalls(withInbox(exec, nestedCall('call_0', 'sessions_send', 'ok'), execResult), undefined, { openclawVersion: '2026.11.3' })).toBeNull()
   })
 })
 

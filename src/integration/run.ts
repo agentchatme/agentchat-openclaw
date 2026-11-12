@@ -225,8 +225,8 @@ export interface AgentChatCalls {
  *   - an AgentChat call's outcome cannot be read from its row (`callVerdict`);
  *   - the turn used Code Mode (`usedCodeMode`) on a release that does not
  *     record the calls a script makes (see the nested rows below);
- *   - the turn handed work to a child session (`sessions_spawn`): the
- *     child's calls are in its own session;
+ *   - the turn handed work to another session's run (`sessions_spawn`,
+ *     `sessions_send`): that run's calls are in its own session;
  *   - the session holds rows of another run (`__openclaw.runId`, which
  *     OpenClaw writes on assistant and tool rows from the 2026.8 line on —
  *     `attachSessionTranscriptRunId`, `src/sessions/transcript-events.ts`):
@@ -273,6 +273,12 @@ export interface AgentChatCalls {
  *   `src/agents/embedded-agent-subscribe.handlers.tools.ts`); the result is
  *   kept up to 32 KiB. A dispatcher row with nested rows under it is not
  *   counted itself: its call is the nested row.
+ *   Known limit: the executor writes the row only while its attempt is
+ *   still the current one (`if (!params.isCurrent()) return false` before
+ *   `appendMessageAsync`, `attempt-tool-search-executor.ts`). A nested call
+ *   that finishes after its attempt was superseded or aborted leaves no
+ *   row, and nothing in the transcript says one is missing — such a turn
+ *   is counted from the rows that are there.
  *
  *   A row whose details were too large to store — over 8 KiB, the
  *   persistence guard keeps `{ persistedDetailsTruncated, originalDetailKeys }`
@@ -501,17 +507,26 @@ function nestedVerdict(call: Record<string, unknown>): CallVerdict {
   return call.isError === false ? 'ok' : 'unknown'
 }
 
-/** The tool `sessions_spawn` hands work to a child session (`src/agents/tools/sessions-spawn-tool.ts`). */
-const CHILD_SESSION_TOOL = 'sessions_spawn'
+/**
+ * Tools that hand work to another session's run, whose calls are stored in
+ * that session: `sessions_spawn` starts a child session
+ * (`src/agents/tools/sessions-spawn-tool.ts`; 2026.6.10
+ * `openclaw-tools-*.js`, 2026.11.3 `sessions-spawn-tool-*.mjs`), and
+ * `sessions_send` starts a run in an existing one
+ * (`src/agents/tools/sessions-send-tool.ts`, result `{ runId, status:
+ * 'accepted', sessionKey, … }`; the same chunks).
+ */
+const OTHER_SESSION_TOOLS: ReadonlySet<string> = new Set(['sessions_spawn', 'sessions_send'])
 
-/** Whether the turn spawned a child session — called directly, through Tool Search, or from a script. */
+/** Whether the turn handed work to another session's run — called directly, through Tool Search, or from a script. */
 function delegatedToChild(rows: readonly Record<string, unknown>[], calls: ReadonlyMap<string, Record<string, unknown>>, nested: readonly Record<string, unknown>[]): boolean {
+  const names = (value: unknown) => typeof value === 'string' && OTHER_SESSION_TOOLS.has(value)
   for (const call of calls.values()) {
-    if (call.name === CHILD_SESSION_TOOL) return true
-    if (typeof call.name === 'string' && DISPATCHER_TOOL_NAMES.has(call.name) && dispatchTarget(call) === CHILD_SESSION_TOOL) return true
+    if (names(call.name)) return true
+    if (typeof call.name === 'string' && DISPATCHER_TOOL_NAMES.has(call.name) && names(dispatchTarget(call))) return true
   }
-  if (nested.some((call) => call.toolName === CHILD_SESSION_TOOL)) return true
-  return rows.some((row) => toolNameOf(row) === CHILD_SESSION_TOOL || asRecord(asRecord(row.details)?.tool)?.name === CHILD_SESSION_TOOL)
+  if (nested.some((call) => names(call.toolName))) return true
+  return rows.some((row) => names(toolNameOf(row)) || names(asRecord(asRecord(row.details)?.tool)?.name))
 }
 
 /** What one tool row says about an AgentChat call (see `countAgentChatCalls` for the shapes). */

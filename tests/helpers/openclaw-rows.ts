@@ -337,6 +337,25 @@ export function sessionsSpawn(line: OpenClawLine, id: string): Row[] {
   ]
 }
 
+/**
+ * A run started in another session by `sessions_send` (`src/agents/tools/sessions-send-tool.ts`:
+ * `sessionKey` / `message`; accepted result 2026.6.10 `{ runId, status: 'accepted', sessionKey, delivery: { status, mode } }`
+ * (`openclaw-tools-B0V1p3La.js:10807`), 2026.11.3 `{ runId, status: 'accepted', sessionKey, targetDisposition, delivery: { status } }`
+ * (`sessions-spawn-tool-BEmFKy60.mjs:1022`)).
+ */
+export function sessionsSend(line: OpenClawLine, id: string): Row[] {
+  const details = {
+    runId: 'run_other',
+    status: 'accepted',
+    sessionKey: 'agent:main:main',
+    ...(line === '2026.11.3' ? { targetDisposition: 'queued', delivery: { status: 'pending' } } : { delivery: { status: 'pending', mode: 'announce' } }),
+  }
+  return [
+    assistantCalls([{ id, name: 'sessions_send', arguments: { sessionKey: 'agent:main:main', message: 'Answer @bob on AgentChat.' } }]),
+    toolResult(line, id, 'sessions_send', [{ type: 'text', text: JSON.stringify(details, null, 2) }], details, false),
+  ]
+}
+
 /** A compaction marker in the read (`src/gateway/session-utils.fs.ts` 2026.6.10; `session-transcript-entry-message.ts` 2026.11.3). */
 export function compaction(): Row {
   return { role: 'system', content: [{ type: 'text', text: 'Compaction' }], timestamp: T, __openclaw: { kind: 'compaction', id: 'cmp_1' } }
