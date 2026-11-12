@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { countAgentChatCalls, isHardTimeout, runEndOf, watchRunUntilEnded } from '../../src/integration/run.js'
+import { isHardTimeout, runEndOf, watchRunUntilEnded } from '../../src/integration/run.js'
 import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 
 const FULL = { requestedMs: 300_000, elapsedMs: 300_000 }
@@ -128,50 +128,4 @@ describe('watchRunUntilEnded', () => {
   })
 })
 
-describe('countAgentChatCalls — from the run transcript', () => {
-  it('counts direct hosted-tool results and their failures', () => {
-    expect(
-      countAgentChatCalls([
-        { role: 'user', content: 'wake' },
-        { role: 'assistant', content: [{ type: 'toolCall', name: 'agentchat__agentchat_inbox' }] },
-        { role: 'toolResult', toolName: 'agentchat__agentchat_inbox', isError: false },
-        { role: 'toolResult', toolName: 'agentchat__agentchat_get_conversation', isError: true },
-        { role: 'toolResult', toolName: 'web_search', isError: false },
-      ]),
-    ).toEqual({ made: 2, failed: 1 })
-  })
-
-  it('counts calls made through the tool-search surface (`tool_call` naming the agentchat MCP server)', () => {
-    const viaToolCall = (isError: boolean, details: unknown) => ({ type: 'message', message: { role: 'toolResult', toolName: 'tool_call', isError, details } })
-    expect(
-      countAgentChatCalls([
-        viaToolCall(false, { tool: { id: 'mcp:agentchat:agentchat__agentchat_send_message', name: 'agentchat__agentchat_send_message', sourceName: 'agentchat', mcp: { serverName: 'agentchat' } } }),
-        viaToolCall(false, { tool: { mcp: { serverName: 'agentchat' } } }),
-        // A tool_call that failed validation never reached a tool: not an AgentChat call.
-        viaToolCall(true, {}),
-        viaToolCall(false, { tool: { name: 'browser__open', mcp: { serverName: 'browser' } } }),
-      ]),
-    ).toEqual({ made: 2, failed: 0 })
-  })
-
-  it('a run that looked at nothing is zero calls — when the transcript is readable', () => {
-    expect(countAgentChatCalls([{ role: 'user', content: 'wake' }, { role: 'assistant', content: 'nothing to do' }])).toEqual({ made: 0, failed: 0 })
-  })
-
-  it('unknown — never zero — when the transcript says nothing usable', () => {
-    expect(countAgentChatCalls([])).toBeNull()
-    expect(countAgentChatCalls([{ kind: 'header' }, 'x', null])).toBeNull()
-  })
-
-  it('skips rows of another run in the same session', () => {
-    expect(
-      countAgentChatCalls(
-        [
-          { role: 'toolResult', toolName: 'agentchat__agentchat_inbox', isError: false, __openclaw: { runId: 'old' } },
-          { role: 'toolResult', toolName: 'agentchat__agentchat_inbox', isError: false, __openclaw: { runId: 'this' } },
-        ],
-        'this',
-      ),
-    ).toEqual({ made: 1, failed: 0 })
-  })
-})
+// Counting the AgentChat calls in the transcript: ./agentchat-calls.test.ts (OpenClaw's own row shapes).

@@ -3,8 +3,8 @@
  *
  * Every text an agent sees is written once on the server and served as data
  * (`GET /v1/texts?runtime=openclaw`): the wake instruction, the invite
- * prompt, the gate-call preamble and answer format, the identity line, where
- * the manual is. The kit's cache fetches them at channel start and daily,
+ * prompt, the gate-call preamble and answer format, the reply-turn template,
+ * the identity line, where the manual is. The kit's cache fetches them at channel start and daily,
  * keeps the last good copy in `<state dir>/agentchat/<accountId>/texts.json`
  * (an offline start is not mute), and backs off after a failure. The server
  * spells the hosted tools for `runtime=openclaw` the way OpenClaw exposes
@@ -33,10 +33,21 @@ export function textsCachePath(accountId: string, stateDir?: string): string {
   return path.join(integrationStateDir(accountId, stateDir), TEXTS_CACHE_FILE)
 }
 
+/**
+ * Served fields newer than the installed SDK's `Texts` type. Optional: an
+ * older server (or a copy cached before it served them) has none.
+ *   - `reply_turn_template` (contract v1): what a gate-call reply turn starts
+ *     with, for the one conversation its `reply` verdict names. The kit builds
+ *     that prompt; the plugin only spells its tool names.
+ */
+type NewerTexts = Texts & { readonly reply_turn_template?: unknown }
+
 /** Re-spell the hosted tool names in every agent-facing text. Pure, idempotent; the stored copy stays server-verbatim. */
 export function spellTextsForOpenClaw(texts: Texts): Texts {
+  const newer: NewerTexts = texts
   return {
     ...texts,
+    ...(typeof newer.reply_turn_template === 'string' ? { reply_turn_template: spellToolsForOpenClaw(newer.reply_turn_template) } : {}),
     wake_instruction: spellToolsForOpenClaw(texts.wake_instruction),
     invite_prompt: spellToolsForOpenClaw(texts.invite_prompt),
     identity_line: spellToolsForOpenClaw(texts.identity_line),

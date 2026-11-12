@@ -15,6 +15,7 @@ import {
 } from '../../src/integration/model.js'
 import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 import { testKey } from '../helpers/keys.js'
+import { assistantCalls, mcpOk, mcpServerError, userPrompt, withSeq } from '../helpers/openclaw-rows.js'
 
 function fakeRuntime(overrides: { completeText?: string; runError?: Error; waitStatus?: string; waitThrows?: boolean } = {}) {
   const calls: { complete: unknown[]; run: unknown[]; wait: unknown[] } = { complete: [], run: [], wait: [] }
@@ -188,11 +189,15 @@ describe('createRuntimeTurnStarter — admission first, the confirmed end later'
         getSessionMessages: async (params: unknown) => {
           expect(params).toEqual({ sessionKey: 'sk', limit: 200 })
           return {
-            messages: [
-              { role: 'user', content: 'P' },
-              { role: 'toolResult', toolName: 'agentchat__agentchat_inbox', isError: false },
-              { role: 'toolResult', toolName: 'agentchat__agentchat_send_message', isError: true },
-            ],
+            messages: withSeq([
+              userPrompt(),
+              assistantCalls([
+                { id: 'call_inbox', name: 'agentchat__agentchat_inbox', arguments: {} },
+                { id: 'call_send', name: 'agentchat__agentchat_send_message', arguments: {} },
+              ]),
+              mcpOk('2026.6.10', 'call_inbox', 'agentchat_inbox'),
+              mcpServerError('2026.6.10', 'call_send', 'agentchat_send_message'),
+            ]),
           }
         },
       },
@@ -211,7 +216,9 @@ describe('createRuntimeTurnStarter — admission first, the confirmed end later'
         waitForRun: async () => ({ status: 'ok' }),
         getSessionMessages: async (params: unknown) => {
           reads.push(params)
-          return { messages: [{ role: 'toolResult', toolName: 'agentchat__agentchat_inbox', isError: false }] }
+          return {
+            messages: withSeq([userPrompt(), assistantCalls([{ id: 'call_inbox', name: 'agentchat__agentchat_inbox', arguments: {} }]), mcpOk('2026.11.3', 'call_inbox', 'agentchat_inbox')]),
+          }
         },
       },
     } as unknown as PluginRuntime

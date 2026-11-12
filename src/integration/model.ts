@@ -205,7 +205,7 @@ export interface TurnOutcome {
   readonly runId?: string
   readonly status?: RunEndStatus | 'gone'
   readonly error?: string
-  /** AgentChat tool calls the run made, from its transcript; null when OpenClaw did not let the plugin read it (unknown, never zero). */
+  /** AgentChat tool calls the run made, from its transcript; null when unknown — the transcript could not be read, or may be cut, or a call's outcome cannot be read from it (never zero, never all-ok). */
   readonly agentchatCalls?: AgentChatCalls | null
   /** From admission to the confirmed end. */
   readonly elapsedMs?: number
