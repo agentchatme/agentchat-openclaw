@@ -222,9 +222,14 @@ export interface AgentChatCalls {
  *     own, so message 1 is where it starts), or the read holds a compaction
  *     or reset marker or an oversized-message placeholder, which stand for
  *     rows that are not there;
- *   - an AgentChat call's outcome cannot be read from its row (`callVerdict`).
- *
- * Rows tagged with another run's id (`__openclaw.runId`) are skipped.
+ *   - an AgentChat call's outcome cannot be read from its row (`callVerdict`);
+ *   - the turn used Code Mode (`usedCodeMode`): the calls a Code Mode script
+ *     makes, hosted ones included, leave no rows of their own;
+ *   - the session holds rows of another run (`__openclaw.runId`, which
+ *     OpenClaw writes on assistant and tool rows from the 2026.8 line on —
+ *     `attachSessionTranscriptRunId`, `src/sessions/transcript-events.ts`):
+ *     a turn OpenClaw resumed after a gateway restart runs again in the same
+ *     session, and counting one run of it would be a partial count.
  *
  * The row shapes (OpenClaw's own; 2026.6.10 is the oldest supported release,
  * 2026.11.3 the newest at the time of writing, `main` its repository):
@@ -267,13 +272,13 @@ export function countAgentChatCalls(messages: readonly unknown[], runId?: string
     rows.push(message)
   }
   if (!coversWholeSession(rows)) return null
+  if (runId && rows.some((row) => isOtherRun(row, runId))) return null
   const calls = assistantToolCalls(rows)
+  if (usedCodeMode(rows, calls)) return null
   let made = 0
   let failed = 0
   for (const message of rows) {
     if (message.role !== 'toolResult' && message.role !== 'tool') continue
-    const meta = asRecord(message.__openclaw)
-    if (runId && typeof meta?.runId === 'string' && meta.runId !== runId) continue
     const verdict = callVerdict(message, calls)
     if (verdict === 'not_agentchat') continue
     if (verdict === 'unknown') return null
@@ -343,6 +348,48 @@ function coversWholeSession(rows: readonly Record<string, unknown>[]): boolean {
     const meta = asRecord(row.__openclaw)
     return meta?.kind !== 'compaction' && meta?.kind !== 'reset' && meta?.truncated !== true
   })
+}
+
+/** A row OpenClaw attributes to a run other than `runId`. */
+function isOtherRun(row: Record<string, unknown>, runId: string): boolean {
+  const tagged = asRecord(row.__openclaw)?.runId
+  return typeof tagged === 'string' && tagged.trim().length > 0 && tagged.trim() !== runId
+}
+
+/** Tool Search's code mode (2026.6.10: `tool_search_code`, `src/agents/tool-search.ts`) and Code Mode's resume tool (`wait`, `src/agents/code-mode-control-tools.ts`); no other tool has these names. */
+const CODE_MODE_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set(['tool_search_code', 'wait'])
+
+/**
+ * Whether the turn ran a Code Mode script. Code Mode's `exec` shares its name
+ * with the shell's `exec` (`src/agents/code-mode-control-tools.ts`), so an
+ * `exec` counts as Code Mode unless it is recognisably the shell's: Code
+ * Mode's takes the script as `code` (the shell's schema has no `code`,
+ * `src/agents/bash-tools.schemas.ts`) and its result carries `telemetry`;
+ * the shell's result carries `exitCode` / `durationMs` / `aggregated`
+ * (`src/agents/bash-tools.exec-runtime.ts`). Anything in between counts as
+ * Code Mode — never as a turn without it.
+ */
+function usedCodeMode(rows: readonly Record<string, unknown>[], calls: ReadonlyMap<string, Record<string, unknown>>): boolean {
+  for (const call of calls.values()) {
+    const name = typeof call.name === 'string' ? call.name : ''
+    if (CODE_MODE_ONLY_TOOL_NAMES.has(name)) return true
+    if (name === 'exec' && typeof callArguments(call)?.code === 'string') return true
+  }
+  return rows.some((row) => {
+    if (row.role !== 'toolResult' && row.role !== 'tool') return false
+    const name = typeof row.toolName === 'string' ? row.toolName : typeof row.name === 'string' ? row.name : ''
+    if (CODE_MODE_ONLY_TOOL_NAMES.has(name)) return true
+    return name === 'exec' && !isShellExecResult(row, calls)
+  })
+}
+
+function isShellExecResult(row: Record<string, unknown>, calls: ReadonlyMap<string, Record<string, unknown>>): boolean {
+  const call = typeof row.toolCallId === 'string' ? calls.get(row.toolCallId) : undefined
+  const args = callArguments(call)
+  if (!args || typeof args.command !== 'string' || args.code !== undefined) return false
+  const details = asRecord(row.details)
+  if (!details || details.telemetry !== undefined) return false
+  return details.exitCode !== undefined || typeof details.durationMs === 'number' || typeof details.aggregated === 'string'
 }
 
 /** The assistant's tool calls by id (agent-core `toolCall` content blocks). */
@@ -429,6 +476,15 @@ function isAgentChatEntry(tool: Record<string, unknown>): boolean {
  * call is not there or names nothing.
  */
 function dispatchTarget(call: Record<string, unknown> | undefined): string | null {
+  const record = callArguments(call)
+  const selector = nonEmpty(record?.id) ?? nonEmpty(record?.toolId) ?? nonEmpty(record?.name)
+  if (!selector) return null
+  const trimmed = selector.trim()
+  return trimmed.slice(trimmed.lastIndexOf(':') + 1)
+}
+
+/** A tool call's arguments as a record (a provider may leave them a JSON string). Null when there are none. */
+function callArguments(call: Record<string, unknown> | undefined): Record<string, unknown> | null {
   if (!call) return null
   let args: unknown = call.arguments
   if (typeof args === 'string') {
@@ -438,11 +494,7 @@ function dispatchTarget(call: Record<string, unknown> | undefined): string | nul
       return null
     }
   }
-  const record = asRecord(args)
-  const selector = nonEmpty(record?.id) ?? nonEmpty(record?.toolId) ?? nonEmpty(record?.name)
-  if (!selector) return null
-  const trimmed = selector.trim()
-  return trimmed.slice(trimmed.lastIndexOf(':') + 1)
+  return asRecord(args)
 }
 
 /** A transcript row is either the message itself or an event wrapping it (`{ type: 'message', message }`). */

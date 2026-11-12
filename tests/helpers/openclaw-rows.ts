@@ -171,6 +171,80 @@ export function codexMirrored(id: string, toolName: string, isError: boolean, te
   }
 }
 
+/** Code Mode's catalog telemetry (`getTelemetry`, `src/agents/tool-search.ts`), as a Code Mode result carries it. */
+function codeModeTelemetry(line: OpenClawLine): Row {
+  return {
+    catalogSize: 2,
+    sources: { openclaw: 0, mcp: 2, client: 0 },
+    searchCount: 0,
+    describeCount: 0,
+    callCount: 1,
+    ...(line === '2026.6.10' ? { visibleTools: ['exec', 'wait'] } : {}),
+  }
+}
+
+/**
+ * Tool Search's code mode (2026.6.10 `src/agents/tool-search.ts`): the
+ * script's calls go through the `openclaw.tools` bridge, and the row is
+ * `jsonResult({ ok, value, logs, telemetry })`.
+ */
+export function toolSearchCode(id: string): Row[] {
+  const details = { ok: true, value: null, logs: [], telemetry: codeModeTelemetry('2026.6.10') }
+  return [
+    assistantCalls([{ id, name: 'tool_search_code', arguments: { code: "return await openclaw.tools.call('agentchat__agentchat_send_message', { to: '@bob', text: 'hi' })" } }]),
+    toolResult('2026.6.10', id, 'tool_search_code', [{ type: 'text', text: JSON.stringify(details, null, 2) }], details, false),
+  ]
+}
+
+/**
+ * Code Mode's `exec` (2026.6.10 `src/agents/code-mode.ts` `createCodeModeTools`,
+ * `jsonResult(await runExec(...))`; 2026.11.3 and main the same file, the
+ * script required as `code`, result through `formatToolSearchControlResult`):
+ * `details` is the script's result, with `telemetry`. MCP tools are reached
+ * from inside the script (2026.6.10: "MCP tools are available only through
+ * the `MCP` namespace").
+ */
+export function codeModeExec(line: OpenClawLine, id: string): Row[] {
+  // The script itself is the agent's; what it calls leaves no row.
+  const code = 'return null'
+  const details = { status: 'completed', value: null, ...(line === '2026.6.10' ? { output: [] } : {}), telemetry: codeModeTelemetry(line) }
+  return [
+    assistantCalls([{ id, name: 'exec', arguments: line === '2026.6.10' ? { code } : { title: 'Send the reply', code } }]),
+    toolResult(line, id, 'exec', [{ type: 'text', text: JSON.stringify(details, null, 2) }], details, false),
+  ]
+}
+
+/** Code Mode's `wait`, resuming a script that returned `status: 'waiting'` (`createCodeModeTools`). */
+export function codeModeWait(line: OpenClawLine, id: string): Row[] {
+  const details = { status: 'completed', value: null, telemetry: codeModeTelemetry(line) }
+  return [
+    assistantCalls([{ id, name: 'wait', arguments: { runId: 'cm_run_1' } }]),
+    toolResult(line, id, 'wait', [{ type: 'text', text: JSON.stringify(details, null, 2) }], details, false),
+  ]
+}
+
+/** The shell's `exec` (schema `src/agents/bash-tools.schemas.ts`, result `src/agents/bash-tools.exec-runtime.ts`). */
+export function shellExec(line: OpenClawLine, id: string, command = 'date -u'): Row[] {
+  const details = { status: 'completed', exitCode: 0, durationMs: 12, aggregated: '2026-11-12T06:00:00Z', cwd: '/tmp' }
+  return [
+    assistantCalls([{ id, name: 'exec', arguments: line === '2026.6.10' ? { command } : { title: 'Check the time', command } }]),
+    toolResult(line, id, 'exec', [{ type: 'text', text: details.aggregated }], details, false),
+  ]
+}
+
+/**
+ * The rows as a run writes them from the 2026.8 line on: assistant and tool
+ * rows carry the run that wrote them (`attachSessionTranscriptRunId`,
+ * `src/sessions/transcript-events.ts`); user rows do not.
+ */
+export function ranBy(runId: string, rows: readonly Row[]): Row[] {
+  return rows.map((row) => {
+    if (row.role !== 'assistant' && row.role !== 'toolResult') return row
+    const meta = row.__openclaw && typeof row.__openclaw === 'object' ? (row.__openclaw as Row) : {}
+    return { ...row, __openclaw: { ...meta, runId } }
+  })
+}
+
 /** A compaction marker in the read (`src/gateway/session-utils.fs.ts` 2026.6.10; `session-transcript-entry-message.ts` 2026.11.3). */
 export function compaction(): Row {
   return { role: 'system', content: [{ type: 'text', text: 'Compaction' }], timestamp: T, __openclaw: { kind: 'compaction', id: 'cmp_1' } }
