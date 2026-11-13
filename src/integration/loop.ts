@@ -184,6 +184,15 @@ function logEvent(event: integration.ReceiveLoopEvent, logger: Logger, metrics: 
     case 'echo':
       logger.debug(event.conversationId ? { conversationId: event.conversationId } : {}, 'own echo — not a wake')
       return
+    case 'notice':
+      // A system notice (a member joined or left, a rename, a group deleted):
+      // the SDK acked it on receipt; the kit starts no cycle for it.
+      logger.debug(event.conversationId ? { conversationId: event.conversationId } : {}, 'system notice — acked, not a wake')
+      return
+    case 'gate_chunk':
+      // One gate call of a cycle; the cycle's own line says what was left undecided.
+      logger.debug({ cycle: event.cycle, chunk: event.index, of: event.of, cards: event.cards, outcome: event.outcome, undecided: event.undecided, ...(event.failure ? { failure: event.failure } : {}) }, 'gate chunk')
+      return
     case 'cycle': {
       const s = event.summary
       const fields = {
