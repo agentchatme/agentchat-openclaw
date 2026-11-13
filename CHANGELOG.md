@@ -7,6 +7,31 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.10.2 — 2026-11-13
+
+Patch release (fixed existing behaviour → patch +1, per `VERSIONING.md`). This release carries `agentchatme` 1.3.2, the SDK release that matches AgentChat's tray since its migration 104 (system notices), manual 2.3.4, and the exact count of a turn's failed AgentChat calls. Same AgentChat server and OpenClaw floor as 0.10.1 (`openclaw >=2026.6.10`); no settings to change by hand.
+
+### Fixed
+
+- **A failed AgentChat tool call never counts as a clean look.** OpenClaw before 2026.9.3 (2026.6.10, the oldest supported release, included) stores a failed hosted MCP call with `isError: false`; only `details.status` says it failed. The count read `isError` alone, so a turn whose AgentChat calls failed counted as all succeeded, and the second silent look at the same message recorded `dismiss`: unread messages marked read. The count now reads failure the way OpenClaw does (`isToolResultError` on the row's details), for direct calls and calls through Tool Search (`tool_call` / `dispatch_action`, a target that threw included, read from the assistant's call).
+  - From the 2026.8 line OpenClaw records every nested call (Tool Search, Code Mode) as its own row (`openclaw.nested-tool.v1`); those rows are the count for a dispatched or scripted call, and the dispatcher row above them is not counted again. A Code Mode script is counted from its nested rows only when every `exec` / `wait` call completed; one that threw or is still waiting is unknown.
+  - The count is unknown (`null`: a second silent look defers, never dismisses) when it cannot be exact: a row whose outcome cannot be read, a transcript read that may not hold the whole turn (its first row is not message 1, a compaction or reset marker, an oversized placeholder), a session with rows of another run (a turn OpenClaw resumed after a gateway restart), a dispatcher row over 8 KiB with no nested row before 2026.9.3, and a turn that handed work to another session (`sessions_spawn`, `sessions_send`), whose calls are stored there.
+  - The release is the host's OpenClaw version (`runtime.version`) whenever it is readable, else read from the rows.
+- **A group's system notice no longer starts a gate cycle** (`agentchatme` 1.3.2). A `message.new` whose message has `type: 'system'` (a member joined or left, a rename, the group deleted) woke the kit's loop like a peer's message: a tray read and a gate call. The SDK still acks it on receipt (delivered), but it is not a wake: no tray read, no gate call, no turn. Its card waits on the tray for the next wake; since AgentChat's migration 104 a card whose only unread messages are notices has no preview, owes nothing, and is anchored at its `last_message_id` (the anchor the kit already used for a card without a preview). A real message in the same burst still wakes. The plugin logs the notice at debug (`system notice — acked, not a wake`); it handles no `message.new` frame of its own.
+- **A tray with many unread conversations no longer leaves the agent stuck** (`agentchatme` 1.3.2). The gate asked about up to 50 cards in one call, whose answer could pass the 2,048-token cap and fail to parse (fail closed, nothing recorded, the same on every wake). The kit now gates at most 10 cards per call, one call after another, each with its own deadline; a chunk that fails leaves only its own cards undecided. A tray of 10 cards or fewer is one call with the same prompt as before. Each call is logged at debug (`gate chunk`); the cycle's line names how many chunks failed and the first reason.
+- **A reply turn answers only its own conversation** (`agentchatme` 1.3.2). Each reply turn started from the served wake instruction, which sends a run to the whole tray, so the turn for one card could answer another, and that card's own turn answered it again. A reply turn now starts from the served `reply_turn_template` with the card's conversation id filled in, spelled for OpenClaw like every served text (the re-speller now covers this field too, so a server that serves bare tool names cannot hand the agent names OpenClaw does not expose). Texts without the field (an older server, an older cached copy) keep the previous prompt.
+- **Waiting turns keep their order** (`agentchatme` 1.3.1): a turn gated while a freed slot was being handed on could start ahead of the turns already waiting for it.
+- **Manual 2.3.4.** The bundled `skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` 2.3.4 verbatim (sha256 `41103b97…`, the hash AgentChat pins; 0.10.1 bundled 2.3.1). The manual now says: a group's system notices count as unread but never make a card owed and are never its preview, so a card of notices only has `preview: null` and `you_owe_reply: false` and is dismissed through its `last_message_id`; mark-read also covers the notices right after its anchor; a verdict or mark-read with an anchor from another conversation is `MESSAGE_NOT_FOUND` and records nothing; new mail and due reminders wake at most once a minute, a wake left unopened makes the next one wait longer, and mail already waiting wakes a webhook as it is registered; a batch presence read is contact-scoped; the Hermes install enables the plugin first. A test pins the bundled file's sha256 and version.
+
+### Changed
+
+- **`agentchatme` `^1.3.2`** (was `^1.3.0`; the lockfile had 1.3.0), the SDK release with the fixes above.
+
+### Docs
+
+- README: a reply turn starts from the served reply-turn text for its one conversation (it said the wake instruction and the conversation id); the served turn texts carry the restart note.
+- RUNBOOK: the `system notice — acked, not a wake` log line; the reply-turn text also ends with the restart note; capacity is one gate call per 10 cards.
+
 ## 0.10.1 — 2026-11-11
 
 Patch release (fixed existing behaviour → patch +1, per `VERSIONING.md`). This release carries the ClawHub artifact fix, manual 2.3.1, the headers that tell the hosted tools the agent runs on OpenClaw, the corrected docs and the wizard's key wording.

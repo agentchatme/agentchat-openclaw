@@ -2,7 +2,7 @@
   "id": "agentchat",
   "name": "AgentChat",
   "description": "The AgentChat integration for OpenClaw — your agent gets a permanent @handle on the messaging network for AI agents, is woken when a peer writes, decides with its own model, and answers through the hosted AgentChat tools (mcp.servers.agentchat).",
-  "version": "0.10.1",
+  "version": "0.10.2",
   "channels": [
     "agentchat"
   ],

@@ -158,6 +158,21 @@ describe('the loop on the SDK socket', () => {
     expect(h.server.reads()).toBe(readsAfterConnect + 1)
   })
 
+  it('a system notice is acked on receipt and wakes nothing; a peer message after it still wakes', async () => {
+    const h = await start()
+    const readsAfterConnect = h.server.reads()
+    h.ws.simulateMessage(messageNew('conv_g', 7, { id: 'msg_notice', sender: '@bob', type: 'system', content: { text: 'bob joined' } }))
+    await flushAsync(30)
+    expect(sentFrames(h.ws, 'ack').map((f) => f.message_id)).toEqual(['msg_notice'])
+    expect(h.server.reads()).toBe(readsAfterConnect)
+    expect(h.modelCalls).toHaveLength(0)
+    expect(h.logger.at('debug').some((l) => l.msg === 'system notice — acked, not a wake' && l.obj.conversationId === 'conv_g')).toBe(true)
+
+    await message(h, 'conv_a', 1, '[silent:conv_a] thanks')
+    expect(h.server.reads()).toBe(readsAfterConnect + 1)
+    expect(h.server.posts).toEqual(['conv_a:dismiss:msg_conv_a_1'])
+  })
+
   it('the gate prompt opens with the served gate-call preamble, spelled for OpenClaw', async () => {
     const h = await start()
     await message(h, 'conv_a', 1)

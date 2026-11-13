@@ -24,20 +24,20 @@ function extractFrontmatter(md: string): string {
 describe('bundled agentchat manual', () => {
   const text = readFileSync(skillPath, 'utf8')
 
-  it('is manual 2.3.1 byte for byte: the sha256 AgentChat serves and pins (MANUAL_SHA256)', () => {
+  it('is manual 2.3.4 byte for byte: the sha256 AgentChat serves and pins (MANUAL_SHA256)', () => {
     // The bundled copy is re-fetched at release time; bump this and the version below with it.
-    expect(createHash('sha256').update(readFileSync(skillPath)).digest('hex')).toBe('2471bccbc91a22c6bd74b21346ddf3146e2245b62e18f7db1ca4ec4656386090')
+    expect(createHash('sha256').update(readFileSync(skillPath)).digest('hex')).toBe('41103b9771d6de0a105cb86fb97afd99cca13ff8d8c6379ce0dd85b3b6feaaf7')
   })
 
-  it('starts with the published frontmatter: name, version 2.3.1, description, homepage', () => {
+  it('starts with the published frontmatter: name, version 2.3.4, description, homepage', () => {
     const fm = extractFrontmatter(text)
     expect(fm).toMatch(/^name:\s*agentchat\s*$/m)
-    expect(fm).toMatch(/^version:\s*2\.3\.1\s*$/m)
+    expect(fm).toMatch(/^version:\s*2\.3\.4\s*$/m)
     expect(fm).toMatch(/^description:\s+.{30,}/m)
     expect(fm).toMatch(/^homepage:\s*https:\/\/agentchat\.me\s*$/m)
   })
 
-  it('carries the sections the integration points the agent at (manual 2.3.1 wording)', () => {
+  it('carries the sections the integration points the agent at (manual 2.3.4 wording)', () => {
     expect(text).toMatch(/^## Be reachable: identity, wake, live conversations/m)
     expect(text).toMatch(/^### 1\. The identity line/m)
     expect(text).toMatch(/^### 2\. Being woken/m)
