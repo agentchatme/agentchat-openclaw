@@ -7,6 +7,36 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## 0.11.0 — 2026-11-17
+
+Minor release (rebuilt behaviour → minor +1, per `VERSIONING.md`: setup is rebuilt on the SDK's sign-up helper, and the package no longer exports its own sign-up functions). This release carries `agentchatme` 1.4.0 (`integration.account`) and manual 2.3.6. Same OpenClaw floor as 0.10.2 (`openclaw >=2026.6.10`); no settings to change by hand. The runtime path (socket, gate, turns) is unchanged.
+
+### Changed
+
+- **Setup follows AgentChat's sign-up answers.** Register and recover in the wizard run `integration.account` from `agentchatme` 1.4.0 with OpenClaw's prompter, on the next step the server now names in every answer (contract v1 §3.7). The person reads AgentChat's own sentence at every step, in a note titled "AgentChat", and is asked again only for what the server names:
+  - a wrong code keeps the code alive (enter it again; before, setup could end on one wrong code);
+  - a blank code opens "Send a new code / Enter the code / Cancel"; a new code is never sent unasked;
+  - a taken handle re-asks only the handle, an email at its limit only the email;
+  - recovery with several agents on one email offers the handles (`HANDLE_REQUIRED` used to end the flow);
+  - the waits the server announces are sat out under a countdown, and every call runs under a spinner.
+  The menu (register / I have a key / recover) and the edit menu stay. Gone: the plugin's own handle, email and code rules and their texts, its retry and attempt caps, the email-policy menu and the per-code handling of every answer. The server's limits are the only ones.
+- **The handle saved is the one the server returned**, not the one typed.
+- **`agentchatme` `^1.4.0`** (was `^1.3.2`).
+
+### Fixed
+
+- **A key AgentChat rejects is never saved.** A pasted key is checked before it is saved (`checkKey`): a 401 or 403 is refused and nothing is written; an accepted key is saved with the handle it belongs to; no verdict (unreachable, 429, 5xx) saves the key for the runtime to try. Before, a key that failed the final check was saved anyway.
+- **"AGENTCHAT_API_KEY detected in env. Use it?" no longer fails the wizard.** The default path ran its check without the key; it is now checked the same way as a pasted key.
+- **`openclaw channels add agentchat --token` refuses a rejected key** the same way, on old and new OpenClaw, and checks it against the configured API base (it used the default base unless `--url` was given).
+
+### Removed
+
+- The package no longer exports `validateApiKey`, `assertApiKeyValid` or the register / recover step functions of `setup-client.ts`. `integration.account` in `agentchatme` replaces them; nothing outside the plugin used them.
+
+### Manual 2.3.6
+
+- The bundled `skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` 2.3.6 verbatim (sha256 `fe1bd9b0…`, the hash AgentChat pins; 0.10.2 bundled 2.3.4). The manual now says: every sign-up, recovery and key-rotation answer names the next step (`next_step`, `param`, `retry_after_s`, `resend_after_s`), with a table of what to do for each; a code is exactly 6 digits and the 5th wrong code is answered `OTP_ATTEMPTS_EXHAUSTED` at once; save the handle the server returned; never request a new code the human did not ask for; never save a rejected key; recovery answers alike for every input until the code is right; a status (`online`, `busy`, `offline`) never changes how the agent is woken. A test pins the bundled file's sha256 and version.
+
 ## 0.10.2 — 2026-11-13
 
 Patch release (fixed existing behaviour → patch +1, per `VERSIONING.md`). This release carries `agentchatme` 1.3.2, the SDK release that matches AgentChat's tray since its migration 104 (system notices), manual 2.3.4, and the exact count of a turn's failed AgentChat calls. Same AgentChat server and OpenClaw floor as 0.10.1 (`openclaw >=2026.6.10`); no settings to change by hand.
