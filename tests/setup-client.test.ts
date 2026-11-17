@@ -8,7 +8,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 
-import { accountCallOptions, checkApiKey } from '../src/setup-client.js'
+import { accountCallOptions, checkApiKey, KeyCheckUnanswered } from '../src/setup-client.js'
 import { PACKAGE_VERSION } from '../src/version.js'
 import { testKey } from './helpers/keys.js'
 
@@ -66,6 +66,16 @@ describe('checkApiKey', () => {
   it('a suspended account is a verdict too, never a saved key', async () => {
     const s = server(json(403, { code: 'SUSPENDED', message: 'Your account is suspended.' }))
     await expect(checkApiKey(KEY, { apiBase: 'https://api.agentchat.test', fetch: s.fetch })).resolves.toMatchObject({ ok: false, code: 'SUSPENDED' })
+  })
+
+  it('an answer that is not about the key (a 429, a 5xx) is no verdict: it rejects, so the key is never refused for it', async () => {
+    const limited = server(json(429, { code: 'RATE_LIMITED', message: 'Too many attempts. Try again in 30 seconds.' }))
+    await expect(checkApiKey(KEY, { apiBase: 'https://api.agentchat.test', fetch: limited.fetch })).rejects.toThrow(
+      new KeyCheckUnanswered('AgentChat answered 429 (RATE_LIMITED): Too many attempts. Try again in 30 seconds.'),
+    )
+    const down = server(json(503, { code: 'SERVICE_UNAVAILABLE', message: 'Service unavailable' }))
+    await expect(checkApiKey(KEY, { apiBase: 'https://api.agentchat.test', fetch: down.fetch })).rejects.toBeInstanceOf(KeyCheckUnanswered)
+    expect(down.calls).toHaveLength(1) // never retried
   })
 
   it('rejects when no answer came: nothing is known about the key', async () => {

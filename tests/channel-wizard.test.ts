@@ -769,6 +769,12 @@ describe('agentchatSetupWizard.credentials — a key is checked before it is sav
     expect(readAgentchatConfigField(after, 'default', 'agentHandle')).toBeUndefined()
   })
 
+  it('a 5xx is no verdict on the key: it is saved for the runtime to try, never refused', async () => {
+    server([json(503, { code: 'SERVICE_UNAVAILABLE', message: 'Service unavailable' })])
+    const after = (await credential.applySet!({ cfg: freshCfg, accountId: 'default', credentialValues: {}, value: KEY_PASTED, resolvedValue: KEY_PASTED })) as never
+    expect(readAgentchatConfigField(after, 'default', 'apiKey')).toBe(KEY_PASTED)
+  })
+
   it('the key in AGENTCHAT_API_KEY ("Use it?" → yes) is checked and saved the same way; a turned-away one is not', async () => {
     process.env.AGENTCHAT_API_KEY = KEY_PASTED
     server([me('alice'), unauthorized()])

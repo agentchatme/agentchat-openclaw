@@ -32,6 +32,8 @@ vi.mock('../src/integration/texts.js', async (importOriginal) => {
   return { ...actual, loadIdentityLine: vi.fn(async () => IDENTITY_LINE) }
 })
 
+import { WizardCancelledError } from 'openclaw/plugin-sdk/setup'
+
 import { checkApiKey } from '../src/setup-client.js'
 import { agentchatPlugin, agentchatSetupAdapter, agentchatLifecycleAdapter, accountSectionPersistable } from '../src/channel.js'
 import { agentchatSetupWizard } from '../src/channel.wizard.js'
@@ -94,12 +96,49 @@ describe('non-interactive setup — prepare → apply → after', () => {
     expect(fs.readFileSync(dotenv, 'utf8')).toContain(`AGENTCHAT_API_KEY=${KEY}`)
   })
 
-  it('a key that fails the live check leaves the input untouched and says so on RuntimeEnv.error', async () => {
-    vi.mocked(checkApiKey).mockResolvedValueOnce({ ok: false, code: 'UNAUTHORIZED', message: 'bad key' })
+  it('a key AgentChat turns away is refused before the write: validateInput returns the refusal, so OpenClaw writes nothing', async () => {
+    vi.mocked(checkApiKey).mockResolvedValueOnce({ ok: false, code: 'UNAUTHORIZED', message: 'Invalid API key' })
+    const dotenv = path.join(process.env.OPENCLAW_STATE_DIR!, '.env')
+    fs.rmSync(dotenv, { force: true })
+    const { runtime, lines } = cliRuntime()
+    const prepared = await agentchatSetupAdapter.prepareAccountConfigInput!({ cfg: {} as never, accountId: 'default', input: { token: KEY }, runtime })
+    const refusal = agentchatSetupAdapter.validateInput!({ cfg: {} as never, accountId: 'default', input: prepared })
+    expect(refusal).toBe(
+      'AgentChat did not accept the API key (UNAUTHORIZED): Invalid API key\n' +
+        'The key was not saved. Run `openclaw channels add agentchat` to register a new agent or recover a lost key (email code).',
+    )
+    expect(lines).toEqual([]) // OpenClaw prints what validateInput returns
+    expect(fs.existsSync(dotenv)).toBe(false)
+  })
+
+  it('asks the API base the write will hold: --url, else the one already configured (never the default behind its back)', async () => {
+    vi.mocked(checkApiKey).mockResolvedValue(keyAccepted)
+    const { runtime } = cliRuntime()
+    const cfg = { channels: { agentchat: { apiBase: 'https://stage.agentchat.test' } } }
+    await agentchatSetupAdapter.prepareAccountConfigInput!({ cfg: cfg as never, accountId: 'default', input: { token: KEY }, runtime })
+    expect(vi.mocked(checkApiKey)).toHaveBeenLastCalledWith(KEY, { apiBase: 'https://stage.agentchat.test' })
+    await agentchatSetupAdapter.prepareAccountConfigInput!({ cfg: cfg as never, accountId: 'default', input: { token: KEY, url: 'https://other.agentchat.test' }, runtime })
+    expect(vi.mocked(checkApiKey)).toHaveBeenLastCalledWith(KEY, { apiBase: 'https://other.agentchat.test' })
+  })
+
+  it('no verdict (AgentChat unreachable): the key passes validateInput and is written for the runtime to try', async () => {
+    vi.mocked(checkApiKey).mockRejectedValueOnce(new Error('fetch failed'))
     const { runtime, lines } = cliRuntime()
     const prepared = await agentchatSetupAdapter.prepareAccountConfigInput!({ cfg: {} as never, accountId: 'default', input: { token: KEY }, runtime })
     expect(prepared).toEqual({ token: KEY })
-    expect(lines[0]).toEqual({ level: 'error', line: '[agentchat:default] api key did not pass live check (UNAUTHORIZED): bad key' })
+    expect(agentchatSetupAdapter.validateInput!({ cfg: {} as never, accountId: 'default', input: prepared })).toBeNull()
+    expect(lines).toEqual([{ level: 'error', line: '[agentchat:default] no verdict on the API key, saving it for the runtime to try: fetch failed' }])
+  })
+
+  it('the handle AgentChat returned is written as it is: no local shape rule drops it', () => {
+    const next = agentchatPlugin.setup!.applyAccountConfig({ cfg: { channels: {} } as never, accountId: 'default', input: { token: KEY, agentHandle: 'Shape_The_Old_Rule_Refused' } as never }) as unknown as {
+      channels: { agentchat: { agentHandle: string } }
+    }
+    expect(next.channels.agentchat.agentHandle).toBe('Shape_The_Old_Rule_Refused')
+    const empty = agentchatPlugin.setup!.applyAccountConfig({ cfg: { channels: {} } as never, accountId: 'default', input: { token: KEY, agentHandle: ' @ ' } as never }) as unknown as {
+      channels: { agentchat: { agentHandle?: string } }
+    }
+    expect(empty.channels.agentchat.agentHandle).toBeUndefined()
   })
 
   it('applyAccountConfig (synchronous, the one persisted write) carries apiKey, agentHandle and mcp.servers.agentchat', () => {
@@ -281,6 +320,7 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
     })
 
     it('onAccountConfigChanged does nothing when the enabled state does not change (key rotation, enabled → enabled, disabled → disabled)', async () => {
+      vi.mocked(checkApiKey).mockReset().mockResolvedValue(keyAccepted)
       fs.writeFileSync(anchorFile(), ANCHOR)
       const prevCfg = substituted()
       await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, apiKey: testKey('r'.repeat(24)) } } } as never, accountId: 'default', runtime })
@@ -341,6 +381,48 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
       expect(fs.existsSync(anchorFile())).toBe(false)
       expect(lines).toHaveLength(1)
       expect(lines[0]!.line).toMatch(/agentHandle not in config — run `openclaw doctor --fix`/)
+    })
+
+    it('a new key AgentChat turns away (channels add --token on an OpenClaw without the prepare hook) ends the command before the write', async () => {
+      const fresh = testKey('f'.repeat(24))
+      vi.mocked(checkApiKey).mockReset().mockResolvedValueOnce({ ok: false, code: 'UNAUTHORIZED', message: 'Invalid API key' })
+      const prevCfg = substituted()
+      const nextCfg = { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, apiKey: fresh } } }
+      await expect(
+        agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: nextCfg as never, accountId: 'default', runtime }),
+      ).rejects.toBeInstanceOf(WizardCancelledError)
+      expect(vi.mocked(checkApiKey)).toHaveBeenCalledWith(fresh, { apiBase: undefined })
+      expect(lines).toEqual([
+        {
+          level: 'error',
+          line:
+            'AgentChat did not accept the API key (UNAUTHORIZED): Invalid API key\n' +
+            'The key was not saved. Run `openclaw channels add agentchat` to register a new agent or recover a lost key (email code).',
+        },
+      ])
+    })
+
+    it('a new key with no verdict (AgentChat unreachable) goes on to the write, as the wizard does', async () => {
+      const fresh = testKey('g'.repeat(24))
+      vi.mocked(checkApiKey).mockReset().mockRejectedValueOnce(new Error('fetch failed'))
+      const prevCfg = substituted()
+      const nextCfg = { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, apiKey: fresh } } }
+      await expect(
+        agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: nextCfg as never, accountId: 'default', runtime }),
+      ).resolves.toBeUndefined()
+      expect(lines).toEqual([{ level: 'error', line: '[agentchat:default] no verdict on the API key, saving it for the runtime to try: fetch failed' }])
+    })
+
+    it('the key the prepare hook already asked about, and an unchanged key, are not asked again', async () => {
+      const fresh = testKey('h'.repeat(24))
+      vi.mocked(checkApiKey).mockReset().mockResolvedValueOnce(keyAccepted)
+      await agentchatSetupAdapter.prepareAccountConfigInput!({ cfg: {} as never, accountId: 'default', input: { token: fresh }, runtime })
+      expect(vi.mocked(checkApiKey)).toHaveBeenCalledTimes(1)
+      const prevCfg = substituted()
+      const nextCfg = { ...prevCfg, channels: { agentchat: { ...prevCfg.channels.agentchat, apiKey: fresh } } }
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: nextCfg as never, accountId: 'default', runtime })
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: prevCfg as never, accountId: 'default', runtime })
+      expect(vi.mocked(checkApiKey)).toHaveBeenCalledTimes(1)
     })
 
     it('onAccountRemoved removes the identity line and the .env key line', async () => {

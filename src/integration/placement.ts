@@ -177,7 +177,8 @@ export function applyIntegrationConfig<TCfg extends object>(cfg: TCfg, params: I
   const changes: string[] = []
   let next: TCfg = cfg
   const bareHandle = (params.handle ?? '').trim().replace(/^@/, '')
-  if (bareHandle && readAgentchatConfigField(next as never, params.accountId, 'agentHandle') !== bareHandle && isValidHandleShape(bareHandle)) {
+  // The handle AgentChat returned for the key: the server validated it.
+  if (bareHandle && readAgentchatConfigField(next as never, params.accountId, 'agentHandle') !== bareHandle) {
     next = applyAgentchatAccountPatch(next as never, params.accountId, { agentHandle: bareHandle }) as unknown as TCfg
     changes.push(`channels.agentchat${params.accountId === AGENTCHAT_DEFAULT_ACCOUNT_ID ? '' : `.accounts.${params.accountId}`}.agentHandle = ${bareHandle}`)
   }

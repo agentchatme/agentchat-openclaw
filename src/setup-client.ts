@@ -42,12 +42,38 @@ export function accountCallOptions(params: AccountCallParams = {}): integration.
   }
 }
 
+/** AgentChat gave no verdict on the key: a 429, a 5xx, or another answer that is not about the key. */
+export class KeyCheckUnanswered extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'KeyCheckUnanswered'
+  }
+}
+
 /**
  * Does AgentChat accept this key? `{ok: true, handle}` with the handle the
  * key belongs to (save that one, not a typed one), or `{ok: false, code,
- * message}` with the server's answer (never save the key). Rejects when no
- * answer came (network, timeout): then nothing is known about the key.
+ * message}` when AgentChat turned the key away (401 / 403: never save it).
+ * Rejects when no verdict came — no answer (network, timeout), or an answer
+ * that is not about the key (`KeyCheckUnanswered`: a 429, a 5xx) — and
+ * then nothing is known about the key.
  */
-export function checkApiKey(apiKey: string, params: AccountCallParams = {}): Promise<KeyCheck> {
-  return integration.account.checkKey(apiKey, accountCallOptions({ timeoutMs: KEY_CHECK_TIMEOUT_MS, ...params }))
+export async function checkApiKey(apiKey: string, params: AccountCallParams = {}): Promise<KeyCheck> {
+  // The helper reports every answer as `{ok: false}`; the status says
+  // whether the answer was about the key.
+  let status: number | undefined
+  const send = params.fetch ?? ((input: Parameters<typeof fetch>[0], init?: RequestInit) => globalThis.fetch(input, init))
+  const observed = (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const response = await send(input, init)
+    status = response.status
+    return response
+  }) as typeof fetch
+  const check = await integration.account.checkKey(
+    apiKey,
+    accountCallOptions({ timeoutMs: KEY_CHECK_TIMEOUT_MS, ...params, fetch: observed }),
+  )
+  if (!check.ok && status !== 401 && status !== 403) {
+    throw new KeyCheckUnanswered(`AgentChat answered ${status ?? 'without a status'} (${check.code}): ${check.message}`)
+  }
+  return check
 }

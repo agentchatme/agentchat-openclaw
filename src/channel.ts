@@ -34,7 +34,8 @@ import {
   type ChannelPlugin,
 } from 'openclaw/plugin-sdk/channel-core'
 import { deleteAccountFromConfigSection, setAccountEnabledInConfigSection } from 'openclaw/plugin-sdk/channel-plugin-common'
-import type { ChannelSetupInput } from 'openclaw/plugin-sdk/setup'
+import { WizardCancelledError, type ChannelSetupInput } from 'openclaw/plugin-sdk/setup'
+import { createHash } from 'node:crypto'
 
 import {
   AGENTCHAT_CHANNEL_ID,
@@ -54,7 +55,7 @@ import {
   parseChannelConfig,
   type AgentchatChannelConfig,
 } from './config-schema.js'
-import { checkApiKey } from './setup-client.js'
+import { checkApiKey, type KeyCheck } from './setup-client.js'
 import { registerReleaseCli, registerReleaseGatewayMethod } from './binding/release.js'
 import { registerRunObserver } from './binding/run-observer.js'
 
@@ -133,7 +134,7 @@ const uiHints: Record<string, ChannelConfigUiHint> = {
     label: 'AgentChat API key',
     placeholder: 'ac_…',
     sensitive: true,
-    help: 'The setup wizard registers a new agent or recovers a lost key by email code, or accepts an existing ac_… key, which it checks with AgentChat before saving.',
+    help: 'The setup wizard registers a new agent or recovers a lost key by email code, or accepts an existing ac_… key; setup checks a key with AgentChat before saving it.',
   },
   apiBase: {
     label: 'API base URL',
@@ -156,18 +157,40 @@ const uiHints: Record<string, ChannelConfigUiHint> = {
 type SetupRuntimeEnv = { log?: (...args: unknown[]) => void; error?: (...args: unknown[]) => void }
 
 /**
- * The setup input with the one channel-owned field this plugin adds:
- * `agentHandle`, learnt from the key by `prepareAccountConfigInput` and
- * written by `applyAccountConfig` in the same persisted write.
+ * The setup input with the channel-owned fields this plugin adds, both set
+ * by `prepareAccountConfigInput`: `agentHandle`, learnt from the key and
+ * written by `applyAccountConfig` in the same persisted write, and
+ * `keyRefusal`, AgentChat's verdict on a key it turned away, which
+ * `validateInput` returns so OpenClaw writes nothing.
  */
-type AgentchatSetupInput = ChannelSetupInput & { agentHandle?: string }
+type AgentchatSetupInput = ChannelSetupInput & { agentHandle?: string; keyRefusal?: string }
 
-const HANDLE_SHAPE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
-function validHandle(value: unknown): string | undefined {
+/**
+ * A handle as AgentChat returned it (a leading `@` dropped). The server
+ * validated it; only an empty value is not a handle.
+ */
+function handleOf(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined
   const bare = value.trim().replace(/^@/, '')
-  return bare.length >= 3 && bare.length <= 30 && HANDLE_SHAPE.test(bare) ? bare : undefined
+  return bare.length > 0 ? bare : undefined
 }
+
+/** What `channels add --token` prints when AgentChat turns the key away; OpenClaw then writes nothing. */
+function keyRefusal(check: Extract<KeyCheck, { ok: false }>): string {
+  return [
+    `AgentChat did not accept the API key (${check.code}): ${check.message}`,
+    'The key was not saved. Run `openclaw channels add agentchat` to register a new agent or recover a lost key (email code).',
+  ].join('\n')
+}
+
+/**
+ * The key `prepareAccountConfigInput` asked AgentChat about in this
+ * process (its sha256, never the key), so the pre-write lifecycle hook
+ * does not ask again: on an OpenClaw that runs both, a second check would
+ * only repeat the verdict, or a second timeout when AgentChat is down.
+ */
+let keyAskedBeforeWrite: string | null = null
+const keyDigest = (apiKey: string) => createHash('sha256').update(apiKey).digest('hex')
 
 function say(runtime: unknown, level: 'log' | 'error', line: string): void {
   const env = runtime as SetupRuntimeEnv | undefined
@@ -203,11 +226,16 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
   }) => Promise<AgentchatSetupInput>
 } = {
   /**
-   * Pre-write gate: cheap, sync check that the caller supplied an API key
-   * that's at least plausibly shaped. Real authentication happens in
-   * `prepareAccountConfigInput` / `afterAccountConfigWritten`.
+   * Pre-write gate: a key AgentChat turned away in
+   * `prepareAccountConfigInput` ends here (OpenClaw prints the line and
+   * writes nothing); otherwise a cheap, sync check that the caller supplied
+   * an API key that's at least plausibly shaped. On an OpenClaw without
+   * `prepareAccountConfigInput`, the lifecycle hook refuses a rejected key
+   * before the write.
    */
   validateInput({ input }) {
+    const refusal = (input as AgentchatSetupInput).keyRefusal
+    if (typeof refusal === 'string' && refusal.length > 0) return refusal
     if (typeof input.token !== 'string' || input.token.trim().length === 0) {
       return 'apiKey is required — pass via --token, or run `openclaw channels add agentchat` to register a new agent or recover a lost key (email code)'
     }
@@ -228,15 +256,19 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
   },
 
   /**
-   * Learn the handle the key authenticates as BEFORE the write, so
-   * `applyAccountConfig` persists it in the same config write OpenClaw
-   * already makes. A key that does not validate leaves the input untouched
-   * (the write still happens; the error line says what to fix).
+   * Ask AgentChat about the key BEFORE the write. Accepted: the handle it
+   * belongs to goes into the same config write OpenClaw already makes.
+   * Turned away (401 / 403): the input carries the refusal, `validateInput`
+   * returns it, and OpenClaw writes nothing. No verdict (unreachable, a
+   * 5xx): the key is written for the runtime to try, as the wizard does.
    */
-  async prepareAccountConfigInput({ accountId, input, runtime }) {
+  async prepareAccountConfigInput({ cfg, accountId, input, runtime }) {
     const apiKey = typeof input.token === 'string' ? input.token : undefined
     if (!apiKey || apiKey.length < MIN_API_KEY_LENGTH) return input
-    const apiBase = typeof input.url === 'string' && input.url.length > 0 ? input.url : undefined
+    // The base this write will hold: `--url`, else the one already configured.
+    const apiBase =
+      typeof input.url === 'string' && input.url.length > 0 ? input.url : readAgentchatConfigField(cfg, accountId, 'apiBase')
+    keyAskedBeforeWrite = keyDigest(apiKey)
     try {
       const result = await checkApiKey(apiKey, { apiBase })
       if (result.ok) {
@@ -252,9 +284,9 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
         }
         return { ...input, agentHandle: result.handle }
       }
-      say(runtime, 'error', `[agentchat:${accountId}] api key did not pass live check (${result.code}): ${result.message}`)
+      return { ...input, keyRefusal: keyRefusal(result) }
     } catch (err) {
-      say(runtime, 'error', `[agentchat:${accountId}] live key validation failed: ${err instanceof Error ? err.message : String(err)}`)
+      say(runtime, 'error', `[agentchat:${accountId}] no verdict on the API key, saving it for the runtime to try: ${err instanceof Error ? err.message : String(err)}`)
     }
     return input
   },
@@ -269,7 +301,7 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
     const patch: Record<string, unknown> = {}
     if (typeof input.token === 'string' && input.token.length > 0) patch.apiKey = input.token
     if (typeof input.url === 'string' && input.url.length > 0) patch.apiBase = input.url
-    const handle = validHandle((input as AgentchatSetupInput).agentHandle)
+    const handle = handleOf((input as AgentchatSetupInput).agentHandle)
     if (handle) patch.agentHandle = handle
     const withAccount = applyAgentchatAccountPatch(cfg, accountId, patch)
     const apiKey = readAgentchatConfigField(withAccount, accountId, 'apiKey')
@@ -287,7 +319,7 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
     const apiKey = typeof input.token === 'string' ? input.token : readAgentchatConfigField(cfg, accountId, 'apiKey')
     if (!apiKey) return
     const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
-    let handle = validHandle((input as AgentchatSetupInput).agentHandle) ?? readAgentchatConfigField(cfg, accountId, 'agentHandle')
+    let handle = handleOf((input as AgentchatSetupInput).agentHandle) ?? handleOf(readAgentchatConfigField(cfg, accountId, 'agentHandle'))
     if (!handle) {
       // An OpenClaw without `prepareAccountConfigInput`: learn the handle now
       // for the identity line; the config gets it from `openclaw doctor --fix`.
@@ -354,6 +386,32 @@ export function accountSectionPersistable(cfg: Cfg | undefined, accountId: strin
 }
 
 /**
+ * A new key on its way into the config (`channels add agentchat --token` on
+ * an OpenClaw without `prepareAccountConfigInput`, which runs this hook
+ * before the write): ask AgentChat first. Turned away (401 / 403): say so
+ * and end the command, so nothing is written. No verdict: the key is
+ * written for the runtime to try, as the wizard does. A key the prepare
+ * hook already asked about, or the key already configured, is not asked
+ * again.
+ */
+async function refuseRejectedKey(prevCfg: Cfg, nextCfg: Cfg, accountId: string, runtime: unknown): Promise<void> {
+  const apiKey = readAgentchatConfigField(nextCfg, accountId, 'apiKey')
+  if (!apiKey || apiKey === readAgentchatConfigField(prevCfg, accountId, 'apiKey')) return
+  if (keyAskedBeforeWrite === keyDigest(apiKey)) return
+  let check: KeyCheck
+  try {
+    check = await checkApiKey(apiKey, { apiBase: readAgentchatConfigField(nextCfg, accountId, 'apiBase') })
+  } catch (err) {
+    say(runtime, 'error', `[agentchat:${accountId}] no verdict on the API key, saving it for the runtime to try: ${err instanceof Error ? err.message : String(err)}`)
+    return
+  }
+  if (check.ok) return
+  say(runtime, 'error', keyRefusal(check))
+  // OpenClaw's commands end on a cancelled setup without writing.
+  throw new WizardCancelledError('AgentChat did not accept the API key')
+}
+
+/**
  * ChannelLifecycleAdapter — the file side of disable / re-enable / delete,
  * run by OpenClaw after the config adapters and before the write.
  * Best-effort; reports through the CLI runtime it is given.
@@ -367,6 +425,7 @@ export function accountSectionPersistable(cfg: Cfg | undefined, accountId: strin
  */
 export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResolvedAccount>['lifecycle']> = {
   async onAccountConfigChanged({ prevCfg, nextCfg, accountId, runtime }) {
+    await refuseRejectedKey(prevCfg, nextCfg, accountId, runtime)
     const wasEnabled = isAccountEnabled(prevCfg, accountId)
     const isEnabled = isAccountEnabled(nextCfg, accountId)
     if (wasEnabled === isEnabled) return
@@ -384,7 +443,7 @@ export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResol
       for (const line of removeIntegrationFiles(nextCfg, accountId, { clearKey: false })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
       return
     }
-    const handle = validHandle(readAgentchatConfigField(nextCfg, accountId, 'agentHandle'))
+    const handle = handleOf(readAgentchatConfigField(nextCfg, accountId, 'agentHandle'))
     if (!handle) {
       say(runtime, 'log', `[agentchat:${accountId}] agentHandle not in config — run \`openclaw doctor --fix\` to learn it from the key and place the identity line`)
       return
