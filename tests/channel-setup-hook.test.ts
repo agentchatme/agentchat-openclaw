@@ -25,14 +25,14 @@ const { IDENTITY_LINE } = vi.hoisted(() => ({
 
 vi.mock('../src/setup-client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/setup-client.js')>()
-  return { ...actual, validateApiKey: vi.fn() }
+  return { ...actual, checkApiKey: vi.fn() }
 })
 vi.mock('../src/integration/texts.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/integration/texts.js')>()
   return { ...actual, loadIdentityLine: vi.fn(async () => IDENTITY_LINE) }
 })
 
-import { validateApiKey } from '../src/setup-client.js'
+import { checkApiKey } from '../src/setup-client.js'
 import { agentchatPlugin, agentchatSetupAdapter, agentchatLifecycleAdapter, accountSectionPersistable } from '../src/channel.js'
 import { agentchatSetupWizard } from '../src/channel.wizard.js'
 import { agentchatChannelConfigSchema } from '../src/config-schema.js'
@@ -41,7 +41,7 @@ import { getPluginRuntime, setPluginRuntime, isUsablePluginRuntime, resetPluginR
 import { testKey } from './helpers/keys.js'
 
 const KEY = testKey('n'.repeat(24))
-const liveAgent = { handle: 'alice', email: 'a@x', displayName: null, createdAt: 'now' }
+const keyAccepted = { ok: true, handle: 'alice' } as const
 
 /** OpenClaw's setup-only runtime: a Proxy that throws on ANY property access. */
 function throwingRuntimeProxy(): unknown {
@@ -74,7 +74,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
   let workspace: string
   beforeEach(() => {
     workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-setup-hook-'))
-    vi.mocked(validateApiKey).mockReset()
+    vi.mocked(checkApiKey).mockReset()
     resetPluginRuntimeForTest()
   })
   afterEach(() => {
@@ -83,23 +83,23 @@ describe('non-interactive setup — prepare → apply → after', () => {
   })
 
   it('prepareAccountConfigInput learns the handle from the key, writes the .env key before the config write, and reports through RuntimeEnv.log', async () => {
-    vi.mocked(validateApiKey).mockResolvedValueOnce({ ok: true, agent: liveAgent } as never)
+    vi.mocked(checkApiKey).mockResolvedValueOnce(keyAccepted)
     const dotenv = path.join(process.env.OPENCLAW_STATE_DIR!, '.env')
     fs.rmSync(dotenv, { force: true })
     const { runtime, lines } = cliRuntime()
     const prepared = await agentchatSetupAdapter.prepareAccountConfigInput!({ cfg: {} as never, accountId: 'default', input: { token: KEY }, runtime })
     expect(prepared).toEqual({ token: KEY, agentHandle: 'alice' })
-    expect(lines).toEqual([{ level: 'log', line: '[agentchat:default] authenticated as @alice (a@x)' }])
+    expect(lines).toEqual([{ level: 'log', line: '[agentchat:default] authenticated as @alice' }])
     // the hosted-tools entry written next references ${AGENTCHAT_API_KEY}; the variable must resolve on OpenClaw's first post-write read
     expect(fs.readFileSync(dotenv, 'utf8')).toContain(`AGENTCHAT_API_KEY=${KEY}`)
   })
 
   it('a key that fails the live check leaves the input untouched and says so on RuntimeEnv.error', async () => {
-    vi.mocked(validateApiKey).mockResolvedValueOnce({ ok: false, reason: 'unauthorized', message: 'bad key' } as never)
+    vi.mocked(checkApiKey).mockResolvedValueOnce({ ok: false, code: 'UNAUTHORIZED', message: 'bad key' })
     const { runtime, lines } = cliRuntime()
     const prepared = await agentchatSetupAdapter.prepareAccountConfigInput!({ cfg: {} as never, accountId: 'default', input: { token: KEY }, runtime })
     expect(prepared).toEqual({ token: KEY })
-    expect(lines[0]).toEqual({ level: 'error', line: '[agentchat:default] api key did not pass live check (unauthorized): bad key' })
+    expect(lines[0]).toEqual({ level: 'error', line: '[agentchat:default] api key did not pass live check (UNAUTHORIZED): bad key' })
   })
 
   it('applyAccountConfig (synchronous, the one persisted write) carries apiKey, agentHandle and mcp.servers.agentchat', () => {
@@ -141,7 +141,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
     const { runtime, lines } = cliRuntime()
     const cfg = agentchatPlugin.setup!.applyAccountConfig({ cfg: { agents: { defaults: { workspace } } } as never, accountId: 'default', input: { token: KEY, agentHandle: 'alice' } as never })
     await agentchatPlugin.setup!.afterAccountConfigWritten!({ previousCfg: {} as never, cfg, accountId: 'default', input: { token: KEY, agentHandle: 'alice' } as never, runtime })
-    expect(validateApiKey).not.toHaveBeenCalled() // the handle was already in the input
+    expect(checkApiKey).not.toHaveBeenCalled() // the handle was already in the input
     expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain(IDENTITY_LINE)
     expect(fs.readFileSync(path.join(process.env.OPENCLAW_STATE_DIR!, '.env'), 'utf8')).toContain(`AGENTCHAT_API_KEY=${KEY}`)
     expect(lines.every((l) => l.level === 'log')).toBe(true)
@@ -151,7 +151,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
   })
 
   it('on an OpenClaw without prepareAccountConfigInput the after-hook learns the handle for the identity line and points at doctor --fix for the config', async () => {
-    vi.mocked(validateApiKey).mockResolvedValueOnce({ ok: true, agent: liveAgent } as never)
+    vi.mocked(checkApiKey).mockResolvedValueOnce(keyAccepted)
     const { runtime, lines } = cliRuntime()
     const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY } } }
     await agentchatPlugin.setup!.afterAccountConfigWritten!({ previousCfg: {} as never, cfg: cfg as never, accountId: 'default', input: { token: KEY }, runtime })
@@ -160,7 +160,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
   })
 
   it('a key that fails the live check writes no files', async () => {
-    vi.mocked(validateApiKey).mockResolvedValueOnce({ ok: false, reason: 'unauthorized', message: 'bad key' } as never)
+    vi.mocked(checkApiKey).mockResolvedValueOnce({ ok: false, code: 'UNAUTHORIZED', message: 'bad key' })
     const { runtime, lines } = cliRuntime()
     await agentchatPlugin.setup!.afterAccountConfigWritten!({ previousCfg: {} as never, cfg: { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY } } } as never, accountId: 'default', input: { token: KEY }, runtime })
     expect(fs.existsSync(path.join(workspace, 'AGENTS.md'))).toBe(false)

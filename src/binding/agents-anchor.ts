@@ -20,7 +20,7 @@
  *
  * Lifecycle
  * ─────────
- * write   — `setupWizard.finalize` (after validateApiKey ok),
+ * write   — `setupWizard.finalize` (after the key check passed),
  *           `setup.afterAccountConfigWritten` (non-interactive path),
  *           `lifecycle.onAccountConfigChanged` (disabled → enabled),
  *           `openclaw doctor --fix` when the line for the configured handle

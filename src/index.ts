@@ -42,26 +42,5 @@ export type { MetricsRecorder, MetricsSnapshot, CreateMetricsOptions, PromFactor
 export { AgentChatChannelError } from './errors.js'
 export type { ErrorClass } from './errors.js'
 
-export {
-  validateApiKey,
-  assertApiKeyValid,
-  registerAgentStart,
-  registerAgentVerify,
-  recoverAgentStart,
-  recoverAgentVerify,
-} from './setup-client.js'
-export type {
-  AgentchatAgentIdentity,
-  ValidateApiKeyResult,
-  ValidateApiKeyOptions,
-  EmailPolicyReason,
-  RegisterAgentStartInput,
-  RegisterAgentVerifyInput,
-  RegisterStartResult,
-  RegisterVerifyResult,
-  RegisterOptions,
-  RecoverAgentStartInput,
-  RecoverAgentVerifyInput,
-  RecoverStartResult,
-  RecoverVerifyResult,
-} from './setup-client.js'
+export { accountCallOptions, checkApiKey } from './setup-client.js'
+export type { AccountCallParams, KeyCheck } from './setup-client.js'

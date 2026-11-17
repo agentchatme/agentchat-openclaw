@@ -1,53 +1,53 @@
 /**
  * AgentChat channel setup wizard.
  *
- * Implements the interactive onboarding flow that OpenClaw's `setup` driver
- * invokes for users who just ran `openclaw plugins install @agentchatme/openclaw`
- * and `openclaw channels add agentchat`.
+ * The interactive onboarding OpenClaw's `setup` driver runs after
+ * `openclaw plugins install @agentchatme/openclaw` and
+ * `openclaw channels add agentchat`. AgentChat issues its own identities, so
+ * a new user gets a key without leaving the CLI: register a new agent, paste
+ * an existing key, or recover a lost one.
  *
- * The core UX decision this wizard encodes: AgentChat is the first channel in
- * the OpenClaw ecosystem where the identity the channel authenticates against
- * lives inside the plugin's own issuer (not an external provider like Slack or
- * Telegram). That means we can — and should — let brand-new users provision
- * credentials without ever leaving the CLI. Hence the three-way branch at the
- * top: paste an existing key, register via email OTP in-wizard, or recover a
- * lost key via email OTP in-wizard.
+ * Register and recover run the SDK's sign-up helper
+ * (`integration.account.run`). Every answer of AgentChat's sign-up
+ * endpoints says what comes next (contract v1, "Sign-up flows"), and the
+ * helper follows it: it shows the server's sentence, asks again only for
+ * the input the server names (a taken handle re-asks the handle, an email
+ * at its limit the email), sits out the waits the server announces, and
+ * offers a new code when the code is gone. This file keeps no rule of its
+ * own (no handle shape, no attempt cap, no limit); it wires OpenClaw's
+ * prompter in as the helper's `ask` / `show` and saves the key.
  *
  * Flow:
- *   1. `status.resolveConfigured` — reports "configured / not configured" for
+ *   1. `status.resolveConfigured` — "configured / not configured" for
  *      `openclaw setup`'s pre-selection summary.
- *   2. `prepare` — runs BEFORE the credential step. Branches on user intent:
- *        - "I have a key"  → returns void; framework prompts for the key next.
- *        - "Register me"   → drives email-OTP registration via the REST client,
- *                            writes the minted key directly to cfg, and marks
- *                            a sentinel in credentialValues so the credential
- *                            step skips its redundant keep/replace prompt.
- *        - "Recover my key"→ drives handle + email OTP recovery via the REST
- *                            client (same persistence + sentinel as register).
- *                            The handle defaults to the one already in config
- *                            for this account, because the overwhelmingly
- *                            common case is "my configured key stopped
- *                            working" — not "recover some other agent".
- *   3. `credentials[0]` — the API-key credential. `shouldPrompt` honors the
- *      post-register/recover sentinel; otherwise the framework's default
- *      prompt runs.
- *   4. `finalize` — calls GET /v1/agents/me once more to confirm the key works,
- *      surfaces the authenticated handle, and places the integration: the key in
- *      OpenClaw's `.env`, the served identity line in AGENTS.md, the hosted MCP
- *      server in `mcp.servers.agentchat` (returned as a config patch for
- *      OpenClaw to persist). Never throws on transport errors (a fresh clone
- *      with a proxy should still save config and retry later).
+ *   2. `prepare` — before the credential step:
+ *        - "Register" / "Recover" → the helper's conversation. The key it
+ *          returns is saved with the handle the server returned, and a
+ *          sentinel in credentialValues skips the credential step's prompt.
+ *          Recovery pre-fills the handle already configured here, because
+ *          the common case is "the key I have configured stopped working".
+ *        - "I have a key" → returns; OpenClaw's credential step asks next.
+ *   3. `credentials[0]` — OpenClaw's API-key step (a pasted key, or the one
+ *      in AGENTCHAT_API_KEY). The key is checked with AgentChat before it is
+ *      saved (`applySet` / `applyUseEnv`): a key AgentChat turns away is
+ *      never saved, and a key it accepts is saved with its handle.
+ *   4. `finalize` — checks the key, reports the handle, and places the
+ *      integration: the key in OpenClaw's `.env`, the served identity line
+ *      in AGENTS.md, the hosted MCP server in `mcp.servers.agentchat`
+ *      (returned as a config patch for OpenClaw to persist). Never throws on
+ *      transport errors (a fresh clone behind a proxy still saves config and
+ *      the runtime retries later).
  *
- * Writes go through `applyAgentchatAccountPatch` — the same helper backing
+ * Writes go through `applyAgentchatAccountPatch` — the same helper behind
  * `setup.applyAccountConfig`, so the non-interactive `openclaw setup --token
- * ac_…` path and the interactive wizard path converge on the same config
- * shape and stay round-trippable.
+ * ac_…` path and the wizard converge on the same config shape.
  *
  * `disable` wires `setSetupChannelEnabled` so `openclaw channels remove
  * agentchat` produces `channels.agentchat.enabled: false` and keeps the
  * apiKey on disk (in case the operator just wants to pause, not rotate).
  */
 
+import { ConnectionError, integration } from 'agentchatme'
 import {
   WizardCancelledError,
   setSetupChannelEnabled,
@@ -74,18 +74,7 @@ import {
   isApiKeyPresent,
   readAgentchatConfigField,
 } from './channel-account.js'
-import {
-  recoverAgentStart,
-  recoverAgentVerify,
-  registerAgentStart,
-  registerAgentVerify,
-  validateApiKey,
-  type EmailPolicyReason,
-  type RecoverStartResult,
-  type RecoverVerifyResult,
-  type RegisterStartResult,
-  type RegisterVerifyResult,
-} from './setup-client.js'
+import { accountCallOptions, checkApiKey, type KeyCheck } from './setup-client.js'
 // Credential lookup helper — see SECURITY.md for why this lives in a
 // separate module and must not be inlined into the wizard.
 import { readApiKeyFromEnv } from './credentials/read-env.js'
@@ -93,6 +82,10 @@ import { placeIntegration, formatPlacement, applyIntegrationConfig, stripIntegra
 import { DEFAULT_API_BASE } from './integration/mcp.js'
 import { loadIdentityLine } from './integration/texts.js'
 import { createSdkClient } from './binding/sdk-client.js'
+
+type AccountKind = integration.AccountKind
+type AccountQuestion = integration.AccountQuestion
+type AccountAnswer = integration.AccountAnswer
 
 /**
  * Sentinel credential-values key used to signal "the register or recover
@@ -103,113 +96,22 @@ import { createSdkClient } from './binding/sdk-client.js'
  */
 const JUST_REGISTERED_SENTINEL = '_agentchatJustRegistered' as const
 
-// Canonical handle shape — the AgentChat handle rule (`^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$`)
-// HANDLE_REGEX plus the 3–30 length check. Server is authoritative; this is
-// a client-side fast-fail so users don't round-trip an obviously-bad handle.
-const HANDLE_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/
-const HANDLE_MIN_LENGTH = 3
-const HANDLE_MAX_LENGTH = 30
-const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-
-function isValidHandleShape(value: string): boolean {
-  return (
-    value.length >= HANDLE_MIN_LENGTH &&
-    value.length <= HANDLE_MAX_LENGTH &&
-    HANDLE_PATTERN.test(value)
-  )
+/**
+ * The field labels: the helper's (`DEFAULT_LABELS`), with the handle named
+ * for what it is. The rules for each field are the server's; its answer
+ * says what to change.
+ */
+const LABELS: integration.AccountLabels = {
+  ...integration.account.DEFAULT_LABELS,
+  handle: 'Handle (your @name on AgentChat)',
 }
-
-/** 6-digit numeric OTP; the server rejects any other shape with INVALID_CODE. */
-const OTP_PATTERN = /^\d{6}$/
 
 function hasConfiguredKey(cfg: OpenClawConfig | undefined, accountId: string): boolean {
   return isApiKeyPresent(readAgentchatConfigField(cfg, accountId, 'apiKey'))
 }
 
-/**
- * How many times we'll re-prompt around a retryable start-of-registration
- * error (handle-taken, invalid-handle, email-exhausted, …) before giving up
- * and steering the user to paste an existing key or cancel. A hard cap stops
- * a confused user looping forever; 5 is enough to pick a fresh handle or email
- * without being punishing.
- */
-const MAX_START_RETRIES = 5
-
-async function promptEmail(
-  prompter: WizardPrompter,
-  opts: {
-    /** Headline. Defaults to the register-flow wording. */
-    readonly message?: string
-  } = {},
-): Promise<string> {
-  return (
-    await prompter.text({
-      message: opts.message ?? 'Email — receives a 6-digit verification code',
-      placeholder: 'you@example.com',
-      validate: (value) => {
-        const trimmed = value.trim()
-        if (!trimmed) return 'Email is required'
-        if (!EMAIL_PATTERN.test(trimmed)) return 'Not a valid email format'
-        return undefined
-      },
-    })
-  ).trim()
-}
-
-async function promptHandle(
-  prompter: WizardPrompter,
-  opts: {
-    /** Headline. Defaults to the register-flow wording. */
-    readonly message?: string
-    /** Pre-filled value the user can accept with Enter (recovery: the configured handle). */
-    readonly initialValue?: string
-  } = {},
-): Promise<string> {
-  // The rules live in `placeholder` (the gray hint text inside the
-  // input box, which clears on first keystroke) so the headline stays
-  // a clean call to action. Per-rule validation errors below tell the
-  // user exactly which rule failed instead of dumping the full rule
-  // list every time.
-  return (
-    await prompter.text({
-      message: opts.message ?? 'Choose a handle (your @name on AgentChat)',
-      placeholder: '3–30 chars, lowercase a-z, 0-9, hyphens, starts with a letter',
-      ...(opts.initialValue ? { initialValue: opts.initialValue } : {}),
-      validate: (value) => {
-        const trimmed = value.trim()
-        if (!trimmed) return 'Handle is required'
-        if (trimmed.length < HANDLE_MIN_LENGTH || trimmed.length > HANDLE_MAX_LENGTH) {
-          return `Length must be ${HANDLE_MIN_LENGTH}–${HANDLE_MAX_LENGTH} chars (you entered ${trimmed.length})`
-        }
-        if (!/^[a-z]/.test(trimmed)) return 'Must start with a lowercase letter'
-        if (/[^a-z0-9-]/.test(trimmed)) {
-          return 'Only lowercase letters, digits, and hyphens — no underscores, dots, or symbols'
-        }
-        if (trimmed.includes('--')) return 'No consecutive hyphens'
-        if (trimmed.endsWith('-')) return 'Cannot end with a hyphen'
-        return undefined
-      },
-    })
-  ).trim()
-}
-
-async function promptDisplayName(prompter: WizardPrompter): Promise<string> {
-  // The visible prompt deliberately does NOT say "optional" anymore —
-  // empty input still passes validation (no server-side blocker; an
-  // agent without display_name is a valid account), but framing it as
-  // "optional" turned ~half of recent registrations into NULL rows
-  // that render as @handle-only in the dashboard. Dropping the word
-  // soft-pressures users to fill it without breaking anyone who really
-  // doesn't want one. The placeholder example carries the load that
-  // "optional" used to carry — it tells the user what shape this field
-  // is for, without telling them they can skip it.
-  return (
-    await prompter.text({
-      message: 'Display name (shown next to your @handle)',
-      placeholder: 'e.g. Anton, Builder Bot, Sasha',
-      validate: () => undefined,
-    })
-  ).trim()
+function nonEmpty(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
 }
 
 /**
@@ -267,561 +169,270 @@ async function runChangeApiBaseFlow(params: {
   return { cfg: patched }
 }
 
-/**
- * Return values from `runRegisterFlow`:
- *   - success object        → registration minted a key; credential step
- *                             should use it and skip its own prompt.
- *   - `'abort'`             → registration failed; caller shows the fallback
- *                             note and the framework prompts for a pasted key.
- *   - `'user-chose-paste'`  → user explicitly elected to paste an existing key
- *                             (from an in-flow branch point like "this email
- *                             is at its agent limit"). Caller skips the
- *                             fallback note because the user has already
- *                             acknowledged what's next.
- *   - `'user-chose-recover'`→ same branch point, but the user wants to
- *                             recover a lost key for one of the agents that
- *                             email already backs. Caller hands off to
- *                             `runRecoverFlow`.
- */
-type RegisterFlowOutcome =
-  | { cfg: OpenClawConfig; credentialValues: ChannelSetupWizardCredentialValues }
-  | 'abort'
-  | 'user-chose-paste'
-  | 'user-chose-recover'
+// ─── Register and recover: the SDK's helper, OpenClaw's prompter ─────────
+
+/** What `prepare` returns when register or recover saved a key. */
+type Prepared = { cfg: OpenClawConfig; credentialValues: ChannelSetupWizardCredentialValues }
 
 /**
- * Operator copy for a per-email policy rejection. Quotes the limit the
- * server returned — the numbers are server-tunable and must never be
- * assumed here. When the server sent no limit (a server that predates the
- * multi-agent policy emits the retired `EMAIL_TAKEN` without one), its own
- * message is the most honest thing we have.
+ * An email or handle, typed. An empty answer is not sent (OpenClaw's own
+ * "Required"); everything else goes to the server, whose answer says what
+ * to change. Leaving the question is the prompter's cancel.
  */
-function describeEmailPolicyRejection(
-  email: string,
-  result: { readonly reason: EmailPolicyReason; readonly limit?: number; readonly message: string },
-): string {
-  if (result.limit === undefined) return result.message
-  return result.reason === 'email-limit-reached'
-    ? `${email} already backs ${result.limit} active agents — the per-email limit.`
-    : `${email} has used all ${result.limit} of its lifetime account registrations.`
-}
-
-/**
- * What the user can do once an email is at a policy limit. Recovery is
- * offered because the most likely reason someone re-registers on a full
- * email is that one of the existing agents lost its key; a `+` alias is
- * called out because it is the sanctioned way to get a fresh budget.
- */
-type EmailPolicyChoice = 'retry' | 'recover' | 'paste' | 'cancel'
-
-async function promptEmailPolicyChoice(
+async function askText(
   prompter: WizardPrompter,
-  email: string,
-  result: { readonly reason: EmailPolicyReason; readonly limit?: number; readonly message: string },
-): Promise<EmailPolicyChoice> {
-  return prompter.select<EmailPolicyChoice>({
-    message: `${describeEmailPolicyRejection(email, result)} What next?`,
-    options: [
-      {
-        value: 'retry',
-        label: 'Use a different email address',
-        hint: 'a +alias like you+agent2@example.com counts as a separate email',
-      },
-      {
-        value: 'recover',
-        label: 'Recover the API key of an agent this email already backs',
-        hint: 'needs that agent’s handle — a code goes to this email',
-      },
-      { value: 'paste', label: 'Paste a key from an existing agent' },
-      { value: 'cancel', label: 'Cancel registration' },
-    ],
-    initialValue: 'retry',
-  })
+  message: string,
+  opts: { readonly placeholder?: string } = {},
+): Promise<string> {
+  return (
+    await prompter.text({
+      message,
+      ...opts,
+      validate: (value) => (value.trim() ? undefined : 'Required'),
+    })
+  ).trim()
 }
 
-async function runRegisterFlow(params: {
-  cfg: OpenClawConfig
-  accountId: string
-  prompter: WizardPrompter
-  apiBase: string | undefined
-}): Promise<RegisterFlowOutcome> {
-  const { cfg, accountId, prompter, apiBase } = params
+const EMAIL_PLACEHOLDER = 'you@example.com'
 
+/**
+ * The code question. The person types the code, or leaves it blank to
+ * choose: a new code, back to the code, or cancel.
+ */
+async function askCode(prompter: WizardPrompter, label: string): Promise<AccountAnswer> {
+  for (;;) {
+    const code = (
+      await prompter.text({ message: label, placeholder: 'leave blank for a new code or to cancel' })
+    ).trim()
+    if (code) return { answer: 'value', value: code }
+    const choice = await prompter.select<'new_code' | 'enter' | 'cancel'>({
+      message: 'What would you like to do?',
+      options: [
+        { value: 'new_code', label: 'Send a new code' },
+        { value: 'enter', label: 'Enter the code' },
+        { value: 'cancel', label: 'Cancel', hint: 'paste an existing key instead, or leave setup' },
+      ],
+      initialValue: 'new_code',
+    })
+    if (choice === 'new_code') return { answer: 'new_code' }
+    if (choice === 'cancel') return { answer: 'cancel' }
+  }
+}
+
+/** OpenClaw's prompter as the helper's `ask`: one question, one prompt. */
+function askThrough(prompter: WizardPrompter): (question: AccountQuestion) => Promise<AccountAnswer> {
+  return async (question) => {
+    if (question.field === 'new_code') {
+      const yes = await prompter.confirm({ message: 'Send a new code?', initialValue: true })
+      return yes ? { answer: 'new_code' } : { answer: 'cancel' }
+    }
+    if (question.field === 'code') return askCode(prompter, question.label ?? LABELS.code)
+    const label = question.label ?? LABELS[question.field]
+    // HANDLE_REQUIRED: the server listed the handles on this email.
+    const handles = (question.handles ?? []).filter((handle) => handle.length > 0)
+    if (handles.length > 0) {
+      const picked = await prompter.select<string>({
+        message: label,
+        options: [
+          ...handles.map((handle) => ({ value: handle, label: `@${handle}` })),
+          { value: '', label: 'Another handle' },
+        ],
+      })
+      if (picked) return { answer: 'value', value: picked }
+    }
+    const typed = await askText(prompter, label, question.field === 'email' ? { placeholder: EMAIL_PLACEHOLDER } : {})
+    return { answer: 'value', value: typed }
+  }
+}
+
+/** Every call to AgentChat runs under a spinner; `stop()` without a message clears it. */
+function fetchWithProgress(prompter: WizardPrompter): typeof fetch {
+  return (async (input: Parameters<typeof fetch>[0], init?: RequestInit) => {
+    const progress = prompter.progress('Contacting AgentChat…')
+    try {
+      return await globalThis.fetch(input, init)
+    } finally {
+      progress.stop()
+    }
+  }) as typeof fetch
+}
+
+/** A wait the server announced, sat out under a countdown. */
+function sleepWithProgress(prompter: WizardPrompter): (ms: number) => Promise<void> {
+  const label = (seconds: number) => `Waiting ${seconds} s…`
+  return (ms) =>
+    new Promise<void>((resolve) => {
+      let left = Math.ceil(ms / 1000)
+      const progress = prompter.progress(label(left))
+      const tick = setInterval(() => {
+        left -= 1
+        if (left > 0) progress.update(label(left))
+      }, 1000)
+      setTimeout(() => {
+        clearInterval(tick)
+        progress.stop()
+        resolve()
+      }, ms)
+    })
+}
+
+/** What register asks before the first call: the email, the handle, the display name. */
+async function registerInput(prompter: WizardPrompter): Promise<Partial<integration.RegisterInput>> {
   await prompter.note(
     [
-      'Registration mints a new AgentChat agent identity tied to your email.',
-      'One email can back several agents (the server enforces the limit);',
-      'each one registers and verifies separately.',
-      'You will receive a 6-digit code to verify — check your inbox (and spam).',
+      'Registration creates a new AgentChat agent tied to your email address.',
+      'Your handle is the agent’s @name on AgentChat. AgentChat emails you a',
+      'code to confirm the address — check your inbox (and spam).',
     ].join('\n'),
     'AgentChat: register a new agent',
   )
-
-  // Collect all three fields up front. If the server rejects on one specific
-  // field (handle / email), we loop back and re-prompt ONLY that field below
-  // — keeping the already-correct state so the user isn't punished for a
-  // partial collision.
-  let email = await promptEmail(prompter)
-  let handle = await promptHandle(prompter)
-  const displayName = await promptDisplayName(prompter)
-
-  // ─── Start: request OTP, with field-specific retry ──────────────────
-  // Retry semantics:
-  //   invalid-handle / handle-taken → re-prompt handle, keep email+displayName
-  //   email-limit-reached /
-  //   email-exhausted               → branch: pick new email, recover a key
-  //                                   for an agent on this email, paste an
-  //                                   existing key, or cancel
-  //   rate-limited / otp-failed /
-  //   network / server / validation → abort with a clear message
-  let startResult: RegisterStartResult | undefined
-  let startedOk = false
-  for (let attempt = 1; attempt <= MAX_START_RETRIES; attempt += 1) {
-    const startSpinner = prompter.progress(
-      attempt === 1 ? 'Sending verification code…' : 'Retrying…',
-    )
-    try {
-      startResult = await registerAgentStart(
-        {
-          email,
-          handle,
-          ...(displayName ? { displayName } : {}),
-        },
-        { apiBase },
-      )
-    } catch (err) {
-      startSpinner.stop('Could not reach AgentChat')
-      await prompter.note(
-        `${err instanceof Error ? err.message : String(err)}. Try again when the network is available, or paste an existing key instead.`,
-        'Registration failed',
-      )
-      return 'abort'
-    }
-
-    if (startResult.ok) {
-      startSpinner.stop(`Verification code sent to ${email}`)
-      startedOk = true
-      break
-    }
-
-    startSpinner.stop('Registration rejected')
-
-    switch (startResult.reason) {
-      case 'invalid-handle':
-      case 'handle-taken': {
-        const detail =
-          startResult.reason === 'handle-taken'
-            ? `Handle @${handle} is already taken.`
-            : 'That handle is not acceptable (3–30 chars — lowercase letters/digits/hyphens; must start with a letter).'
-        await prompter.note(`${detail} Pick a different handle and we'll try again.`, 'Pick a different handle')
-        handle = await promptHandle(prompter)
-        continue
-      }
-      case 'email-limit-reached':
-      case 'email-exhausted': {
-        const choice = await promptEmailPolicyChoice(prompter, email, {
-          reason: startResult.reason,
-          limit: startResult.limit,
-          message: startResult.message,
-        })
-        if (choice === 'paste') return 'user-chose-paste'
-        if (choice === 'recover') return 'user-chose-recover'
-        if (choice === 'cancel') return 'abort'
-        email = await promptEmail(prompter)
-        continue
-      }
-      case 'rate-limited': {
-        const wait = startResult.retryAfterSeconds
-          ? ` Try again in ${startResult.retryAfterSeconds}s.`
-          : ''
-        await prompter.note(`Too many registration attempts.${wait}`, 'Rate limited')
-        return 'abort'
-      }
-      case 'otp-failed': {
-        await prompter.note(
-          'The verification-code email could not be sent. Try again in a minute, or paste an existing key instead.',
-          'OTP delivery failed',
-        )
-        return 'abort'
-      }
-      case 'network-error':
-      case 'server-error':
-      case 'validation':
-      default: {
-        await prompter.note(describeRegisterStartError(startResult), 'Could not start registration')
-        return 'abort'
-      }
-    }
-  }
-
-  if (!startedOk || !startResult || !startResult.ok) {
-    await prompter.note(
-      'Too many attempts. Restart the wizard to try again, or paste an existing key at the next prompt.',
-      'Registration failed',
-    )
-    return 'abort'
-  }
-
-  // ─── Verify: collect OTP, retry on mistyped codes ───────────────────
-  const maxCodeAttempts = 3
-  let verifyResult: RegisterVerifyResult | null = null
-  for (let attempt = 1; attempt <= maxCodeAttempts; attempt += 1) {
-    const code = (
-      await prompter.text({
-        message:
-          attempt === 1
-            ? 'Enter the 6-digit verification code from your email'
-            : `Verification code (attempt ${attempt}/${maxCodeAttempts})`,
-        placeholder: '123456',
-        validate: (value) => {
-          const trimmed = value.trim()
-          if (!trimmed) return 'Code is required'
-          if (!OTP_PATTERN.test(trimmed)) return 'Code is 6 digits'
-          return undefined
-        },
-      })
-    ).trim()
-
-    const verifySpinner = prompter.progress('Verifying code…')
-    try {
-      verifyResult = await registerAgentVerify({ pendingId: startResult.pendingId, code }, { apiBase })
-    } catch (err) {
-      verifySpinner.stop('Could not reach AgentChat')
-      await prompter.note(
-        `${err instanceof Error ? err.message : String(err)}. Try again, or paste an existing key instead.`,
-        'Verification failed',
-      )
-      return 'abort'
-    }
-
-    if (verifyResult.ok) {
-      verifySpinner.stop(`Registered as @${verifyResult.agent.handle}`)
-      break
-    }
-
-    verifySpinner.stop('Verification failed')
-
-    // Retryable: bad code. Other failure modes are terminal for this flow.
-    if (verifyResult.reason === 'invalid-code' && attempt < maxCodeAttempts) {
-      await prompter.note(
-        'That code did not match. Check your email and try again.',
-        'Invalid verification code',
-      )
-      continue
-    }
-
-    await prompter.note(describeRegisterVerifyError(verifyResult), 'Registration failed')
-    return 'abort'
-  }
-
-  if (!verifyResult || !verifyResult.ok) {
-    await prompter.note(
-      'Too many incorrect codes. Restart the wizard to receive a new code.',
-      'Registration failed',
-    )
-    return 'abort'
-  }
-
-  // ─── Persist: write minted key to cfg, advertise handle in config ───
-  const patch: Record<string, unknown> = { apiKey: verifyResult.apiKey }
-  if (isValidHandleShape(verifyResult.agent.handle)) {
-    patch.agentHandle = verifyResult.agent.handle
-  }
-  const nextCfg = applyAgentchatAccountPatch(cfg, accountId, patch)
-
-  await prompter.note(
-    [
-      `Handle:       @${verifyResult.agent.handle}`,
-      `Email:        ${verifyResult.agent.email}`,
-      `API key:      ${redactKey(verifyResult.apiKey)} (saved to your OpenClaw config)`,
-    ].join('\n'),
-    'AgentChat account created',
-  )
-
-  return {
-    cfg: nextCfg,
-    credentialValues: {
-      token: verifyResult.apiKey,
-      [JUST_REGISTERED_SENTINEL]: '1',
-    },
-  }
+  const email = await askText(prompter, LABELS.email, { placeholder: EMAIL_PLACEHOLDER })
+  const handle = await askText(prompter, LABELS.handle)
+  // The visible prompt deliberately does not say "optional": an agent
+  // without a display name is a valid account, but framing it as optional
+  // left about half of registrations rendering as @handle only. The
+  // placeholder says what the field is for.
+  const displayName = (
+    await prompter.text({
+      message: 'Display name (shown next to your @handle)',
+      placeholder: 'e.g. Anton, Builder Bot, Sasha',
+    })
+  ).trim()
+  return { email, handle, ...(displayName ? { display_name: displayName } : {}) }
 }
-
-function describeRegisterStartError(result: Extract<RegisterStartResult, { ok: false }>): string {
-  switch (result.reason) {
-    case 'invalid-handle':
-      return 'That handle is not acceptable. Try a different one (3–30 chars — lowercase letters/digits/hyphens; must start with a letter).'
-    case 'handle-taken':
-      return 'That handle is already taken. Try a different one.'
-    case 'email-limit-reached':
-      return `${result.limit === undefined ? result.message : `This email already backs ${result.limit} active agents — the per-email limit.`} Use a different email (a +alias works), recover a key for one of its agents, or paste an existing key.`
-    case 'email-exhausted':
-      return `${result.limit === undefined ? result.message : `This email has used all ${result.limit} of its lifetime account registrations.`} Use a different email (a +alias works), or paste a key from an existing agent.`
-    case 'rate-limited': {
-      const wait = result.retryAfterSeconds ? ` Try again in ${result.retryAfterSeconds}s.` : ''
-      return `Rate limited.${wait}`
-    }
-    case 'otp-failed':
-      return 'The verification-code email could not be sent. Try again in a minute.'
-    case 'network-error':
-    case 'server-error':
-    case 'validation':
-    default:
-      return result.message
-  }
-}
-
-function describeRegisterVerifyError(result: Extract<RegisterVerifyResult, { ok: false }>): string {
-  switch (result.reason) {
-    case 'expired':
-      return 'This code expired. Restart the wizard to receive a new one.'
-    case 'invalid-code':
-      return 'Too many incorrect codes. Restart the wizard to receive a new one.'
-    case 'handle-taken':
-      return 'Your chosen handle was claimed by another registration in the meantime. Restart with a different handle.'
-    case 'email-limit-reached':
-      // Another registration on this email landed between our start and
-      // verify and took the last live slot.
-      return `${result.limit === undefined ? result.message : `This email reached its limit of ${result.limit} active agents while you were verifying.`} Restart with a different email (a +alias works), or paste an existing key.`
-    case 'email-exhausted':
-      return `${result.limit === undefined ? result.message : `This email used all ${result.limit} of its lifetime account registrations while you were verifying.`} Restart with a different email (a +alias works), or paste an existing key.`
-    case 'rate-limited': {
-      const wait = result.retryAfterSeconds ? ` Try again in ${result.retryAfterSeconds}s.` : ''
-      return `Rate limited.${wait}`
-    }
-    case 'network-error':
-    case 'server-error':
-    case 'unexpected-shape':
-    case 'validation':
-    default:
-      return result.message
-  }
-}
-
-// ─── Recovery (handle + email + OTP) ───────────────────────────────────
 
 /**
- * Return values from `runRecoverFlow`:
- *   - success object → recovery minted a key; credential step should use it
- *                      and skip its own prompt.
- *   - `'abort'`      → recovery did not complete; the user was told why and
- *                      what to do next. Caller falls through to the
- *                      framework's paste-a-key prompt.
+ * What recover knows before the first call. The email is asked by the
+ * helper. The handle configured here is offered (Enter keeps it; blank
+ * sends none); without one, none is sent, and the server asks for it when
+ * the email backs more than one agent.
  */
-type RecoverFlowOutcome =
-  | { cfg: OpenClawConfig; credentialValues: ChannelSetupWizardCredentialValues }
-  | 'abort'
-
-/**
- * Re-issue a lost API key. Always sends handle + email: one email can back
- * several agents, and the server can only pick the right one when told.
- *
- * Handle default: the `agentHandle` already in config for this account,
- * pre-filled so Enter accepts it. That is the case this flow exists for —
- * "the key I have configured stopped working" — while still letting the
- * user type a different handle (an agent set up elsewhere, or a sibling on
- * the same email). The email is always asked: the plugin never stores it
- * and `/agents/me` only ever returns it masked.
- *
- * Attempt budget is deliberately tight. `POST /agents/recover` is
- * rate-limited per IP far more strictly than registration (it sends OTPs
- * to arbitrary addresses), so there is no start-retry loop here — a
- * rejected start ends the flow with a clear note.
- */
-async function runRecoverFlow(params: {
-  cfg: OpenClawConfig
-  accountId: string
-  prompter: WizardPrompter
-  apiBase: string | undefined
-}): Promise<RecoverFlowOutcome> {
-  const { cfg, accountId, prompter, apiBase } = params
-
-  const storedHandle = readAgentchatConfigField(cfg, accountId, 'agentHandle')
-  const defaultHandle = storedHandle && isValidHandleShape(storedHandle) ? storedHandle : undefined
-
+async function recoverInput(
+  prompter: WizardPrompter,
+  configuredHandle: string | undefined,
+): Promise<Partial<integration.RecoverInput>> {
   await prompter.note(
     [
-      'Recovery re-issues the API key for ONE agent — the handle you name below.',
-      'You need that handle and the email it registered with; a 6-digit code',
-      'goes to that email. The old key stops working the moment the new one',
-      'is minted.',
-      ...(defaultHandle
-        ? ['', `@${defaultHandle} is configured here — press Enter at the handle prompt to recover it.`]
+      'Recovery issues a new API key for an agent you registered. AgentChat',
+      'emails a code to the address the agent registered with; the old key',
+      'stops working once the new one is issued.',
+      ...(configuredHandle
+        ? ['', `@${configuredHandle} is configured here — press Enter at the handle prompt to recover it.`]
         : []),
     ].join('\n'),
     'AgentChat: recover a lost API key',
   )
+  if (!configuredHandle) return {}
+  const handle = (await prompter.text({ message: LABELS.handle, initialValue: configuredHandle })).trim()
+  return handle ? { handle } : {}
+}
 
-  const handle = await promptHandle(prompter, {
-    message: 'Handle of the agent to recover (its @name on AgentChat)',
-    ...(defaultHandle ? { initialValue: defaultHandle } : {}),
-  })
-  const email = await promptEmail(prompter, {
-    message: `Email @${handle} registered with — receives a 6-digit recovery code`,
-  })
+/** The flow ended without a key: say so; OpenClaw's credential step asks for a key next. */
+async function notCompleted(prompter: WizardPrompter, kind: AccountKind): Promise<undefined> {
+  await prompter.note(
+    `${kind === 'register' ? 'Registration' : 'Recovery'} was not completed. You can still paste an existing API key at the next prompt, or cancel the wizard.`,
+    'Falling back to credential entry',
+  )
+  return undefined
+}
 
-  // ─── Start: request OTP ────────────────────────────────────────────
-  const startSpinner = prompter.progress('Requesting recovery code…')
-  let startResult: RecoverStartResult
+/**
+ * Register a new agent, or recover a lost key, with the SDK's helper. The
+ * server's sentences are shown as they come (`show`); the helper asks only
+ * what the server names. A key is saved only from the helper's `done`, with
+ * the handle the server returned.
+ */
+async function runAccountFlow(params: {
+  kind: AccountKind
+  cfg: OpenClawConfig
+  accountId: string
+  prompter: WizardPrompter
+}): Promise<Prepared | undefined> {
+  const { kind, cfg, accountId, prompter } = params
+  const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase')
+  const input =
+    kind === 'register'
+      ? await registerInput(prompter)
+      : await recoverInput(prompter, nonEmpty(readAgentchatConfigField(cfg, accountId, 'agentHandle')))
+
+  let result: integration.AccountRunResult
   try {
-    startResult = await recoverAgentStart({ email, handle }, { apiBase })
+    result = await integration.account.run({
+      kind,
+      input,
+      labels: LABELS,
+      ask: askThrough(prompter),
+      show: (message) => prompter.note(message, 'AgentChat'),
+      sleep: sleepWithProgress(prompter),
+      ...accountCallOptions({ apiBase, fetch: fetchWithProgress(prompter) }),
+    })
   } catch (err) {
-    startSpinner.stop('Could not reach AgentChat')
+    if (err instanceof WizardCancelledError) throw err
+    const unreached = err instanceof ConnectionError || (err instanceof Error && err.name === 'AbortError')
     await prompter.note(
-      `${err instanceof Error ? err.message : String(err)}. Try again when the network is available, or paste an existing key instead.`,
-      'Recovery failed',
+      err instanceof Error ? err.message : String(err),
+      unreached ? 'Could not reach AgentChat' : `${kind === 'register' ? 'Registration' : 'Recovery'} failed`,
     )
-    return 'abort'
+    return notCompleted(prompter, kind)
   }
+  if (result.outcome !== 'done') return notCompleted(prompter, kind)
 
-  if (!startResult.ok) {
-    startSpinner.stop('Recovery rejected')
-    await prompter.note(describeRecoverStartError(startResult), 'Could not start recovery')
-    return 'abort'
-  }
-  // The server's acknowledgement is intentionally the same whether or not
-  // the email + handle matched an agent — echo it rather than promising a
-  // code that may not be coming.
-  startSpinner.stop(startResult.message)
-
-  // ─── Verify: collect OTP, retry on mistyped codes ───────────────────
-  const maxCodeAttempts = 3
-  let verifyResult: RecoverVerifyResult | null = null
-  for (let attempt = 1; attempt <= maxCodeAttempts; attempt += 1) {
-    const code = (
-      await prompter.text({
-        message:
-          attempt === 1
-            ? `Enter the 6-digit recovery code (check ${email}, including spam)`
-            : `Recovery code (attempt ${attempt}/${maxCodeAttempts})`,
-        placeholder: '123456',
-        validate: (value) => {
-          const trimmed = value.trim()
-          if (!trimmed) return 'Code is required'
-          if (!OTP_PATTERN.test(trimmed)) return 'Code is 6 digits'
-          return undefined
-        },
-      })
-    ).trim()
-
-    const verifySpinner = prompter.progress('Verifying code…')
-    try {
-      verifyResult = await recoverAgentVerify({ pendingId: startResult.pendingId, code }, { apiBase })
-    } catch (err) {
-      verifySpinner.stop('Could not reach AgentChat')
-      await prompter.note(
-        `${err instanceof Error ? err.message : String(err)}. Try again, or paste an existing key instead.`,
-        'Recovery failed',
-      )
-      return 'abort'
-    }
-
-    if (verifyResult.ok) {
-      verifySpinner.stop(`Recovered @${verifyResult.handle}`)
-      break
-    }
-
-    verifySpinner.stop('Verification failed')
-
-    // Retryable: bad code. Other failure modes are terminal for this flow.
-    // Note a decoy pending (email + handle matched nothing) also lands
-    // here as invalid-code — by design the server does not distinguish.
-    if (verifyResult.reason === 'invalid-code' && attempt < maxCodeAttempts) {
-      await prompter.note(
-        'That code did not match. Check your email and try again — if no code arrived, the handle and email may not belong to the same agent.',
-        'Invalid recovery code',
-      )
-      continue
-    }
-
-    await prompter.note(describeRecoverVerifyError(verifyResult), 'Recovery failed')
-    return 'abort'
-  }
-
-  if (!verifyResult || !verifyResult.ok) {
-    await prompter.note(
-      'Too many incorrect codes. Restart the wizard to request a new one — and double-check the handle and email belong to the same agent.',
-      'Recovery failed',
-    )
-    return 'abort'
-  }
-
-  // ─── Persist: the new key now authenticates as the recovered handle ──
-  // `agentHandle` is overwritten with the server's answer, not what the
-  // user typed: the key is the identity, and the config must describe the
-  // key it holds.
-  const patch: Record<string, unknown> = { apiKey: verifyResult.apiKey }
-  if (isValidHandleShape(verifyResult.handle)) {
-    patch.agentHandle = verifyResult.handle
-  }
-  const nextCfg = applyAgentchatAccountPatch(cfg, accountId, patch)
-
+  // The key is the identity: the config describes the handle the server
+  // returned, never the one typed.
+  const nextCfg = applyAgentchatAccountPatch(cfg, accountId, { apiKey: result.apiKey, agentHandle: result.handle })
   await prompter.note(
     [
-      `Handle:       @${verifyResult.handle}`,
-      `API key:      ${redactKey(verifyResult.apiKey)} (saved to your OpenClaw config)`,
-      '',
-      'The previous key for this agent has been revoked.',
+      `Handle:   @${result.handle}`,
+      `API key:  ${redactKey(result.apiKey)} (saved to your OpenClaw config)`,
     ].join('\n'),
-    'AgentChat API key recovered',
+    kind === 'register' ? 'AgentChat account created' : 'AgentChat API key recovered',
   )
-
   return {
     cfg: nextCfg,
     credentialValues: {
-      token: verifyResult.apiKey,
+      token: result.apiKey,
       [JUST_REGISTERED_SENTINEL]: '1',
     },
-  }
-}
-
-function describeRecoverStartError(result: Extract<RecoverStartResult, { ok: false }>): string {
-  switch (result.reason) {
-    case 'rate-limited': {
-      const wait = result.retryAfterSeconds ? ` Try again in ${result.retryAfterSeconds}s.` : ''
-      return `Too many recovery attempts from this network.${wait}`
-    }
-    case 'validation':
-      return `AgentChat rejected the request: ${result.message}`
-    case 'network-error':
-    case 'server-error':
-    case 'unexpected-shape':
-    default:
-      return result.message
-  }
-}
-
-function describeRecoverVerifyError(result: Extract<RecoverVerifyResult, { ok: false }>): string {
-  switch (result.reason) {
-    case 'expired':
-      return 'This recovery code expired. Restart the wizard to request a new one.'
-    case 'invalid-code':
-      return 'Too many incorrect codes. Restart the wizard to request a new one.'
-    case 'handle-required': {
-      // Defensive: this plugin always sends a handle, so a compliant server
-      // never answers HANDLE_REQUIRED to it. If one does, the server has
-      // just confirmed inbox control and listed the live handles — show
-      // them so the re-run is a straight pick instead of a guess.
-      const handles = result.handles ?? []
-      const list = handles.length > 0 ? `\n\nAgents on this email:\n${handles.map((h) => `  @${h}`).join('\n')}` : ''
-      return `This email backs more than one agent. Run recovery again and enter the handle you want to recover.${list}`
-    }
-    case 'rate-limited': {
-      const wait = result.retryAfterSeconds ? ` Try again in ${result.retryAfterSeconds}s.` : ''
-      return `Rate limited.${wait}`
-    }
-    case 'network-error':
-    case 'server-error':
-    case 'unexpected-shape':
-    case 'validation':
-    default:
-      return result.message
   }
 }
 
 function redactKey(apiKey: string): string {
   if (apiKey.length < 12) return '••••'
   return `${apiKey.slice(0, 8)}…${apiKey.slice(-4)}`
+}
+
+// ─── A key the person has: checked before it is saved ──────────────────
+
+/**
+ * Save a key the person entered (pasted, or the one in AGENTCHAT_API_KEY)
+ * only if AgentChat does not turn it away. Accepted: saved with the handle
+ * it belongs to, and the hosted tools entry. Turned away: the config stays
+ * as it was (`finalize` shows the server's answer). No answer: nothing is
+ * known about the key, so it is saved for the runtime to try, without a
+ * handle unless it is the key already configured.
+ *
+ * `value` is what OpenClaw's credential step produced: the key itself, or
+ * a secret reference, which this config does not hold (left unchanged;
+ * `finalize` still places the resolved key).
+ */
+async function saveEnteredKey(cfg: OpenClawConfig, accountId: string, value: unknown, key: string): Promise<OpenClawConfig> {
+  if (typeof value !== 'string' || !nonEmpty(key)) return cfg
+  const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase')
+  let check: KeyCheck | null
+  try {
+    check = await checkApiKey(key, { apiBase })
+  } catch {
+    check = null
+  }
+  if (check !== null && !check.ok) return cfg
+  const handle = check?.handle
+  const sameKey = readAgentchatConfigField(cfg, accountId, 'apiKey') === value
+  const withKey = applyAgentchatAccountPatch(cfg, accountId, {
+    apiKey: value,
+    // A new key whose handle is unknown must not keep the old key's handle.
+    ...(handle ? { agentHandle: handle } : sameKey ? {} : { agentHandle: undefined }),
+  })
+  return applyIntegrationConfig(withKey, { accountId, handle, apiKey: key, apiBase: apiBase ?? DEFAULT_API_BASE }).cfg
 }
 
 export const agentchatSetupWizard: ChannelSetupWizard = {
@@ -871,9 +482,9 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
       'AgentChat is a messaging platform for AI agents — direct messages,',
       'groups, presence, attachments. Registration is free.',
       '',
-      'This wizard will mint a new account via email OTP, accept an existing',
-      'API key, or recover a lost key (handle + email OTP) — your choice in',
-      'the next prompt.',
+      'This wizard registers a new agent by email code, accepts an existing',
+      'API key, or recovers a lost key by email code — your choice in the',
+      'next prompt.',
     ],
   },
 
@@ -921,7 +532,7 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
       options: [
         {
           value: 'register',
-          label: 'Register a new agent (email OTP)',
+          label: 'Register a new agent (email code)',
           hint: 'no account yet — the wizard creates one',
         },
         {
@@ -931,85 +542,15 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
         },
         {
           value: 'recover',
-          label: 'Recover a lost API key (handle + email OTP)',
+          label: 'Recover a lost API key (email code)',
           hint: 'an agent exists but its key is gone — re-issue it',
         },
       ],
       initialValue: 'register',
     })
 
-    if (choice === 'paste') {
-      return
-    }
-
-    const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase')
-
-    // Recovery tail, shared by the menu entry and the hand-off from the
-    // register flow: a minted key is returned as-is; an abort tells the
-    // user they can still paste a key at the next prompt. Unexpected
-    // throws are reported under their own title so a failure inside
-    // recovery is never misattributed to registration.
-    const recover = async () => {
-      try {
-        const result = await runRecoverFlow({ cfg, accountId, prompter, apiBase })
-        if (result === 'abort') {
-          await prompter.note(
-            'Recovery was not completed. You can still paste an existing API key at the next prompt, or cancel the wizard.',
-            'Falling back to credential entry',
-          )
-          return
-        }
-        return result
-      } catch (err) {
-        if (err instanceof WizardCancelledError) throw err
-        await prompter.note(
-          `${err instanceof Error ? err.message : String(err)}`,
-          'Recovery flow failed',
-        )
-        return
-      }
-    }
-
-    if (choice === 'recover') {
-      return await recover()
-    }
-
-    let registerOutcome: RegisterFlowOutcome
-    try {
-      registerOutcome = await runRegisterFlow({ cfg, accountId, prompter, apiBase })
-    } catch (err) {
-      if (err instanceof WizardCancelledError) throw err
-      await prompter.note(
-        `${err instanceof Error ? err.message : String(err)}`,
-        'Registration flow failed',
-      )
-      return
-    }
-
-    if (registerOutcome === 'abort') {
-      // User can still paste an existing key at the credential step.
-      await prompter.note(
-        'Registration was not completed. You can still paste an existing API key at the next prompt, or cancel the wizard.',
-        'Falling back to credential entry',
-      )
-      return
-    }
-    if (registerOutcome === 'user-chose-paste') {
-      // User picked the "paste my existing key" branch from inside the
-      // register flow — they already acknowledged what's next, so don't
-      // re-surface the generic fallback note. Fall through to the
-      // credential step which will prompt for the key.
-      return
-    }
-    if (registerOutcome === 'user-chose-recover') {
-      // The email is at its agent limit and the user wants the key of one
-      // of the agents it already backs. Hand off to recovery; it asks for
-      // the handle and the email again — the register flow's email is a
-      // reasonable guess but not necessarily the one that agent registered
-      // with, so it is not pre-filled.
-      return await recover()
-    }
-    return registerOutcome
+    if (choice === 'paste') return
+    return await runAccountFlow({ kind: choice, cfg, accountId, prompter })
   },
 
   credentials: [
@@ -1023,9 +564,9 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
       inputPrompt: 'Paste your AgentChat API key (ac_…)',
       helpTitle: 'AgentChat API key',
       helpLines: [
-        'Format: ac_ followed by 43 base64url characters. Validated against',
-        'GET /v1/agents/me during this wizard — bad keys fail fast instead',
-        'of flapping reconnects at runtime.',
+        'AgentChat checks the key before it is saved: a key it does not',
+        'accept is not saved, so a bad key fails here instead of flapping',
+        'reconnects at runtime.',
       ],
       allowEnv: () => true,
       shouldPrompt: ({ credentialValues, currentValue }) => {
@@ -1048,87 +589,90 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
           envValue,
         }
       },
+      // The key the person entered, checked before it is saved.
+      applySet: ({ cfg, accountId, value, resolvedValue }) => saveEnteredKey(cfg, accountId, value, resolvedValue),
+      applyUseEnv: ({ cfg, accountId }) => {
+        const key = readApiKeyFromEnv(MIN_API_KEY_LENGTH)
+        return key ? saveEnteredKey(cfg, accountId, key, key) : cfg
+      },
     },
   ],
 
   finalize: async ({ cfg, accountId, credentialValues, prompter }) => {
-    const apiKey =
-      typeof credentialValues.token === 'string' && credentialValues.token.length >= MIN_API_KEY_LENGTH
-        ? credentialValues.token
-        : readAgentchatConfigField(cfg, accountId, 'apiKey')
-
-    if (!apiKey || !isApiKeyPresent(apiKey)) {
-      // Nothing to validate — prepare aborted and credential step got skipped
-      // or the user bailed mid-flow. The `configure` call above will still
-      // write whatever cfg we return; nothing more to do here.
-      return
-    }
+    const stored = nonEmpty(readAgentchatConfigField(cfg, accountId, 'apiKey'))
+    const apiKey = nonEmpty(credentialValues.token) ?? stored
+    // Nothing to check: prepare ended without a key and the credential step
+    // was skipped, or the user bailed mid-flow.
+    if (!apiKey) return
 
     const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase')
-    const spinner = prompter.progress('Validating API key against AgentChat…')
+    const spinner = prompter.progress('Checking the API key with AgentChat…')
+    let check: KeyCheck
     try {
-      const result = await validateApiKey(apiKey, { apiBase })
-      if (result.ok) {
-        spinner.stop(`Authenticated as @${result.agent.handle}`)
-
-        // Place the integration: the key in OpenClaw's state-dir `.env` (the
-        // hosted tools' bearer header is a template on it), the served
-        // identity line in AGENTS.md (loaded every turn), the manual
-        // (bundled), and the hosted MCP server in `mcp.servers.agentchat`.
-        // Best-effort by intent: a read-only workspace must NOT bounce the
-        // wizard — the key and config are saved; the report says what to
-        // repair.
-        const handle = result.agent.handle
-        const resolvedBase = apiBase ?? DEFAULT_API_BASE
-        const identityLine = await loadIdentityLine({ client: createSdkClient({ apiKey, apiBase: resolvedBase }), accountId })
-        const placed = placeIntegration({ cfg, handle, apiKey, apiBase: resolvedBase, identityLine, accountId })
-        const failed = placed.steps.filter((s) => s.status === 'failed')
-        const skipped = placed.steps.filter((s) => s.status === 'skipped' && s.name === 'anchor')
-        await prompter.note(
-          [
-            ...formatPlacement(placed.steps),
-            '',
-            placed.mcp === 'added' || placed.steps.some((s) => s.name === 'key' && s.status === 'changed')
-              ? 'Restart the gateway once so its environment carries the key and it connects the hosted tools. Then `openclaw channels status` shows the integration and the tools.'
-              : 'The agent is reachable: a peer\'s message wakes it; the agent decides with its own model; it answers through the hosted AgentChat tools.',
-            ...(failed.length > 0
-              ? ['', 'Some placement failed (above). Your account is configured; re-run `openclaw channels add agentchat` after fixing the path, or `openclaw doctor --fix` for the config entry.']
-              : []),
-            ...(skipped.length > 0 ? ['', 'The identity line waits for AgentChat to be reachable: run `openclaw doctor --fix` then.'] : []),
-          ].join('\n'),
-          'AgentChat integration placed',
-        )
-
-        // The config side of placement: the handle the key authenticates as
-        // (configured-state, doctor and the own-echo filter need it), the
-        // hosted tools entry, and the llm override opt-in when this account
-        // is bound to an agent other than OpenClaw's default.
-        const applied = applyIntegrationConfig(placed.cfg, { accountId, handle, apiKey, apiBase: resolvedBase })
-        return { cfg: applied.cfg }
-      }
-
-      spinner.stop(`API key did not pass the live check (${result.reason})`)
-      await prompter.note(
-        [
-          result.message,
-          '',
-          'The config was saved — you can re-run `openclaw channels add agentchat`',
-          'to replace the key, or edit ~/.openclaw/config.yaml directly.',
-        ].join('\n'),
-        'AgentChat validation warning',
-      )
+      check = await checkApiKey(apiKey, { apiBase })
     } catch (err) {
-      spinner.stop('Could not reach AgentChat for validation')
+      spinner.stop('Could not reach AgentChat to check the key')
       await prompter.note(
         [
           err instanceof Error ? err.message : String(err),
           '',
-          'The config was saved — the runtime will retry on startup.',
+          stored === apiKey ? 'The config was saved — the runtime will retry on startup.' : 'The key was not saved.',
         ].join('\n'),
         'AgentChat API unreachable',
       )
+      return
     }
-    return
+
+    if (!check.ok) {
+      spinner.stop('AgentChat did not accept the API key')
+      await prompter.note(
+        [
+          check.message,
+          '',
+          stored === apiKey
+            ? 'This key is the one in your OpenClaw config. Re-run `openclaw channels add agentchat` → Replace the API key to recover a lost key or paste another one.'
+            : 'The key was not saved. Re-run `openclaw channels add agentchat` to paste another key, register a new agent, or recover a lost key.',
+        ].join('\n'),
+        'AgentChat API key not accepted',
+      )
+      return
+    }
+
+    spinner.stop(`Authenticated as @${check.handle}`)
+
+    // Place the integration: the key in OpenClaw's state-dir `.env` (the
+    // hosted tools' bearer header is a template on it), the served identity
+    // line in AGENTS.md (loaded every turn), the manual (bundled), and the
+    // hosted MCP server in `mcp.servers.agentchat`. Best-effort by intent: a
+    // read-only workspace must NOT bounce the wizard — the key and config are
+    // saved; the report says what to repair.
+    const handle = check.handle
+    const resolvedBase = apiBase ?? DEFAULT_API_BASE
+    const identityLine = await loadIdentityLine({ client: createSdkClient({ apiKey, apiBase: resolvedBase }), accountId })
+    const placed = placeIntegration({ cfg, handle, apiKey, apiBase: resolvedBase, identityLine, accountId })
+    const failed = placed.steps.filter((s) => s.status === 'failed')
+    const skipped = placed.steps.filter((s) => s.status === 'skipped' && s.name === 'anchor')
+    await prompter.note(
+      [
+        ...formatPlacement(placed.steps),
+        '',
+        placed.mcp === 'added' || placed.steps.some((s) => s.name === 'key' && s.status === 'changed')
+          ? 'Restart the gateway once so its environment carries the key and it connects the hosted tools. Then `openclaw channels status` shows the integration and the tools.'
+          : 'The agent is reachable: a peer\'s message wakes it; the agent decides with its own model; it answers through the hosted AgentChat tools.',
+        ...(failed.length > 0
+          ? ['', 'Some placement failed (above). Your account is configured; re-run `openclaw channels add agentchat` after fixing the path, or `openclaw doctor --fix` for the config entry.']
+          : []),
+        ...(skipped.length > 0 ? ['', 'The identity line waits for AgentChat to be reachable: run `openclaw doctor --fix` then.'] : []),
+      ].join('\n'),
+      'AgentChat integration placed',
+    )
+
+    // The config side of placement: the handle the key authenticates as
+    // (configured-state, doctor and the own-echo filter need it), the
+    // hosted tools entry, and the llm override opt-in when this account
+    // is bound to an agent other than OpenClaw's default.
+    const applied = applyIntegrationConfig(placed.cfg, { accountId, handle, apiKey, apiBase: resolvedBase })
+    return { cfg: applied.cfg }
   },
 
   completionNote: {

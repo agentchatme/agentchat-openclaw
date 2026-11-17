@@ -54,7 +54,7 @@ import {
   parseChannelConfig,
   type AgentchatChannelConfig,
 } from './config-schema.js'
-import { validateApiKey } from './setup-client.js'
+import { checkApiKey } from './setup-client.js'
 import { registerReleaseCli, registerReleaseGatewayMethod } from './binding/release.js'
 import { registerRunObserver } from './binding/run-observer.js'
 
@@ -133,7 +133,7 @@ const uiHints: Record<string, ChannelConfigUiHint> = {
     label: 'AgentChat API key',
     placeholder: 'ac_…',
     sensitive: true,
-    help: 'The setup wizard registers you via email OTP and mints a key, recovers a lost key (handle + email OTP), or accepts an existing ac_… key.',
+    help: 'The setup wizard registers a new agent or recovers a lost key by email code, or accepts an existing ac_… key, which it checks with AgentChat before saving.',
   },
   apiBase: {
     label: 'API base URL',
@@ -144,7 +144,7 @@ const uiHints: Record<string, ChannelConfigUiHint> = {
   agentHandle: {
     label: 'Agent handle',
     placeholder: 'my-agent',
-    help: '3–30 chars, lowercase letters/digits/hyphens; must start with a letter.',
+    help: 'The handle the API key belongs to, as AgentChat returned it; setup and `openclaw doctor --fix` write it.',
   },
   reconnect: { label: 'Reconnect backoff', advanced: true },
   ping: { label: 'WebSocket ping cadence', advanced: true },
@@ -209,7 +209,7 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
    */
   validateInput({ input }) {
     if (typeof input.token !== 'string' || input.token.trim().length === 0) {
-      return 'apiKey is required — pass via --token, or run `openclaw channels add agentchat` to register a new agent or recover a lost key (handle + email OTP)'
+      return 'apiKey is required — pass via --token, or run `openclaw channels add agentchat` to register a new agent or recover a lost key (email code)'
     }
     if (input.token.length < MIN_API_KEY_LENGTH) {
       return `apiKey looks too short (got ${input.token.length} chars, expect ≥${MIN_API_KEY_LENGTH})`
@@ -238,9 +238,9 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
     if (!apiKey || apiKey.length < MIN_API_KEY_LENGTH) return input
     const apiBase = typeof input.url === 'string' && input.url.length > 0 ? input.url : undefined
     try {
-      const result = await validateApiKey(apiKey, { apiBase })
+      const result = await checkApiKey(apiKey, { apiBase })
       if (result.ok) {
-        say(runtime, 'log', `[agentchat:${accountId}] authenticated as @${result.agent.handle} (${result.agent.email})`)
+        say(runtime, 'log', `[agentchat:${accountId}] authenticated as @${result.handle}`)
         // The key goes to the state-dir .env NOW, before OpenClaw writes the
         // config and re-reads it: the hosted tools entry written in the same
         // step references ${AGENTCHAT_API_KEY}, and the post-write snapshot
@@ -250,9 +250,9 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
         } catch (err) {
           say(runtime, 'error', `[agentchat:${accountId}] could not write AGENTCHAT_API_KEY to ${dotEnvPath()}: ${err instanceof Error ? err.message : String(err)}`)
         }
-        return { ...input, agentHandle: result.agent.handle }
+        return { ...input, agentHandle: result.handle }
       }
-      say(runtime, 'error', `[agentchat:${accountId}] api key did not pass live check (${result.reason}): ${result.message}`)
+      say(runtime, 'error', `[agentchat:${accountId}] api key did not pass live check (${result.code}): ${result.message}`)
     } catch (err) {
       say(runtime, 'error', `[agentchat:${accountId}] live key validation failed: ${err instanceof Error ? err.message : String(err)}`)
     }
@@ -292,12 +292,12 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
       // An OpenClaw without `prepareAccountConfigInput`: learn the handle now
       // for the identity line; the config gets it from `openclaw doctor --fix`.
       try {
-        const result = await validateApiKey(apiKey, { apiBase })
+        const result = await checkApiKey(apiKey, { apiBase })
         if (result.ok) {
-          handle = result.agent.handle
+          handle = result.handle
           say(runtime, 'log', `[agentchat:${accountId}] authenticated as @${handle}; run \`openclaw doctor --fix\` to persist channels.agentchat.agentHandle`)
         } else {
-          say(runtime, 'error', `[agentchat:${accountId}] api key did not pass live check (${result.reason}): ${result.message}`)
+          say(runtime, 'error', `[agentchat:${accountId}] api key did not pass live check (${result.code}): ${result.message}`)
           return
         }
       } catch (err) {

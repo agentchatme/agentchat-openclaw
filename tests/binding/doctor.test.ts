@@ -17,7 +17,7 @@ const { IDENTITY_LINE } = vi.hoisted(() => ({
 // repairConfig ask the live API who it is.
 vi.mock('../../src/setup-client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/setup-client.js')>()
-  return { ...actual, validateApiKey: vi.fn(async () => ({ ok: false, reason: 'unreachable', message: 'no network in unit tests' })) }
+  return { ...actual, checkApiKey: vi.fn(async () => { throw new Error('no network in unit tests') }) }
 })
 
 vi.mock('../../src/integration/texts.js', async (importOriginal) => {
