@@ -79,9 +79,11 @@ it are relative to the manifest itself — never absolute, never reaching
 outside the package directory.
 
 ### 9. Setup wizard is data + small code
-`setup-entry.ts` is the wizard entry point. The wizard's user-facing
-strings, validation, and flow live in source we can hand off; no
-plugin-private OpenClaw API usage.
+`setup-entry.ts` is the wizard entry point. The wizard's own strings
+and its prompter wiring live in source we can hand off; the sign-up flow
+(what to ask, the sentence shown at each step, the waits) comes from the
+`agentchatme` SDK's `integration.account` helper and AgentChat's answers,
+so no sign-up rule is kept here. No plugin-private OpenClaw API usage.
 
 ### 10. No reach into the old monorepo
 The plugin depends on `agentchatme` from public npm, not on a workspace

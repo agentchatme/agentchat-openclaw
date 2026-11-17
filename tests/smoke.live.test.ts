@@ -3,8 +3,10 @@
  *
  * What this exercises end-to-end (server, the SDK socket, the main line; no
  * OpenClaw):
- *   - `validateApiKey` against `GET /v1/agents/me` for two fixture agents.
- *   - `registerAgentStart` HANDLE_TAKEN path (the seeded handles are bound).
+ *   - `checkApiKey` (the SDK's `integration.account.checkKey`, `GET
+ *     /v1/agents/me`) for two fixture agents.
+ *   - `integration.account.start('register')` for a seeded handle: the
+ *     server names the handle to change (`HANDLE_TAKEN`, `param: handle`).
  *   - Bob's `IntegrationSocket` connects and wakes on connect.
  *   - Alice DMs bob over REST (`POST /v1/messages`, plain fetch — the
  *     integration has no send path of its own); bob's socket delivers a
@@ -24,12 +26,12 @@ import { readFileSync, existsSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { afterAll, describe, expect, it } from 'vitest'
-import { gate } from 'agentchatme'
+import { gate, integration } from 'agentchatme'
 
 import { IntegrationSocket } from '../src/integration/socket.js'
 import { createSdkClient } from '../src/binding/sdk-client.js'
 import { parseChannelConfig } from '../src/config-schema.js'
-import { validateApiKey, registerAgentStart } from '../src/setup-client.js'
+import { accountCallOptions, checkApiKey } from '../src/setup-client.js'
 import { TEXTS_RUNTIME } from '../src/integration/texts.js'
 import { silentLogger } from './helpers/logger.js'
 
@@ -68,19 +70,24 @@ live('live smoke — integration legs against the real API', () => {
     }
   })
 
-  it('validateApiKey authenticates both fixture agents', async () => {
-    const a = await validateApiKey(ALICE_KEY!, { apiBase: API_BASE })
-    const b = await validateApiKey(BOB_KEY!, { apiBase: API_BASE })
-    expect(a.ok).toBe(true)
-    expect(b.ok).toBe(true)
-    if (a.ok) expect(a.agent.handle).toBe(ALICE_HANDLE)
-    if (b.ok) expect(b.agent.handle).toBe(BOB_HANDLE)
+  it('checkApiKey authenticates both fixture agents', async () => {
+    const a = await checkApiKey(ALICE_KEY!, { apiBase: API_BASE })
+    const b = await checkApiKey(BOB_KEY!, { apiBase: API_BASE })
+    expect(a).toEqual({ ok: true, handle: ALICE_HANDLE })
+    expect(b).toEqual({ ok: true, handle: BOB_HANDLE })
   }, 30_000)
 
-  it('registerAgentStart reports handle-taken for a seeded handle', async () => {
-    const r = await registerAgentStart({ email: `smoke-${randomBytes(4).toString('hex')}@example.invalid`, handle: ALICE_HANDLE }, { apiBase: API_BASE })
-    expect(r.ok).toBe(false)
-    if (!r.ok) expect(['handle-taken', 'rate-limited', 'email-limit-reached', 'email-exhausted']).toContain(r.reason)
+  it('a register start for a seeded handle sends no code and names what to change', async () => {
+    const r = await integration.account.start(
+      'register',
+      { email: `smoke-${randomBytes(4).toString('hex')}@example.invalid`, handle: ALICE_HANDLE },
+      accountCallOptions({ apiBase: API_BASE }),
+    )
+    expect(r.apiKey).toBeUndefined()
+    expect(r.message.length).toBeGreaterThan(0)
+    // The handle is taken; a per-IP limit or the email check may answer first.
+    expect(['ask_param', 'wait_then_retry', 'stop']).toContain(r.action)
+    if (r.code === 'HANDLE_TAKEN') expect(r.flow.param).toBe('handle')
   }, 30_000)
 
   it('the served texts for openclaw carry the wake instruction, the invite prompt and the identity line', async () => {

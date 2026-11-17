@@ -29,7 +29,7 @@ import {
   multiAccountRefusal,
   readAgentchatConfigField,
 } from '../channel-account.js'
-import { validateApiKey } from '../setup-client.js'
+import { checkApiKey } from '../setup-client.js'
 import { getIntegration, listActiveAccounts } from './runtime-registry.js'
 import { findAccountTurns, hungTurnsReason, overdueTurnLines, restartHoldLines } from '../integration/running.js'
 import { cycleTroubleLine } from '../integration/loop.js'
@@ -104,12 +104,12 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
       // not learn it before the write) → one live check per account.
       if (apiKey && !readAgentchatConfigField(cfg, accountId, 'agentHandle')) {
         try {
-          const result = await validateApiKey(apiKey, { apiBase })
+          const result = await checkApiKey(apiKey, { apiBase })
           if (result.ok) {
-            next = applyAgentchatAccountPatch(next, accountId, { agentHandle: result.agent.handle })
-            changes.push(`set channels.agentchat${accountId === 'default' ? '' : `.accounts.${accountId}`}.agentHandle = ${result.agent.handle}`)
+            next = applyAgentchatAccountPatch(next, accountId, { agentHandle: result.handle })
+            changes.push(`set channels.agentchat${accountId === 'default' ? '' : `.accounts.${accountId}`}.agentHandle = ${result.handle}`)
           } else {
-            warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] agentHandle not set and the key did not pass the live check (${result.reason}): ${result.message}`)
+            warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] agentHandle not set and the key did not pass the live check (${result.code}): ${result.message}`)
           }
         } catch (err) {
           warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] agentHandle not set and AgentChat was not reachable to learn it: ${err instanceof Error ? err.message : String(err)}`)

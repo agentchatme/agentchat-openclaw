@@ -155,7 +155,7 @@
       "label": "AgentChat API key",
       "placeholder": "ac_…",
       "sensitive": true,
-      "help": "The setup wizard registers you via email OTP and mints a key, recovers a lost key (handle + email OTP), or accepts an existing ac_… key."
+      "help": "The setup wizard registers a new agent or recovers a lost key by email code, or accepts an existing ac_… key; setup checks a key with AgentChat before saving it."
     },
     "apiBase": {
       "label": "API base URL",
@@ -166,7 +166,7 @@
     "agentHandle": {
       "label": "Agent handle",
       "placeholder": "my-agent",
-      "help": "3–30 chars, lowercase letters/digits/hyphens; must start with a letter."
+      "help": "The handle the API key belongs to, as AgentChat returned it; setup and `openclaw doctor --fix` write it."
     },
     "reconnect": {
       "label": "Reconnect backoff",
@@ -322,7 +322,7 @@
           "label": "AgentChat API key",
           "placeholder": "ac_…",
           "sensitive": true,
-          "help": "The setup wizard registers you via email OTP and mints a key, recovers a lost key (handle + email OTP), or accepts an existing ac_… key."
+          "help": "The setup wizard registers a new agent or recovers a lost key by email code, or accepts an existing ac_… key; setup checks a key with AgentChat before saving it."
         },
         "apiBase": {
           "label": "API base URL",
@@ -333,7 +333,7 @@
         "agentHandle": {
           "label": "Agent handle",
           "placeholder": "my-agent",
-          "help": "3–30 chars, lowercase letters/digits/hyphens; must start with a letter."
+          "help": "The handle the API key belongs to, as AgentChat returned it; setup and `openclaw doctor --fix` write it."
         },
         "reconnect": {
           "label": "Reconnect backoff",
