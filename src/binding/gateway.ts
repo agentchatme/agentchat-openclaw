@@ -32,8 +32,10 @@ import {
   readReplyGateEnabledFromEnv,
   readReplyGateTimeoutMsFromEnv,
   readWakeModeFromEnv,
+  readApiKeyVariable,
 } from '../credentials/read-env.js'
 import { multiAccountRefusal } from '../channel-account.js'
+import { gatewayKeyMismatch } from '../channel-key.js'
 import { registerIntegration, unregisterIntegration, getIntegration } from './runtime-registry.js'
 import { createIntegrationLoop } from '../integration/loop.js'
 import { OpenClawTexts, createTextsCache, spellTextsForOpenClaw } from '../integration/texts.js'
@@ -45,7 +47,7 @@ import { readAgentChatCalls } from '../integration/run.js'
 import { getPluginRuntime } from '../integration/runtime-holder.js'
 import { removeOldStateFiles } from '../integration/state.js'
 import { refreshIdentityLine } from '../integration/placement.js'
-import { NIX_MODE_ERROR_CODE, clientIdentityText, refreshHostedMcpEntry, type ConfigMutator } from '../integration/mcp.js'
+import { NIX_MODE_ERROR_CODE, clientIdentityText, refreshHostedMcpEntry, toolsUseOtherKey, type ConfigMutator } from '../integration/mcp.js'
 import {
   createRuntimeModelCall,
   createRuntimeTurnStarter,
@@ -227,6 +229,25 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       return
     }
 
+    // The hosted tools' bearer is `${AGENTCHAT_API_KEY}` from this
+    // process's environment; the socket and the gate use the account's key.
+    // Two different keys: every turn would act as another agent (or, after
+    // a key change, on the old key, without tools) while health stays
+    // green. Refused, in plain words; a restart from a clean shell fixes it.
+    const envKey = readApiKeyVariable()
+    const keyMismatch = toolsUseOtherKey(ctx.cfg, config.apiBase, config.apiKey, envKey) ? gatewayKeyMismatch(config.apiKey, envKey) : null
+    if (keyMismatch) {
+      ctx.log?.error?.(`[agentchat:${ctx.accountId}] integration not started — ${keyMismatch}`)
+      ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastDisconnect: { at: Date.now(), error: keyMismatch } }, 'blocked'))
+      await waitUntilAbort(ctx.abortSignal, () => undefined)
+      return
+    }
+    if (config.apiKeySource === 'config' || config.apiKeyPlainTextCopy) {
+      ctx.log?.warn?.(
+        `[agentchat:${ctx.accountId}] the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent's own file tools can read — run \`openclaw doctor --fix\` to move it to an owner-only key file`,
+      )
+    }
+
     const channelRuntime = ctx.channelRuntime as ChannelRuntimeLike | undefined
     // Which agent wakes: OpenClaw's routing for this account. The gate call
     // names that agent only when it differs from OpenClaw's ambient default
@@ -398,7 +419,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
               }
               blocked = true
               ctx.log?.error?.(
-                `[agentchat:${ctx.accountId}] key rejected (${close}) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted (${next}); rotate the key with openclaw channels add agentchat or openclaw config set channels.agentchat.apiKey …`,
+                `[agentchat:${ctx.accountId}] key rejected (${close}) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted (${next}); store a new key with openclaw channels add agentchat (Recover by email code, or --token-file <path>), then restart the gateway so the hosted tools use it too`,
               )
               ctx.setStatus(
                 withLifecycle(

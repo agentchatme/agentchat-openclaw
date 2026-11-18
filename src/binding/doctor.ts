@@ -33,12 +33,74 @@ import { checkApiKey } from '../setup-client.js'
 import { getIntegration, listActiveAccounts } from './runtime-registry.js'
 import { findAccountTurns, hungTurnsReason, overdueTurnLines, restartHoldLines } from '../integration/running.js'
 import { cycleTroubleLine } from '../integration/loop.js'
-import { checkPlacement, resolvePlacementAgentId, restoreIdentityLine } from '../integration/placement.js'
+import {
+  checkPlacement,
+  describeKeyCopies,
+  dotEnvPath,
+  openClawCopiesHoldingKey,
+  placeApiKeyInDotEnv,
+  readApiKeyFromDotEnv,
+  resolvePlacementAgentId,
+  restoreIdentityLine,
+} from '../integration/placement.js'
+import { resolveAgentchatApiKey, type ConfiguredKey } from '../channel-key.js'
+import { tightenApiKeyFile, writeApiKeyFile } from '../credentials/key-file.js'
 import { DEFAULT_API_BASE, clientIdentityText, withHostedMcpEntry } from '../integration/mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, readLlmAgentOverrideOptIn, withLlmAgentOverrideOptIn } from '../integration/model.js'
 import { cachedIdentityLine, loadIdentityLine } from '../integration/texts.js'
 import { resolveBoundAgentId, resolveOpenClawDefaultAgentId } from '../openclaw-layout.js'
 import { createSdkClient } from './sdk-client.js'
+
+/**
+ * `openclaw doctor --fix` for the key: a plain-text `channels.agentchat.apiKey`
+ * (an install from before the key file) is stored in an owner-only key file
+ * and replaced by its path; a key file other users can read is tightened to
+ * `0600`; the state-dir `.env` line the hosted tools read is placed when it
+ * is missing or holds another key. The key file is written before OpenClaw
+ * persists the config: if that write fails, the plain-text key is still in
+ * the config, so the key is never lost. OpenClaw's own config copies are
+ * named, never edited.
+ */
+export function moveKeyOutOfConfig(
+  cfg: OpenClawConfig,
+  accountId: string,
+  key: Extract<ConfiguredKey, { ok: true }>,
+  options: { stateDir?: string; configPath?: string; placeDotEnv?: boolean } = {},
+): { cfg: OpenClawConfig; changes: string[]; warnings: string[] } {
+  const changes: string[] = []
+  const warnings: string[] = []
+  const path = accountId === 'default' ? 'channels.agentchat' : `channels.agentchat.accounts.${accountId}`
+  let next = cfg
+  if (key.source === 'config') {
+    try {
+      const stored = writeApiKeyFile(accountId, key.apiKey, options.stateDir)
+      next = applyAgentchatAccountPatch(next, accountId, { apiKeyFile: stored.path, apiKey: undefined })
+      changes.push(`moved the API key out of openclaw.json: ${path}.apiKey is now ${path}.apiKeyFile = ${stored.path} (owner-only, 0600)`)
+      const copies = describeKeyCopies(openClawCopiesHoldingKey(key.apiKey, options.configPath))
+      if (copies) warnings.push(copies)
+    } catch (err) {
+      warnings.push(`the plain-text ${path}.apiKey could not be moved to a key file (${err instanceof Error ? err.message : String(err)}); it stays in openclaw.json`)
+    }
+  } else {
+    if (key.plainTextCopy) {
+      next = applyAgentchatAccountPatch(next, accountId, { apiKey: undefined })
+      changes.push(`removed the plain-text ${path}.apiKey from openclaw.json (the same key is in ${key.file ?? 'the key file'}, which stays in use)`)
+      const copies = describeKeyCopies(openClawCopiesHoldingKey(key.apiKey, options.configPath))
+      if (copies) warnings.push(copies)
+    }
+    if (key.loosePermissions && key.file && tightenApiKeyFile(key.file)) changes.push(`made the key file ${key.file} owner-only (0600)`)
+  }
+  // One `.env` variable for the hosted tools: with several accounts configured the integration refuses to start, and the line would flip between keys.
+  if (options.placeDotEnv !== false && readApiKeyFromDotEnv(options.stateDir) !== key.apiKey) {
+    try {
+      const placed = placeApiKeyInDotEnv(key.apiKey, options.stateDir)
+      if (placed.changed) changes.push(`placed the account's key as AGENTCHAT_API_KEY in ${placed.path} for the hosted tools (restart the gateway: OpenClaw reads it only at start)`)
+    } catch (err) {
+      warnings.push(`could not place AGENTCHAT_API_KEY in ${dotEnvPath(options.stateDir)}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+  return { cfg: next, changes, warnings }
+}
 
 export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
   collectPreviewWarnings({ cfg, doctorFixCommand, env }) {
@@ -50,14 +112,20 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
         warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${agentchatReenableHint(cfg, accountId)}`)
         continue
       }
-      const apiKey = readAgentchatConfigField(cfg, accountId, 'apiKey')
+      const keySource = resolveAgentchatApiKey(cfg, accountId)
+      const apiKey = keySource.ok ? keySource.apiKey : undefined
       const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
       const handle = readAgentchatConfigField(cfg, accountId, 'agentHandle')
       const agentId = resolvePlacementAgentId(cfg, accountId)
-      for (const check of checkPlacement({ cfg, handle, apiKey, apiBase, identityLine: cachedIdentityLine(accountId), agentId, accountId, env })) {
+      for (const check of checkPlacement({ cfg, handle, apiKey, apiBase, identityLine: cachedIdentityLine(accountId), agentId, accountId, keySource, env })) {
         if (check.ok && !check.notice) continue
         const fix = check.name === 'mcp' && check.repair && !check.ok ? ` (${doctorFixCommand} adds it)` : ''
         warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${check.name}: ${check.detail}${fix}`)
+      }
+      // A key moved out of openclaw.json may still sit in OpenClaw's own config copies.
+      if (keySource.ok && keySource.source === 'file') {
+        const copies = describeKeyCopies(openClawCopiesHoldingKey(keySource.apiKey))
+        if (copies) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] key: ${copies}`)
       }
       const bound = resolveBoundAgentId(cfg, AGENTCHAT_CHANNEL_ID, accountId)
       const ambient = resolveOpenClawDefaultAgentId(cfg)
@@ -96,9 +164,17 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
     for (const accountId of listConfiguredAccountIds(cfg)) {
       // Disabled: the identity line and the tools entry are absent by design.
       if (!isAgentchatAccountEnabled(cfg, accountId)) continue
-      const apiKey = readAgentchatConfigField(cfg, accountId, 'apiKey')
+      const keySource = resolveAgentchatApiKey(cfg, accountId)
+      const apiKey = keySource.ok ? keySource.apiKey : undefined
       const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
       bases.set(apiBase, apiKey)
+      if (!keySource.ok && !keySource.missing) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] key: ${keySource.reason}`)
+      if (keySource.ok) {
+        const moved = moveKeyOutOfConfig(next, accountId, keySource, { placeDotEnv: placeIdentityLines })
+        next = moved.cfg
+        changes.push(...moved.changes)
+        warnings.push(...moved.warnings.map((line) => `[${AGENTCHAT_CHANNEL_ID}:${accountId}] key: ${line}`))
+      }
       // The handle the key authenticates as is the one config field only the
       // server knows. Missing (an older OpenClaw's non-interactive add could
       // not learn it before the write) → one live check per account.

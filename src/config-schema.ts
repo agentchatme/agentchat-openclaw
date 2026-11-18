@@ -10,6 +10,8 @@
 
 import { z } from 'zod'
 
+import { resolveConfiguredApiKey, type ApiKeySource } from './channel-key.js'
+
 /**
  * Socket reconnect backoff, handed to the SDK's `RealtimeClient`:
  * `initialBackoffMs` → `reconnectInterval`, `maxBackoffMs` →
@@ -81,7 +83,19 @@ export const agentchatChannelConfigSchema = z
      */
     enabled: z.boolean().optional(),
     apiBase: z.string().url().default('https://api.agentchat.me'),
-    apiKey: z.string().min(20, 'apiKey looks too short for an AgentChat API key'),
+    /**
+     * Where the key is: a `0600` file only this plugin reads
+     * (`<state dir>/agentchat/<accountId>/keys/key-…`, written by setup and
+     * by `openclaw doctor --fix`). OpenClaw's own `tokenFile` convention for
+     * channel credentials: the config holds the path, never the key.
+     */
+    apiKeyFile: z.string().min(1, 'apiKeyFile must be a path').optional(),
+    /**
+     * The key itself, in plain text — what releases before the key file
+     * wrote. Still read, so an existing install keeps working; setup and
+     * `openclaw doctor --fix` move it into `apiKeyFile` and remove it.
+     */
+    apiKey: z.string().min(20, 'apiKey looks too short for an AgentChat API key').optional(),
     agentHandle: agentHandleSchema.optional(),
     // `.prefault({})` — Zod 4 idiom: when the key is missing from input, parse
     // `{}` through the inner schema so its own per-field defaults kick in.
@@ -94,13 +108,31 @@ export const agentchatChannelConfigSchema = z
   })
   .strict()
 
-export type AgentchatChannelConfig = z.infer<typeof agentchatChannelConfigSchema>
+/** The account section as it is persisted in `openclaw.json`. */
+export type PersistedChannelConfig = z.infer<typeof agentchatChannelConfigSchema>
 export type AgentchatChannelConfigInput = z.input<typeof agentchatChannelConfigSchema>
 
 /**
- * Parse + validate config at plugin startup.
+ * The account as the integration runs it: the persisted section with the
+ * key resolved — read from `apiKeyFile`, or (an install from before the key
+ * file) the plain-text `apiKey`. `apiKeySource` says which.
+ */
+export type AgentchatChannelConfig = Omit<PersistedChannelConfig, 'apiKey'> & {
+  readonly apiKey: string
+  /** Where the key came from; set by `parseChannelConfig`. */
+  readonly apiKeySource?: ApiKeySource
+  /** The key file is used and the same key is still in plain text as `apiKey`. */
+  readonly apiKeyPlainTextCopy?: boolean
+}
+
+/**
+ * Parse + validate config at plugin startup, and resolve the key
+ * (`./channel-key.ts`): from `apiKeyFile`, else the plain-text `apiKey` of
+ * an install from before the key file. A file that cannot be read, no key
+ * at all, or an `apiKey` that differs from the file's key throws with the
+ * reason, in plain words.
  *
- * Strict on `apiKey` and the four nested groups — `parseChannelConfig` is
+ * Strict on the key and the four nested groups — `parseChannelConfig` is
  * called only AFTER `resolveAgentchatAccount` has confirmed that the
  * persisted config block is non-empty (see `channel.ts`), so an empty
  * install-time config never reaches Zod. The runtime-time strictness here
@@ -114,5 +146,8 @@ export type AgentchatChannelConfigInput = z.input<typeof agentchatChannelConfigS
  * classify them (`terminal-user` — operator fix required).
  */
 export function parseChannelConfig(input: unknown): AgentchatChannelConfig {
-  return agentchatChannelConfigSchema.parse(input)
+  const parsed = agentchatChannelConfigSchema.parse(input)
+  const key = resolveConfiguredApiKey(parsed)
+  if (!key.ok) throw new Error(key.reason)
+  return { ...parsed, apiKey: key.apiKey, apiKeySource: key.source, ...(key.plainTextCopy ? { apiKeyPlainTextCopy: true } : {}) }
 }

@@ -311,6 +311,26 @@ describe('turnReadiness / withTurnReadiness — a turn only when it can have the
     expect(turnReadiness({ cfg: substituted, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey } })).toEqual({ ready: true })
   })
 
+  it('our entry with a different key in this process is not ready: the turn would act as another agent, or on the old key after a rotation (T6-F10)', () => {
+    const other = testKey('o'.repeat(24))
+    const readiness = turnReadiness({ cfg: ours, apiBase, apiKey, env: { AGENTCHAT_API_KEY: other } })
+    expect(readiness.ready).toBe(false)
+    const reason = (readiness as { reason: string }).reason
+    expect(reason).toMatch(/AGENTCHAT_API_KEY in the gateway's environment is not the key channels\.agentchat is configured with/)
+    expect(reason).toMatch(/the key changed since the gateway started — OpenClaw reads ~\/\.openclaw\/\.env only when the gateway starts, and `openclaw doctor --fix` places the account's key there/)
+    expect(reason).toContain('openclaw gateway install --force')
+    expect(reason).not.toContain(other)
+    expect(reason).not.toContain(apiKey)
+    // In production OpenClaw hands the plugin the env-substituted config: the bearer then carries the variable's key.
+    const substituted = { mcp: { servers: { agentchat: { ...ours.mcp.servers.agentchat, headers: { Authorization: `Bearer ${other}` } } } } }
+    expect(turnReadiness({ cfg: substituted, apiBase, apiKey, env: { AGENTCHAT_API_KEY: other } }).ready).toBe(false)
+    // A bearer that is the account's key written out does not read the variable; neither does a hand-written entry on another credential.
+    const literal = { mcp: { servers: { agentchat: { ...ours.mcp.servers.agentchat, headers: { Authorization: `Bearer ${apiKey}` } } } } }
+    expect(turnReadiness({ cfg: literal, apiBase, apiKey, env: { AGENTCHAT_API_KEY: other } })).toEqual({ ready: true })
+    const theirs = { mcp: { servers: { agentchat: { ...ours.mcp.servers.agentchat, headers: { Authorization: 'Bearer ${MY_OWN_VAR}' } } } } }
+    expect(turnReadiness({ cfg: theirs, apiBase, apiKey, env: { AGENTCHAT_API_KEY: other } })).toEqual({ ready: true })
+  })
+
   it("a hand-written entry is the operator's and counts as ready", () => {
     const theirs = { mcp: { servers: { agentchat: { url: 'https://proxy.example/mcp', transport: 'streamable-http' } } } }
     expect(turnReadiness({ cfg: theirs, apiBase, apiKey, env: {} })).toEqual({ ready: true })

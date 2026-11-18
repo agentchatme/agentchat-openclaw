@@ -14,6 +14,7 @@
  * Plus the socket's live state when the integration is running.
  */
 
+import { resolveAgentchatApiKey } from '../channel-key.js'
 import type { ChannelStatusAdapter, ChannelCapabilitiesDisplayLine } from './openclaw-types.js'
 
 import type { AgentchatResolvedAccount } from '../channel.js'
@@ -103,6 +104,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
       identityLine: cachedIdentityLine(account.accountId),
       agentId: resolvePlacementAgentId(cfg as object | undefined, account.accountId),
       accountId: account.accountId,
+      keySource: resolveAgentchatApiKey(cfg as never, account.accountId),
     })
     const enabled = account.enabled && isAgentchatAccountEnabled(cfg as never, account.accountId)
 

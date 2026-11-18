@@ -41,6 +41,7 @@ import { agentchatChannelConfigSchema } from '../src/config-schema.js'
 import { writeAgentsAnchor } from '../src/binding/agents-anchor.js'
 import { getPluginRuntime, setPluginRuntime, isUsablePluginRuntime, resetPluginRuntimeForTest } from '../src/integration/runtime-holder.js'
 import { testKey } from './helpers/keys.js'
+import { apiKeyFilePathFor, removeAccountKeyFiles, resetTokenFileReadsForTest } from '../src/credentials/key-file.js'
 
 const KEY = testKey('n'.repeat(24))
 const keyAccepted = { ok: true, handle: 'alice' } as const
@@ -141,13 +142,15 @@ describe('non-interactive setup — prepare → apply → after', () => {
     expect(empty.channels.agentchat.agentHandle).toBeUndefined()
   })
 
-  it('applyAccountConfig (synchronous, the one persisted write) carries apiKey, agentHandle and mcp.servers.agentchat', () => {
+  it('applyAccountConfig (synchronous, the one persisted write) carries the key file path, agentHandle and mcp.servers.agentchat — never the key', () => {
     const next = agentchatPlugin.setup!.applyAccountConfig({ cfg: { channels: {} } as never, accountId: 'default', input: { token: KEY, agentHandle: '@alice' } as never }) as unknown as {
-      channels: { agentchat: { apiKey: string; agentHandle: string } }
+      channels: { agentchat: { apiKey?: string; apiKeyFile: string; agentHandle: string } }
       mcp: { servers: { agentchat: { url: string; transport: string; headers: { Authorization: string } } } }
       plugins?: unknown
     }
-    expect(next.channels.agentchat.apiKey).toBe(KEY)
+    expect(next.channels.agentchat.apiKey).toBeUndefined()
+    expect(next.channels.agentchat.apiKeyFile).toBe(apiKeyFilePathFor('default', KEY))
+    expect(JSON.stringify(next)).not.toContain(KEY)
     expect(next.channels.agentchat.agentHandle).toBe('alice')
     expect(next.mcp.servers.agentchat).toEqual({
       url: 'https://api.agentchat.me/mcp',
@@ -183,8 +186,13 @@ describe('non-interactive setup — prepare → apply → after', () => {
     expect(checkApiKey).not.toHaveBeenCalled() // the handle was already in the input
     expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain(IDENTITY_LINE)
     expect(fs.readFileSync(path.join(process.env.OPENCLAW_STATE_DIR!, '.env'), 'utf8')).toContain(`AGENTCHAT_API_KEY=${KEY}`)
-    expect(lines.every((l) => l.level === 'log')).toBe(true)
+    // --token put the key on argv: the one error line says so, and names --token-file.
+    expect(lines.filter((l) => l.level === 'error').map((l) => l.line)).toEqual([
+      "[agentchat:default] the key was on this command's command line (--token), where any user of this machine can read it (ps) while the command runs — next time pass --token-file <path> (a file that holds only the key; - reads it from standard input)",
+    ])
     expect(lines.map((l) => l.line).join('\n')).toMatch(/✓ key: AGENTCHAT_API_KEY in .*\.env/)
+    expect(lines.map((l) => l.line).join('\n')).toMatch(/✓ key file: .*keys\/key-[0-9a-f]{16} \(owner-only\); openclaw\.json holds only its path/)
+    expect(lines.map((l) => l.line).join('\n')).not.toContain(KEY)
     expect(lines.map((l) => l.line).join('\n')).toMatch(/✓ anchor: identity line for @alice/)
     expect(lines.map((l) => l.line).join('\n')).toMatch(/✓ config: agentHandle and mcp\.servers\.agentchat written with the account/)
   })
@@ -426,6 +434,7 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
     })
 
     it('onAccountRemoved removes the identity line and the .env key line', async () => {
+      removeAccountKeyFiles('default')
       fs.writeFileSync(anchorFile(), ANCHOR)
       const dotenv = path.join(process.env.OPENCLAW_STATE_DIR!, '.env')
       fs.writeFileSync(dotenv, `OTHER=1\nAGENTCHAT_API_KEY=${KEY}\n`)

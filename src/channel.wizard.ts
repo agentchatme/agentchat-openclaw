@@ -32,19 +32,23 @@
  *      saved (`applySet` / `applyUseEnv`): a key AgentChat turns away is
  *      never saved, and a key it accepts is saved with its handle.
  *   4. `finalize` — checks the key, reports the handle, and places the
- *      integration: the key in OpenClaw's `.env`, the served identity line
+ *      integration: the key in its key file (a plain-text key from an
+ *      earlier release is moved there) and in OpenClaw's `.env` for the
+ *      hosted tools, the served identity line
  *      in AGENTS.md, the hosted MCP server in `mcp.servers.agentchat`
  *      (returned as a config patch for OpenClaw to persist). Never throws on
  *      transport errors (a fresh clone behind a proxy still saves config and
  *      the runtime retries later).
  *
  * Writes go through `applyAgentchatAccountPatch` — the same helper behind
- * `setup.applyAccountConfig`, so the non-interactive `openclaw setup --token
- * ac_…` path and the wizard converge on the same config shape.
+ * `setup.applyAccountConfig`, so the non-interactive `openclaw channels add
+ * agentchat --token-file <path>` path and the wizard converge on the same
+ * config shape: the key in its own owner-only key file, `apiKeyFile` naming
+ * it in the config, never the key itself.
  *
  * `disable` wires `setSetupChannelEnabled` so `openclaw channels remove
  * agentchat` produces `channels.agentchat.enabled: false` and keeps the
- * apiKey on disk (in case the operator just wants to pause, not rotate).
+ * key file on disk (in case the operator just wants to pause, not rotate).
  */
 
 import { ConnectionError, integration } from 'agentchatme'
@@ -78,7 +82,16 @@ import { accountCallOptions, checkApiKey, type KeyCheck } from './setup-client.j
 // Credential lookup helper — see SECURITY.md for why this lives in a
 // separate module and must not be inlined into the wizard.
 import { readApiKeyFromEnv } from './credentials/read-env.js'
-import { placeIntegration, formatPlacement, applyIntegrationConfig, stripIntegrationConfig } from './integration/placement.js'
+import {
+  placeIntegration,
+  formatPlacement,
+  applyIntegrationConfig,
+  stripIntegrationConfig,
+  storeAccountKey,
+  describeKeyCopies,
+  openClawCopiesHoldingKey,
+} from './integration/placement.js'
+import { readAgentchatApiKey, resolveAgentchatApiKey } from './channel-key.js'
 import { DEFAULT_API_BASE } from './integration/mcp.js'
 import { loadIdentityLine } from './integration/texts.js'
 import { createSdkClient } from './binding/sdk-client.js'
@@ -107,7 +120,26 @@ const LABELS: integration.AccountLabels = {
 }
 
 function hasConfiguredKey(cfg: OpenClawConfig | undefined, accountId: string): boolean {
-  return isApiKeyPresent(readAgentchatConfigField(cfg, accountId, 'apiKey'))
+  return readAgentchatApiKey(cfg, accountId) !== undefined
+}
+
+/**
+ * Store a key the person has (issued by register or recover, or entered
+ * and accepted): its own owner-only key file, and the config patch that
+ * names the file — never the key. The `.env` line for the hosted tools is
+ * placed by `finalize`, so a wizard left before the end changes no `.env`.
+ * A key file that cannot be written must not lose the key: the patch then
+ * keeps it as the plain-text `apiKey` of earlier releases (doctor says so,
+ * and `openclaw doctor --fix` moves it once the directory is writable).
+ */
+function storeKeyPatch(accountId: string, apiKey: string): { patch: Record<string, unknown>; file?: string; problem?: string } {
+  try {
+    // The key file only: the .env line is placed by finalize, with the config the wizard returns.
+    const stored = storeAccountKey(accountId, apiKey, { dotenv: 'never' })
+    return { patch: { apiKeyFile: stored.file, apiKey: undefined }, file: stored.file }
+  } catch (err) {
+    return { patch: { apiKey, apiKeyFile: undefined }, problem: `the key file could not be written (${err instanceof Error ? err.message : String(err)}); the key is kept in openclaw.json for now — run \`openclaw doctor --fix\` once the directory is writable` }
+  }
 }
 
 function nonEmpty(value: unknown): string | undefined {
@@ -378,12 +410,16 @@ async function runAccountFlow(params: {
   if (result.outcome !== 'done') return notCompleted(prompter, kind)
 
   // The key is the identity: the config describes the handle the server
-  // returned, never the one typed.
-  const nextCfg = applyAgentchatAccountPatch(cfg, accountId, { apiKey: result.apiKey, agentHandle: result.handle })
+  // returned, never the one typed. The key is stored at once — AgentChat
+  // issues it once (a recover ends the old key), so a setup cancelled after
+  // this point must not lose it.
+  const stored = storeKeyPatch(accountId, result.apiKey)
+  const nextCfg = applyAgentchatAccountPatch(cfg, accountId, { ...stored.patch, agentHandle: result.handle })
   await prompter.note(
     [
       `Handle:   @${result.handle}`,
-      `API key:  ${redactKey(result.apiKey)} (saved to your OpenClaw config)`,
+      `API key:  ${redactKey(result.apiKey)} (${stored.file ? `stored in ${stored.file}, readable only by you; openclaw.json holds only its path` : 'saved to your OpenClaw config'})`,
+      ...(stored.problem ? ['', stored.problem] : []),
     ].join('\n'),
     kind === 'register' ? 'AgentChat account created' : 'AgentChat API key recovered',
   )
@@ -426,9 +462,10 @@ async function saveEnteredKey(cfg: OpenClawConfig, accountId: string, value: unk
   }
   if (check !== null && !check.ok) return cfg
   const handle = check?.handle
-  const sameKey = readAgentchatConfigField(cfg, accountId, 'apiKey') === value
+  const sameKey = readAgentchatApiKey(cfg, accountId) === key
+  const stored = storeKeyPatch(accountId, key)
   const withKey = applyAgentchatAccountPatch(cfg, accountId, {
-    apiKey: value,
+    ...stored.patch,
     // A new key whose handle is unknown must not keep the old key's handle.
     ...(handle ? { agentHandle: handle } : sameKey ? {} : { agentHandle: undefined }),
   })
@@ -578,7 +615,7 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
         return true
       },
       inspect: ({ cfg, accountId }) => {
-        const apiKey = readAgentchatConfigField(cfg, accountId, 'apiKey')
+        const apiKey = readAgentchatApiKey(cfg, accountId)
         const configured = isApiKeyPresent(apiKey)
         // Delegated to the credential helper — see SECURITY.md.
         const envValue = readApiKeyFromEnv(MIN_API_KEY_LENGTH)
@@ -599,7 +636,7 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
   ],
 
   finalize: async ({ cfg, accountId, credentialValues, prompter }) => {
-    const stored = nonEmpty(readAgentchatConfigField(cfg, accountId, 'apiKey'))
+    const stored = nonEmpty(readAgentchatApiKey(cfg, accountId))
     const apiKey = nonEmpty(credentialValues.token) ?? stored
     // Nothing to check: prepare ended without a key and the credential step
     // was skipped, or the user bailed mid-flow.
@@ -648,12 +685,28 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
     // saved; the report says what to repair.
     const handle = check.handle
     const resolvedBase = apiBase ?? DEFAULT_API_BASE
+    // A key kept in plain text in openclaw.json (an install from before the
+    // key file, the person chose "keep"): setup moves it into a key file now.
+    let keyCfg = cfg
+    const source = resolveAgentchatApiKey(cfg, accountId)
+    let moved: string | undefined
+    if (source.ok && source.source === 'config' && source.apiKey === apiKey) {
+      const storedKey = storeKeyPatch(accountId, apiKey)
+      if (storedKey.file) {
+        keyCfg = applyAgentchatAccountPatch(cfg, accountId, storedKey.patch)
+        const copies = describeKeyCopies(openClawCopiesHoldingKey(apiKey))
+        moved = [`✓ key moved out of openclaw.json: the plain-text channels.agentchat.apiKey is now a key file (${storedKey.file}, owner-only)`, ...(copies ? [copies] : [])].join('\n')
+      }
+    }
+    const keyFile = readAgentchatConfigField(keyCfg, accountId, 'apiKeyFile')
     const identityLine = await loadIdentityLine({ client: createSdkClient({ apiKey, apiBase: resolvedBase }), accountId })
-    const placed = placeIntegration({ cfg, handle, apiKey, apiBase: resolvedBase, identityLine, accountId })
+    const placed = placeIntegration({ cfg: keyCfg, handle, apiKey, apiBase: resolvedBase, identityLine, accountId })
     const failed = placed.steps.filter((s) => s.status === 'failed')
     const skipped = placed.steps.filter((s) => s.status === 'skipped' && s.name === 'anchor')
     await prompter.note(
       [
+        ...(keyFile && !moved ? [`✓ key file: ${keyFile} (owner-only); openclaw.json holds only its path`] : []),
+        ...(moved ? [moved] : []),
         ...formatPlacement(placed.steps),
         '',
         placed.mcp === 'added' || placed.steps.some((s) => s.name === 'key' && s.status === 'changed')

@@ -30,6 +30,19 @@ export function readApiKeyFromEnv(minLength: number): string | undefined {
 }
 
 /**
+ * `AGENTCHAT_API_KEY` as this process has it (trimmed; undefined when
+ * unset or blank), whatever its length — for comparing it with the key the
+ * account is configured with. In the gateway that is the value OpenClaw's
+ * MCP client sends as the hosted tools' bearer (`${AGENTCHAT_API_KEY}`):
+ * an export in the shell that started the gateway, else the state-dir
+ * `.env` as it was when the gateway started.
+ */
+export function readApiKeyVariable(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const raw = env[API_KEY_ENV]?.trim()
+  return raw ? raw : undefined
+}
+
+/**
  * Reads `OPENCLAW_PROFILE` for workspace path resolution. Mirrors
  * OpenClaw's own logic: non-default profile name →
  * `~/.openclaw/workspace-${profile}`.
@@ -54,6 +67,18 @@ export function readOpenClawProfileFromEnv(): string | undefined {
  */
 export function readOpenClawStateDirFromEnv(): string | undefined {
   const raw = process.env.OPENCLAW_STATE_DIR?.trim()
+  return raw ? raw : undefined
+}
+
+/**
+ * Reads `OPENCLAW_CONFIG_PATH` — OpenClaw's override for its config file
+ * (`<state dir>/openclaw.json` by default; `resolveConfigPath` in OpenClaw's
+ * `src/config/paths.ts`). The plugin only reads it to name OpenClaw's own
+ * config copies (`openclaw.json.bak*`, `.last-good`, `.pre-update`) that
+ * may still hold a key moved out of the config.
+ */
+export function readOpenClawConfigPathFromEnv(): string | undefined {
+  const raw = process.env.OPENCLAW_CONFIG_PATH?.trim()
   return raw ? raw : undefined
 }
 

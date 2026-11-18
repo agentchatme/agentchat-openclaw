@@ -28,6 +28,7 @@ export type ChannelSectionRaw = Record<string, unknown> & {
   accounts?: Record<string, unknown>
   enabled?: unknown
   apiKey?: unknown
+  apiKeyFile?: unknown
   apiBase?: unknown
   agentHandle?: unknown
 }
@@ -120,7 +121,8 @@ export function agentchatReenableHint(cfg: OpenClawConfig | undefined, accountId
 
 /**
  * Every account id the config declares: the keys of `accounts.*` when
- * present, else `default` when the flat section carries an `apiKey`. Shared
+ * present, else `default` when the flat section names a key (`apiKeyFile`,
+ * or the plain-text `apiKey` of an install from before the key file). Shared
  * by the config adapter, the gateway's single-account check and the doctor.
  */
 export function listConfiguredAccountIds(cfg: OpenClawConfig | undefined): string[] {
@@ -131,7 +133,7 @@ export function listConfiguredAccountIds(cfg: OpenClawConfig | undefined): strin
     const ids = Object.keys(accounts as Record<string, unknown>)
     if (ids.length > 0) return ids
   }
-  return typeof section.apiKey === 'string' ? [AGENTCHAT_DEFAULT_ACCOUNT_ID] : []
+  return typeof section.apiKey === 'string' || typeof section.apiKeyFile === 'string' ? [AGENTCHAT_DEFAULT_ACCOUNT_ID] : []
 }
 
 /**
@@ -173,7 +175,7 @@ export function isApiKeyPresent(value: unknown): value is string {
 export function readAgentchatConfigField(
   cfg: OpenClawConfig | undefined,
   accountId: string,
-  field: 'apiKey' | 'apiBase' | 'agentHandle',
+  field: 'apiKey' | 'apiKeyFile' | 'apiBase' | 'agentHandle',
 ): string | undefined {
   const section = readChannelSection(cfg)
   const raw = readAccountRaw(section, accountId)
@@ -182,11 +184,20 @@ export function readAgentchatConfigField(
   return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
+/** A patch value of `undefined` removes the field (the key moved out of `apiKey`, an override reset). */
+function applyPatchInPlace(target: Record<string, unknown>, patch: Record<string, unknown>): void {
+  for (const [field, value] of Object.entries(patch)) {
+    if (value === undefined) delete target[field]
+    else target[field] = value
+  }
+}
+
 /**
  * Shared writer for both the non-interactive `setup.applyAccountConfig`
  * adapter and the interactive wizard. Maintains the same flat-vs-accounts
  * invariant: default account uses flat form iff no `accounts` key is present;
- * named accounts always nest under `accounts.<id>`.
+ * named accounts always nest under `accounts.<id>`. A field patched to
+ * `undefined` is removed, not left as an empty slot.
  */
 export function applyAgentchatAccountPatch(
   cfg: OpenClawConfig | undefined,
@@ -203,7 +214,7 @@ export function applyAgentchatAccountPatch(
       : {}
 
   if (accountId === AGENTCHAT_DEFAULT_ACCOUNT_ID && !section.accounts) {
-    Object.assign(section, patch)
+    applyPatchInPlace(section, patch)
   } else {
     const accounts: Record<string, unknown> = {
       ...((section.accounts as Record<string, unknown> | undefined) ?? {}),
@@ -212,7 +223,9 @@ export function applyAgentchatAccountPatch(
       typeof accounts[accountId] === 'object' && accounts[accountId] !== null
         ? (accounts[accountId] as Record<string, unknown>)
         : {}
-    accounts[accountId] = { ...prevAccount, ...patch }
+    const nextAccount = { ...prevAccount }
+    applyPatchInPlace(nextAccount, patch)
+    accounts[accountId] = nextAccount
     section.accounts = accounts
   }
 

@@ -162,6 +162,36 @@ function pointsAtUs(entry: Record<string, unknown>, apiBase: string, apiKey: str
 }
 
 /**
+ * Whether the hosted tools would authenticate with `envKey` (the
+ * `AGENTCHAT_API_KEY` a process has) rather than the account's `apiKey`.
+ * OpenClaw hands plugins the env-substituted config, so our entry's
+ * `${AGENTCHAT_API_KEY}` template arrives as `Bearer <envKey>`: an entry
+ * that is ours with `envKey` and not with `apiKey` reads the variable; so
+ * does the unsubstituted template, and so would the entry setup or
+ * `openclaw doctor --fix` adds where there is none. A bearer that is the
+ * account's key written out, a disabled entry, and a hand-written entry on
+ * another credential do not read it — never a refusal for those.
+ */
+export function toolsUseOtherKey(cfg: unknown, apiBase: string, apiKey: string, envKey: string | undefined): boolean {
+  if (envKey === undefined || envKey === apiKey.trim()) return false
+  const withAccount = describeMcpEntry(cfg, apiBase, apiKey)
+  const withEnv = describeMcpEntry(cfg, apiBase, envKey)
+  if (withAccount === 'disabled') return false
+  if (withAccount === 'missing') return true
+  if (withEnv !== 'ours') return false
+  // Ours with both keys: the bearer is the template (or absent) — it resolves to the variable.
+  return withAccount !== 'ours' || bearerIsTemplateOrAbsent(cfg)
+}
+
+function bearerIsTemplateOrAbsent(cfg: unknown): boolean {
+  const entry = agentchatEntry(cfg)
+  const headers = entry && isRecord(entry.headers) ? entry.headers : undefined
+  if (!headers) return true
+  const auth = headerValues(headers, 'Authorization')[0]
+  return auth === undefined || (typeof auth === 'string' && auth.includes(`\${${API_KEY_ENV}}`))
+}
+
+/**
  * Whether the `mcp.servers.agentchat` entry names this client:
  * - `current` — one `X-AgentChat-Client: openclaw` (any other header, a
  *   version header included, is the entry's business and left alone);

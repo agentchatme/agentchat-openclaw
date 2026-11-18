@@ -26,6 +26,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import {
+  readOpenClawConfigPathFromEnv,
   readOpenClawProfileFromEnv,
   readOpenClawStateDirFromEnv,
   readOpenClawWorkspaceDirFromEnv,
@@ -61,6 +62,13 @@ export function resolveOpenClawStateDir(): string {
   if (override) return expandUserPath(override)
   const profile = readOpenClawProfileFromEnv()
   return path.join(os.homedir(), profile ? `.openclaw-${profile}` : '.openclaw')
+}
+
+/** OpenClaw's config file: `$OPENCLAW_CONFIG_PATH`, else `<state dir>/openclaw.json`. */
+export function resolveOpenClawConfigPath(): string {
+  const override = readOpenClawConfigPathFromEnv()
+  if (override) return expandUserPath(override)
+  return path.join(resolveOpenClawStateDir(), 'openclaw.json')
 }
 
 /** OpenClaw's default agent workspace: `$OPENCLAW_WORKSPACE_DIR`, else `<state dir>/workspace`. */

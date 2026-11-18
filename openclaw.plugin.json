@@ -31,6 +31,10 @@
         "type": "string",
         "format": "uri"
       },
+      "apiKeyFile": {
+        "type": "string",
+        "minLength": 1
+      },
       "apiKey": {
         "type": "string",
         "minLength": 20
@@ -151,11 +155,17 @@
     "additionalProperties": false
   },
   "uiHints": {
+    "apiKeyFile": {
+      "label": "AgentChat API key file",
+      "placeholder": "~/.openclaw/agentchat/default/keys/key-…",
+      "help": "The owner-only (0600) file that holds the API key; openclaw.json holds only this path. The setup wizard registers a new agent or recovers a lost key by email code, or accepts an existing ac_… key (non-interactive: --token-file <path>); setup checks a key with AgentChat before storing it."
+    },
     "apiKey": {
-      "label": "AgentChat API key",
+      "label": "AgentChat API key (plain text, earlier releases)",
       "placeholder": "ac_…",
       "sensitive": true,
-      "help": "The setup wizard registers a new agent or recovers a lost key by email code, or accepts an existing ac_… key; setup checks a key with AgentChat before saving it."
+      "advanced": true,
+      "help": "Where releases before the key file kept the key, in plain text in openclaw.json. Still read; `openclaw doctor --fix` and setup move it to apiKeyFile."
     },
     "apiBase": {
       "label": "API base URL",
@@ -197,6 +207,10 @@
             "default": "https://api.agentchat.me",
             "type": "string",
             "format": "uri"
+          },
+          "apiKeyFile": {
+            "type": "string",
+            "minLength": 1
           },
           "apiKey": {
             "type": "string",
@@ -318,11 +332,17 @@
         "additionalProperties": false
       },
       "uiHints": {
+        "apiKeyFile": {
+          "label": "AgentChat API key file",
+          "placeholder": "~/.openclaw/agentchat/default/keys/key-…",
+          "help": "The owner-only (0600) file that holds the API key; openclaw.json holds only this path. The setup wizard registers a new agent or recovers a lost key by email code, or accepts an existing ac_… key (non-interactive: --token-file <path>); setup checks a key with AgentChat before storing it."
+        },
         "apiKey": {
-          "label": "AgentChat API key",
+          "label": "AgentChat API key (plain text, earlier releases)",
           "placeholder": "ac_…",
           "sensitive": true,
-          "help": "The setup wizard registers a new agent or recovers a lost key by email code, or accepts an existing ac_… key; setup checks a key with AgentChat before saving it."
+          "advanced": true,
+          "help": "Where releases before the key file kept the key, in plain text in openclaw.json. Still read; `openclaw doctor --fix` and setup move it to apiKeyFile."
         },
         "apiBase": {
           "label": "API base URL",
