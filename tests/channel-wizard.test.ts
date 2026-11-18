@@ -54,6 +54,8 @@ import {
 } from '../src/channel-account.js'
 import { PACKAGE_VERSION } from '../src/version.js'
 import { testKey } from './helpers/keys.js'
+import { readAgentchatApiKey } from '../src/channel-key.js'
+import { apiKeyFilePathFor } from '../src/credentials/key-file.js'
 
 const KEY_PASTED = testKey('abcdef0123456789abcd')
 const KEY_EXISTING = testKey('0123456789abcdef0123')
@@ -276,8 +278,17 @@ function prepare(cfg: unknown, prompter: unknown, credentialValues: Record<strin
 }
 
 type Prepared = { cfg: unknown; credentialValues: Record<string, string> }
+/** A config field; `apiKey` is the key the account runs with — read from the key file the config names. */
 const field = (result: unknown, name: 'apiKey' | 'agentHandle' | 'apiBase') =>
-  readAgentchatConfigField((result as Prepared).cfg as never, 'default', name)
+  name === 'apiKey' ? readAgentchatApiKey((result as Prepared).cfg as never, 'default') : readAgentchatConfigField((result as Prepared).cfg as never, 'default', name)
+/** The config never holds the key itself: only the path of its owner-only key file. */
+function expectKeyFileOnly(cfg: unknown, apiKey: string): void {
+  expect(readAgentchatConfigField(cfg as never, 'default', 'apiKey')).toBeUndefined()
+  const file = readAgentchatConfigField(cfg as never, 'default', 'apiKeyFile')
+  expect(file).toBe(apiKeyFilePathFor('default', apiKey))
+  expect(JSON.stringify(cfg)).not.toContain(apiKey)
+  if (process.platform !== 'win32') expect(fs.statSync(file!).mode & 0o777).toBe(0o600)
+}
 
 /** The register prompts before the first call: menu, intro, email, handle, display name. */
 const registerOpening = (email = 'alice@example.com', handle = 'alice', displayName = ''): Scripted[] => [
@@ -385,6 +396,8 @@ describe('agentchatSetupWizard.prepare — register', () => {
     const result = await prepare(freshCfg, s.prompter)
 
     expect(field(result, 'apiKey')).toBe(KEY_REGISTERED)
+    // Stored at once — AgentChat issues a key once — in its own owner-only file; the config names the file (T6-F09).
+    expectKeyFileOnly((result as Prepared).cfg, KEY_REGISTERED)
     expect(field(result, 'agentHandle')).toBe('alice')
     expect((result as Prepared).credentialValues).toEqual({ token: KEY_REGISTERED, _agentchatJustRegistered: '1' })
     expect(api.seen.map((r) => `${r.method} ${r.path}`)).toEqual(['POST /v1/register', 'POST /v1/register/verify', 'POST /v1/register/verify'])
@@ -733,7 +746,8 @@ describe('agentchatSetupWizard.credentials — a key is checked before it is sav
   it('a pasted key AgentChat accepts is saved with the handle it belongs to', async () => {
     const api = server([me('alice')])
     const cfg = (await credential.applySet!({ cfg: freshCfg, accountId: 'default', credentialValues: {}, value: KEY_PASTED, resolvedValue: KEY_PASTED })) as never
-    expect(readAgentchatConfigField(cfg, 'default', 'apiKey')).toBe(KEY_PASTED)
+    expect(readAgentchatApiKey(cfg, 'default')).toBe(KEY_PASTED)
+    expectKeyFileOnly(cfg, KEY_PASTED)
     expect(readAgentchatConfigField(cfg, 'default', 'agentHandle')).toBe('alice')
     expect((cfg as { mcp: { servers: { agentchat: { url: string } } } }).mcp.servers.agentchat.url).toBe(`${API}/mcp`)
     expect(api.seen.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /v1/agents/me'])
@@ -765,21 +779,23 @@ describe('agentchatSetupWizard.credentials — a key is checked before it is sav
     server([new TypeError('fetch failed')])
     const before = applyAgentchatAccountPatch(freshCfg, 'default', { apiKey: KEY_EXISTING, agentHandle: 'alice' })
     const after = (await credential.applySet!({ cfg: before, accountId: 'default', credentialValues: {}, value: KEY_PASTED, resolvedValue: KEY_PASTED })) as never
-    expect(readAgentchatConfigField(after, 'default', 'apiKey')).toBe(KEY_PASTED)
+    expect(readAgentchatApiKey(after, 'default')).toBe(KEY_PASTED)
+    expectKeyFileOnly(after, KEY_PASTED)
     expect(readAgentchatConfigField(after, 'default', 'agentHandle')).toBeUndefined()
   })
 
   it('a 5xx is no verdict on the key: it is saved for the runtime to try, never refused', async () => {
     server([json(503, { code: 'SERVICE_UNAVAILABLE', message: 'Service unavailable' })])
     const after = (await credential.applySet!({ cfg: freshCfg, accountId: 'default', credentialValues: {}, value: KEY_PASTED, resolvedValue: KEY_PASTED })) as never
-    expect(readAgentchatConfigField(after, 'default', 'apiKey')).toBe(KEY_PASTED)
+    expect(readAgentchatApiKey(after, 'default')).toBe(KEY_PASTED)
   })
 
   it('the key in AGENTCHAT_API_KEY ("Use it?" → yes) is checked and saved the same way; a turned-away one is not', async () => {
     process.env.AGENTCHAT_API_KEY = KEY_PASTED
     server([me('alice'), unauthorized()])
     const accepted = (await credential.applyUseEnv!({ cfg: freshCfg, accountId: 'default' })) as never
-    expect(readAgentchatConfigField(accepted, 'default', 'apiKey')).toBe(KEY_PASTED)
+    expect(readAgentchatApiKey(accepted, 'default')).toBe(KEY_PASTED)
+    expectKeyFileOnly(accepted, KEY_PASTED)
     expect(readAgentchatConfigField(accepted, 'default', 'agentHandle')).toBe('alice')
 
     const rejected = await credential.applyUseEnv!({ cfg: freshCfg, accountId: 'default' })

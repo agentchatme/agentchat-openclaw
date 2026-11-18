@@ -1,13 +1,21 @@
 /**
  * Placing the four things AgentChat authored where OpenClaw loads them.
  *
- * 1. **The key** — `AGENTCHAT_API_KEY=…` in OpenClaw's state-dir `.env`
- *    (`~/.openclaw/.env`, or `$OPENCLAW_STATE_DIR/.env`), which OpenClaw
- *    reads at start as its global environment fallback. The hosted MCP
- *    server's bearer header is a template on that variable, so the key is
- *    never written into `openclaw.json` as part of the tool declaration.
- *    (The channel's own `channels.agentchat.apiKey` keeps holding the key
- *    for the socket, as before.)
+ * 1. **The key** — stored once, in a `0600` key file only this plugin reads
+ *    (`../credentials/key-file.ts`); `openclaw.json` holds its path
+ *    (`channels.agentchat.apiKeyFile`), never the key. The hosted tools
+ *    need it too, and OpenClaw gives a static `mcp.servers` entry no other
+ *    way to a credential than its config text or the gateway's environment
+ *    (`headers` are plain strings with `${VAR}` substitution from the
+ *    process environment; SecretRefs are not accepted there — OpenClaw
+ *    `src/config/zod-schema.mcp-server.ts`). So `AGENTCHAT_API_KEY=…` is
+ *    also placed in OpenClaw's state-dir `.env` (`~/.openclaw/.env`, or
+ *    `$OPENCLAW_STATE_DIR/.env`), which OpenClaw loads at start, and the
+ *    tools' bearer header is a template on that variable. Known limit: the
+ *    gateway's environment is inherited by the commands its agent runs, so
+ *    the key is in their environment as well; taking it out needs the tools
+ *    connection held by this plugin, or OpenClaw support for secret
+ *    references on MCP headers.
  * 2. **The identity line** — the served `identity_line` (`GET /v1/texts`,
  *    `../integration/texts.ts`) in the workspace `AGENTS.md`, loaded into
  *    every turn (`../binding/agents-anchor.ts`). The callers fetch the text
@@ -25,8 +33,15 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
-import { API_KEY_ENV } from '../credentials/read-env.js'
-import { resolveBoundAgentId, resolveOpenClawDefaultAgentId, resolveOpenClawStateDir } from '../openclaw-layout.js'
+import { API_KEY_ENV, readApiKeyVariable } from '../credentials/read-env.js'
+import {
+  filesHoldingKey,
+  listAccountKeyFiles,
+  openClawConfigCopyPaths,
+  writeApiKeyFile,
+} from '../credentials/key-file.js'
+import { resolveBoundAgentId, resolveOpenClawConfigPath, resolveOpenClawDefaultAgentId, resolveOpenClawStateDir } from '../openclaw-layout.js'
+import { readAgentchatApiKey, type ConfiguredKey } from '../channel-key.js'
 import {
   CLIENT_HEADER,
   clientIdentityHeaders,
@@ -154,6 +169,56 @@ function stripQuotes(value: string): string {
   return value
 }
 
+// ─── the key: one key file, and the variable the hosted tools read ─────
+
+export interface StoredKey {
+  /** The key file (`0600`) the config's `apiKeyFile` names. */
+  readonly file: string
+  /** False when the file already held this key. */
+  readonly created: boolean
+  /** The state-dir `.env` line the hosted tools' bearer template reads; absent when it could not be written. */
+  readonly dotenv?: { readonly path: string; readonly changed: boolean }
+  /** Why the `.env` line could not be written (the key file was). */
+  readonly dotenvError?: string
+}
+
+/**
+ * Store an accepted key: the key file first (the copy this plugin reads),
+ * then the `.env` line for the hosted tools. Throws when the key file
+ * cannot be written — the caller must then not point the config at it;
+ * a failed `.env` write is reported, not thrown (the account still works
+ * for the socket; status and doctor say the tools lack the key).
+ */
+export function storeAccountKey(accountId: string, apiKey: string, options: { stateDir?: string } = {}): StoredKey {
+  const written = writeApiKeyFile(accountId, apiKey, options.stateDir)
+  try {
+    const dotenv = placeApiKeyInDotEnv(apiKey, options.stateDir)
+    return { file: written.path, created: written.created, dotenv }
+  } catch (err) {
+    return { file: written.path, created: written.created, dotenvError: describe(err) }
+  }
+}
+
+/**
+ * OpenClaw's own copies of `openclaw.json` (its backup ring, last-good and
+ * pre-update copies) that still hold `apiKey` in plain text — paths only.
+ * The plugin never edits them; the operator is told where they are.
+ */
+export function openClawCopiesHoldingKey(apiKey: string | undefined, configPath: string = resolveOpenClawConfigPath()): string[] {
+  if (!apiKey) return []
+  return filesHoldingKey(apiKey, openClawConfigCopyPaths(configPath))
+}
+
+/** One sentence naming OpenClaw's copies that still hold the key, or null. */
+export function describeKeyCopies(paths: readonly string[]): string | null {
+  if (paths.length === 0) return null
+  return (
+    `OpenClaw's own copies of openclaw.json still hold this key in plain text: ${paths.join(', ')} — ` +
+    'OpenClaw writes and rotates them (its config backup ring and last-good copy) and the plugin does not edit them; ' +
+    'delete them, or rotate the key (openclaw channels add agentchat → Recover) if anyone else could have read them'
+  )
+}
+
 // ─── the config side of placement (pure) ───────────────────────────────
 
 export interface IntegrationConfigParams {
@@ -209,7 +274,7 @@ export function resolvePlacementAgentId(cfg: object | undefined, accountId: stri
  */
 export function stripIntegrationConfig<TCfg extends object>(cfg: TCfg, accountId: string): { cfg: TCfg; changes: string[] } {
   const apiBase = readAgentchatConfigField(cfg as never, accountId, 'apiBase') ?? 'https://api.agentchat.me'
-  const apiKey = readAgentchatConfigField(cfg as never, accountId, 'apiKey')
+  const apiKey = readAgentchatApiKey(cfg as never, accountId)
   const { cfg: next, removed } = withoutHostedMcpEntry(cfg, apiBase, apiKey)
   return { cfg: next, changes: removed ? ['removed mcp.servers.agentchat'] : [] }
 }
@@ -217,9 +282,23 @@ export function stripIntegrationConfig<TCfg extends object>(cfg: TCfg, accountId
 /**
  * Undo the file side of placement: the identity line in the bound agent's
  * `AGENTS.md`, and — on delete — the key line in the state-dir `.env`.
- * Best-effort: a filesystem error never blocks a remove.
+ *
+ * The key file is NOT deleted: OpenClaw runs this before it commits the
+ * removal (`applyChannelAccountRemoval`, `src/channels/plugins/
+ * account-config-mutation.ts`) and may still refuse the write (its
+ * size-drop guard does on a small config), which would leave the config
+ * naming a key file that is gone — the only copy of the agent's key, lost.
+ * The report names the key file instead, with how to delete it or add the
+ * agent again from it; `.env` is a placement `openclaw doctor --fix`
+ * restores from the key file. Copies of the key OpenClaw keeps itself (its
+ * config backups) are named, never edited. Best-effort: a filesystem error
+ * never blocks a remove.
  */
-export function removeIntegrationFiles(cfg: object | undefined, accountId: string, options: { clearKey: boolean; stateDir?: string }): string[] {
+export function removeIntegrationFiles(
+  cfg: object | undefined,
+  accountId: string,
+  options: { clearKey: boolean; stateDir?: string; configPath?: string },
+): string[] {
   const changes: string[] = []
   try {
     const removed = removeAgentsAnchor({ cfg: cfg as never, agentId: resolvePlacementAgentId(cfg, accountId) })
@@ -228,12 +307,23 @@ export function removeIntegrationFiles(cfg: object | undefined, accountId: strin
     // best effort
   }
   if (options.clearKey) {
+    // Read before anything is removed: the copies are found by the key itself.
+    const apiKey = readAgentchatApiKey(cfg as never, accountId)
+    const files = listAccountKeyFiles(accountId, options.stateDir)
+    if (files.length > 0) {
+      changes.push(
+        `kept the API key file${files.length === 1 ? '' : 's'} ${files.join(', ')} — ${files.length === 1 ? 'it holds' : 'they hold'} the only copy of the key on this machine: ` +
+          `delete ${files.length === 1 ? 'it' : 'them'} when you no longer need the agent, or add it again with openclaw channels add agentchat --token-file <the file>`,
+      )
+    }
     try {
       const cleared = clearApiKeyInDotEnv(options.stateDir)
       if (cleared.changed) changes.push(`removed ${API_KEY_ENV} from ${cleared.path}`)
     } catch {
       // best effort
     }
+    const copies = describeKeyCopies(openClawCopiesHoldingKey(apiKey, options.configPath))
+    if (copies) changes.push(copies)
   }
   return changes
 }
@@ -336,7 +426,7 @@ export function placeIntegration<TCfg extends object>(params: PlaceParams<TCfg>)
       steps.push({
         name: 'key',
         status: key.changed ? 'changed' : 'ok',
-        detail: `${API_KEY_ENV} in ${key.path}${key.changed ? ` (a gateway started before this needs a restart, or a config reload, to resolve \${${API_KEY_ENV}})` : ''}`,
+        detail: `${API_KEY_ENV} in ${key.path}${key.changed ? ` (a gateway started before this needs a restart to resolve \${${API_KEY_ENV}})` : ''}`,
       })
     } catch (err) {
       steps.push({ name: 'key', status: 'failed', detail: `could not write ${API_KEY_ENV} to the OpenClaw .env: ${describe(err)}` })
@@ -410,8 +500,10 @@ export function checkPlacement<TCfg extends object>(params: {
   agentId?: string | undefined
   /** The channel account; a disabled one gets the re-enable remedy, never `channels add`. Defaults to `default`. */
   accountId?: string
+  /** Where the key came from (`resolveAgentchatApiKey`): adds the notices about a key in plain text, a loose key file, superseded key files. */
+  keySource?: ConfiguredKey
   stateDir?: string
-  /** The gateway's own environment (defaults to `process.env`). */
+  /** This process's environment (defaults to `process.env`). */
   env?: NodeJS.ProcessEnv
 }): PlacementCheck[] {
   const checks: PlacementCheck[] = []
@@ -423,26 +515,7 @@ export function checkPlacement<TCfg extends object>(params: {
   const reenable = isAgentchatAccountEnabled(params.cfg as never, accountId) ? undefined : agentchatReenableHint(params.cfg as never, accountId)
   const remedy = (forEnabled: string): string => reenable ?? forEnabled
 
-  // What this process can see: its own environment and the state-dir .env.
-  // It cannot see the running gateway's environment (OpenClaw loads the
-  // state-dir .env into every process, the CLI included), so the wording
-  // never claims to.
-  const inProcess = (env[API_KEY_ENV] ?? '').trim()
-  const inDotEnv = readApiKeyFromDotEnv(params.stateDir)
-  if (params.apiKey && (inProcess === params.apiKey || inDotEnv === params.apiKey)) {
-    checks.push({
-      name: 'key',
-      ok: true,
-      detail:
-        `${API_KEY_ENV} ${inProcess === params.apiKey ? 'present in this process' : `in ${dotEnvPath(params.stateDir)}`}; ` +
-        `a gateway started before the wizard placed it needs a restart (or a config reload) to resolve \${${API_KEY_ENV}}`,
-    })
-  } else if (inProcess || inDotEnv) {
-    checks.push({ name: 'key', ok: false, detail: `${API_KEY_ENV} differs from the configured channel key — ${remedy('re-run the wizard (openclaw channels add agentchat) to place the current key')}` })
-  } else {
-    checks.push({ name: 'key', ok: false, detail: `${API_KEY_ENV} is not placed — the hosted tools cannot authenticate; ${remedy('run openclaw channels add agentchat')}` })
-  }
-
+  checks.push(...checkKey({ ...params, env, accountId, remedy }))
   if (params.handle) {
     const anchor = hasAgentsAnchorFor({ cfg: params.cfg as never, handle: params.handle, text: params.identityLine, agentId: params.agentId })
     checks.push({
@@ -459,6 +532,90 @@ export function checkPlacement<TCfg extends object>(params: {
   checks.push({ name: 'manual', ok: true, detail: 'manual bundled as the agentchat skill' })
 
   checks.push(checkMcpEntry(params.cfg, params.apiBase, params.apiKey, remedy))
+  return checks
+}
+
+/**
+ * The key, as this process can see it: the account's key (from its key
+ * file), the `AGENTCHAT_API_KEY` this process has (OpenClaw loads the
+ * state-dir `.env` into every process, the CLI included, unless the shell
+ * already exports the variable) and the `.env` line itself. It cannot see
+ * the running gateway's environment, so the wording never claims to; the
+ * gateway checks its own at start (`gatewayKeyMismatch`).
+ */
+function checkKey(params: {
+  cfg: object | undefined
+  apiKey: string | undefined
+  keySource?: ConfiguredKey | undefined
+  accountId: string
+  stateDir?: string | undefined
+  env: NodeJS.ProcessEnv
+  remedy: (forEnabled: string) => string
+}): PlacementCheck[] {
+  const { apiKey, keySource, remedy } = params
+  const dotenv = dotEnvPath(params.stateDir)
+  if (!apiKey) {
+    const reason = keySource && !keySource.ok ? keySource.reason : 'no API key is configured'
+    return [{ name: 'key', ok: false, detail: `${reason} — ${remedy('run openclaw channels add agentchat')}` }]
+  }
+  const checks: PlacementCheck[] = []
+  const inProcess = readApiKeyVariable(params.env)
+  const inDotEnv = readApiKeyFromDotEnv(params.stateDir)
+  if (inProcess !== undefined && inProcess !== apiKey && inProcess !== inDotEnv) {
+    checks.push({
+      name: 'key',
+      ok: false,
+      detail:
+        `${API_KEY_ENV} is exported in this shell and is not the key channels.agentchat is configured with — a gateway started from ` +
+        'this shell would run the hosted AgentChat tools in its turns as another agent, and the gateway refuses to start the integration ' +
+        `that way: unset ${API_KEY_ENV} (\`unset ${API_KEY_ENV}\`) before starting the gateway`,
+    })
+  } else if (inDotEnv === undefined) {
+    checks.push({ name: 'key', ok: false, repair: true, detail: `${API_KEY_ENV} is not in ${dotenv}, so the hosted tools cannot authenticate — ${remedy('run openclaw doctor --fix (it places the account\'s key there), then restart the gateway')}` })
+  } else if (inDotEnv !== apiKey) {
+    checks.push({
+      name: 'key',
+      ok: false,
+      repair: true,
+      detail: `${dotenv} holds another ${API_KEY_ENV} than the account's key, so the hosted tools would act as another agent — ${remedy('run openclaw doctor --fix (it places the account\'s key there), then restart the gateway')}`,
+    })
+  } else {
+    checks.push({
+      name: 'key',
+      ok: true,
+      detail:
+        `${keySource?.ok && keySource.source === 'file' && keySource.file ? `the key is in ${keySource.file} (owner-only); ` : ''}` +
+        `${API_KEY_ENV} in ${dotenv} for the hosted tools; a gateway started before it was placed needs a restart to resolve \${${API_KEY_ENV}}`,
+    })
+  }
+  if (keySource?.ok) {
+    if (keySource.source === 'config') {
+      checks.push({
+        name: 'key',
+        ok: true,
+        notice: true,
+        repair: true,
+        detail:
+          keySource.fileProblem
+            ? `channels.agentchat.apiKeyFile (${keySource.file ?? '?'}) cannot be used (${keySource.fileProblem}), so the plain-text channels.agentchat.apiKey in openclaw.json stood in — openclaw doctor --fix stores the key in a key file again and removes apiKey`
+            : 'the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent\'s own file tools can read — openclaw doctor --fix moves it to an owner-only key file and leaves only its path (channels.agentchat.apiKeyFile)',
+      })
+    }
+    if (keySource.source === 'file' && keySource.loosePermissions && keySource.file) {
+      checks.push({ name: 'key', ok: true, notice: true, repair: true, detail: `the key file ${keySource.file} can be read by other users of this machine — openclaw doctor --fix makes it owner-only (0600)` })
+    }
+    const superseded = listAccountKeyFiles(params.accountId, params.stateDir).filter((file) => file !== keySource.file)
+    if (superseded.length > 0) {
+      checks.push({
+        name: 'key',
+        ok: true,
+        notice: true,
+        detail:
+          `${superseded.length === 1 ? 'a key file' : `${superseded.length} key files`} from an earlier setup ${superseded.length === 1 ? 'is' : 'are'} no longer used by the config: ${superseded.join(', ')} — ` +
+          'a key a setup stored that was then replaced (or a setup that was cancelled after the key was issued); delete what you do not need',
+      })
+    }
+  }
   return checks
 }
 

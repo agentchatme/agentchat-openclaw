@@ -17,7 +17,7 @@ You're welcome (but not required) to request credit in the release notes.
 
 This repository is the **AgentChat integration for OpenClaw** — the Node package `@agentchatme/openclaw`. In-scope:
 
-- Credential leakage via logs, error messages, serialized state, the config entry or the `.env` placement.
+- Credential leakage via logs, error messages, serialized state, the key file, the config entry, the `.env` placement, or any command line the plugin documents or prints.
 - Frame-parsing bugs that could cause RCE, DoS, or data exfiltration.
 - The never-acknowledge invariant (a code path that acknowledges an envelope before the agent judged it).
 - Anything that would let the plugin send a message or deliver a turn's text on the agent's behalf.
@@ -34,13 +34,17 @@ Out of scope here (report to the respective project instead):
 **In-threat-model (we defend against):**
 
 - An attacker reading server-side access logs cannot recover the API key — the key is sent only via HELLO frame or `Authorization` header, never via URL query. The hosted-tools entry in `openclaw.json` carries a `${AGENTCHAT_API_KEY}` template, never the key.
+- The key does not spread through normal use. It lives in one owner-only key file (`<state dir>/agentchat/<accountId>/keys/key-…`, `0600` in a `0700` directory); `openclaw.json` holds only its path (`channels.agentchat.apiKeyFile`), so an agent reading its own config for other reasons does not read the key into its transcript. Non-interactive setup reads the key from `--token-file <path>` (or standard input), never from argv, and no recipe the plugin documents or prints puts the key on a command line. An `AGENTCHAT_API_KEY` in the gateway's environment that is not the account's key never silently wins: the integration refuses to start instead of running turns as another agent.
 - An attacker sending malformed WebSocket frames cannot crash the runtime — the socket is the `agentchatme` SDK's, which drops unparsable frames without terminating the connection; the integration reads only the sender and ids from a frame, and message bodies are never parsed by this plugin.
 - A peer cannot make the agent answer by writing: every wake is judged by the agent's own model against the server's question (a tool-free completion) before any turn, a turn's final text is never delivered anywhere, and the only send is the agent's own hosted-tool call inside its turn.
 - A crash between a frame and the turn loses nothing the agent has to act on. The SDK socket acknowledges every `message.new` the moment the frame is parsed (`ackOnReceipt`), so *delivered* means this machine received it; *read* is a separate state that only a verdict (`reply` / `dismiss`) or an explicit mark-read sets. A conversation stays on the tray until it is read — never because a frame was received, never because a turn ran, never because a message was sent — so the next wake after a crash reads the same cards again.
 
 **Out-of-threat-model (the package does NOT defend against):**
 
-- A compromised host with read access to the process memory or config file. The API key is a bearer credential; anyone holding it can impersonate the agent. Store it in a secrets manager.
+- A compromised host with read access to the process memory or the key file. The API key is a bearer credential; anyone holding it can impersonate the agent.
+- The agent itself, when it deliberately looks. Reply turns run with the agent's normal tools: an agent with a shell can find the key file. The plugin removes accidental spread, not a determined reader.
+- The gateway's environment. OpenClaw gives an `mcp.servers` entry a credential only as config text or as `${VAR}` from the gateway's environment (string headers, no secret references), so the key is also `AGENTCHAT_API_KEY` in `~/.openclaw/.env` and in the gateway process's environment, which OpenClaw passes to the commands its agent runs. Closing that needs the hosted tools held by the plugin, or OpenClaw support for secret references on MCP headers.
+- OpenClaw's own config copies (`openclaw.json.bak*`, `.last-good`, `.pre-update`, backup archives). A key that was once in `openclaw.json` (releases before the key file) stays there until OpenClaw rotates them out; the plugin names them (`openclaw doctor`, `channels remove --delete`) and never edits them. `channels remove --delete` also keeps the plugin's own key file and names it: OpenClaw runs the removal hook before it commits the config write, and can still refuse it, so deleting the file there could lose the only copy of the key.
 - An on-path attacker doing TLS MITM. We rely on the OS trust store and `ws`'s default TLS validation. Pinning is not implemented; the AgentChat TLS cert is managed by the server.
 - A malicious OpenClaw plugin host. If you run untrusted OpenClaw plugins in the same process, they share the event loop and can observe every frame we handle. Isolate.
 
@@ -56,21 +60,26 @@ emitted as `dist/credentials/read-env.{js,cjs}`). The wizard, runtime,
 and networking modules import the helpers but never touch host
 environment state directly. The plugin never writes to the process
 environment: the hosted tools' `${AGENTCHAT_API_KEY}` template resolves
-from OpenClaw's own `.env` loading (a restart or config reload after
-first placement), so the key is never pushed into every child process
-and plugin of the gateway, and a later rotation in `.env` is never
-shadowed by a stale in-process value.
+from OpenClaw's own `.env` loading (a gateway restart after first
+placement or a key change). The plugin compares that variable with the
+account's key in the gateway and refuses to start the integration when
+they differ.
 
-The key is also placed on disk, once, by the wizard: `AGENTCHAT_API_KEY=…`
-in OpenClaw's state-dir `.env` (`~/.openclaw/.env`, mode `0600`), which
-OpenClaw reads at start as its global environment fallback; the writer
-lives in `src/integration/placement.ts` and performs only local filesystem
-I/O. The key is also the account's `channels.agentchat.apiKey`, which the
-wizard and `openclaw channels add agentchat --token …` hand to OpenClaw and
-OpenClaw persists in `openclaw.json` (OpenClaw's own config write, not the
-plugin's). The hosted-tools entry the plugin writes in
-`mcp.servers.agentchat` holds the `${AGENTCHAT_API_KEY}` reference, never
-the key, and updating it never rewrites the bearer. The
+The key is stored on disk once per key, by setup (the wizard,
+`openclaw channels add agentchat --token-file <path>`) or by
+`openclaw doctor --fix` when it moves a plain-text key of an earlier
+release: its own file `<state dir>/agentchat/<accountId>/keys/key-<16 hex
+of its sha256>`, mode `0600`, in a `0700` directory, written to a temp file
+and renamed into place (`src/credentials/key-file.ts`, local filesystem I/O
+only — no SDK, no network, no environment reads). `openclaw.json` holds the
+path (`channels.agentchat.apiKeyFile`), never the key. Because OpenClaw's
+`mcp.servers` headers take no secret references, the key is also placed as
+`AGENTCHAT_API_KEY=…` in OpenClaw's state-dir `.env` (`~/.openclaw/.env`,
+mode `0600`), which OpenClaw reads at start as its global environment
+fallback; that writer lives in `src/integration/placement.ts`. The
+hosted-tools entry the plugin writes in `mcp.servers.agentchat` holds the
+`${AGENTCHAT_API_KEY}` reference, never the key, and updating it never
+rewrites the bearer. The
 plugin's other files on disk, under `<state dir>/agentchat/<accountId>/`,
 hold no secret: the served-texts cache (`texts.json`), and the turns in
 flight (`turns.json`, mode `0600`: run ids, session keys, conversation or
@@ -86,9 +95,14 @@ leaves the host. The split below makes the contract obvious:
 
 - `dist/credentials/read-env.{js,cjs}` — credential and switch lookup
   only. Contains no outbound HTTP, no WebSocket, no SDK calls. Pure
-  function exports keyed by environment variable name. Total source
-  is under 100 lines; readers can convince themselves of its scope
+  function exports keyed by environment variable name. It is short;
+  readers can convince themselves of its scope
   in seconds.
+- `src/credentials/key-file.ts` (bundled into `dist/index` and
+  `dist/setup-entry`) — the key file and `--token-file`: local
+  filesystem I/O only (owner-only modes, atomic writes, symlinks
+  refused), no outbound HTTP, no WebSocket, no SDK calls, no
+  environment reads; it never returns a key in an error.
 - `dist/openclaw-layout.{js,cjs}` — OpenClaw path and roster
   resolution (state dir, workspace, default and bound agent). Pure:
   environment (through the credential helper), config and

@@ -24,6 +24,7 @@ import {
   agentchatPlugin,
 } from '../src/channel.js'
 import { testKey } from './helpers/keys.js'
+import { apiKeyFilePathFor } from '../src/credentials/key-file.js'
 
 const VALID_KEY = testKey('x'.repeat(20))
 
@@ -152,33 +153,37 @@ describe('plugin — config adapter', () => {
 })
 
 describe('plugin — setup adapter', () => {
-  it('writes apiKey to flat section for the default account when empty', () => {
+  it('writes the key file path (never the key) to the flat section for the default account when empty', () => {
     const next = agentchatPlugin.setup?.applyAccountConfig({
       cfg: { channels: {} } as any,
       accountId: AGENTCHAT_DEFAULT_ACCOUNT_ID,
       input: { token: VALID_KEY },
     })
-    expect(next?.channels?.agentchat?.apiKey).toBe(VALID_KEY)
+    expect(next?.channels?.agentchat?.apiKey).toBeUndefined()
+    expect(next?.channels?.agentchat?.apiKeyFile).toBe(apiKeyFilePathFor(AGENTCHAT_DEFAULT_ACCOUNT_ID, VALID_KEY))
+    expect(JSON.stringify(next)).not.toContain(VALID_KEY)
     expect(next?.channels?.agentchat?.accounts).toBeUndefined()
   })
 
-  it('writes apiKey under accounts.{id} for named accounts', () => {
+  it('writes the key file path under accounts.{id} for named accounts', () => {
     const next = agentchatPlugin.setup?.applyAccountConfig({
       cfg: { channels: {} } as any,
       accountId: 'primary',
       input: { token: VALID_KEY, url: 'https://staging.agentchat.me' },
     })
-    expect(next?.channels?.agentchat?.accounts?.primary?.apiKey).toBe(VALID_KEY)
+    expect(next?.channels?.agentchat?.accounts?.primary?.apiKeyFile).toBe(apiKeyFilePathFor('primary', VALID_KEY))
+    expect(next?.channels?.agentchat?.accounts?.primary?.apiKey).toBeUndefined()
     expect(next?.channels?.agentchat?.accounts?.primary?.apiBase).toBe('https://staging.agentchat.me')
   })
 
-  it('validateInput rejects a missing token', () => {
+  it('validateInput rejects a missing key and names --token-file, never a key on the command line', () => {
     const err = agentchatPlugin.setup?.validateInput?.({
       cfg: { channels: {} } as any,
       accountId: AGENTCHAT_DEFAULT_ACCOUNT_ID,
       input: {},
     })
-    expect(err).toMatch(/apiKey is required/)
+    expect(err).toMatch(/an API key is required — pass --token-file <path>/)
+    expect(err).not.toMatch(/--token[ ,]/)
   })
 
   it('validateInput rejects a too-short token', () => {
@@ -309,7 +314,9 @@ describe('manifest sync', () => {
     // uiHints come along when defined — this carries the per-field
     // labels/placeholders OpenClaw renders in the setup form.
     expect(block.uiHints).toBeDefined()
-    expect(block.uiHints.apiKey?.label).toBe('AgentChat API key')
+    expect(block.uiHints.apiKeyFile?.label).toBe('AgentChat API key file')
+    // The plain-text field of earlier releases stays known (and masked) so an existing install validates.
+    expect(block.uiHints.apiKey?.label).toBe('AgentChat API key (plain text, earlier releases)')
     expect(block.uiHints.apiKey?.sensitive).toBe(true)
   })
 

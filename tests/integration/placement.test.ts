@@ -100,7 +100,7 @@ describe('placeIntegration + checkPlacement', () => {
     expect(agents).toContain('agentchat__agentchat_inbox')
     expect(readApiKeyFromDotEnv(stateDir)).toBe(KEY)
     const lines = formatPlacement(result.steps)
-    expect(lines[0]).toMatch(/^✓ key: AGENTCHAT_API_KEY in .*\.env \(a gateway started before this needs a restart, or a config reload, to resolve \$\{AGENTCHAT_API_KEY\}\)/)
+    expect(lines[0]).toMatch(/^✓ key: AGENTCHAT_API_KEY in .*\.env \(a gateway started before this needs a restart to resolve \$\{AGENTCHAT_API_KEY\}\)/)
     expect(lines[1]).toMatch(/^✓ anchor: identity line for @alice in /)
     expect(lines[3]).toMatch(/^✓ mcp: hosted tools registered as mcp\.servers\.agentchat/)
   })
@@ -131,7 +131,8 @@ describe('placeIntegration + checkPlacement', () => {
   it('checkPlacement: before placement everything but the manual fails with a pointer to the fix', () => {
     const checks = checkPlacement({ cfg: cfgFor(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', stateDir, env: {} })
     expect(checks.map((c) => `${c.name}:${c.ok}`)).toEqual(['key:false', 'anchor:false', 'manual:true', 'mcp:false'])
-    expect(checks[0]!.detail).toMatch(/not placed/)
+    expect(checks[0]!.detail).toMatch(/AGENTCHAT_API_KEY is not in .*\.env, so the hosted tools cannot authenticate — run openclaw doctor --fix/)
+    expect(checks[0]!.repair).toBe(true)
     expect(checks[3]!.detail).toMatch(/openclaw doctor --fix/)
   })
 
@@ -140,14 +141,27 @@ describe('placeIntegration + checkPlacement', () => {
     const fromDotEnv = checkPlacement({ cfg: placed.cfg, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir, env: {} })
     expect(fromDotEnv.find((c) => c.name === 'key')).toMatchObject({
       ok: true,
-      detail: expect.stringMatching(/AGENTCHAT_API_KEY in .*\.env; a gateway started before the wizard placed it needs a restart \(or a config reload\) to resolve \$\{AGENTCHAT_API_KEY\}/),
+      detail: expect.stringMatching(/AGENTCHAT_API_KEY in .*\.env for the hosted tools; a gateway started before it was placed needs a restart to resolve \$\{AGENTCHAT_API_KEY\}/),
     })
+    // OpenClaw loads the state-dir .env into every process: the same key in this process is fine.
     const live = checkPlacement({ cfg: placed.cfg, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir, env: { AGENTCHAT_API_KEY: KEY } })
     expect(live.every((c) => c.ok)).toBe(true)
-    expect(live.find((c) => c.name === 'key')!.detail).toMatch(/present in this process; a gateway started before/)
     expect(live.find((c) => c.name === 'key')!.detail).not.toMatch(/gateway environment/)
+    // The account's key changed and .env still holds the old one.
     const stale = checkPlacement({ cfg: placed.cfg, handle: 'alice', apiKey: testKey('z'.repeat(24)), apiBase: 'https://api.agentchat.me', stateDir, env: { AGENTCHAT_API_KEY: KEY } })
-    expect(stale.find((c) => c.name === 'key')!.detail).toMatch(/differs from the configured channel key/)
+    expect(stale.find((c) => c.name === 'key')).toMatchObject({ ok: false, repair: true, detail: expect.stringMatching(/holds another AGENTCHAT_API_KEY than the account's key, so the hosted tools would act as another agent — run openclaw doctor --fix/) })
+  })
+
+  it('checkPlacement: an AGENTCHAT_API_KEY exported in this shell that is not the account key fails plainly, naming the fix (T6-F10)', () => {
+    const placed = placeIntegration({ cfg: cfgFor(), ...base() })
+    const other = testKey('o'.repeat(24))
+    const checks = checkPlacement({ cfg: placed.cfg, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir, env: { AGENTCHAT_API_KEY: other } })
+    const key = checks.find((c) => c.name === 'key')!
+    expect(key.ok).toBe(false)
+    expect(key.detail).toMatch(/AGENTCHAT_API_KEY is exported in this shell and is not the key channels\.agentchat is configured with — a gateway started from this shell would run the hosted AgentChat tools in its turns as another agent/)
+    expect(key.detail).toContain('unset AGENTCHAT_API_KEY')
+    expect(key.detail).not.toContain(other)
+    expect(key.detail).not.toContain(KEY)
   })
 
   it('checkPlacement: with the served line known, the anchor must hold exactly that text; without it, any of our blocks naming the handle passes', () => {

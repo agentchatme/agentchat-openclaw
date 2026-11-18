@@ -32,6 +32,8 @@ import { placeIntegration } from '../../src/integration/placement.js'
 import { loadIdentityLine } from '../../src/integration/texts.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
 import { testKey } from '../helpers/keys.js'
+import { readAgentchatApiKey } from '../../src/channel-key.js'
+import { apiKeyFilePathFor, removeAccountKeyFiles, writeApiKeyFile } from '../../src/credentials/key-file.js'
 import { hostedMcpServerEntry } from '../../src/integration/mcp.js'
 
 const KEY = ['ac', 'd'.repeat(24)].join('_')
@@ -57,15 +59,62 @@ describe('doctor adapter', () => {
     expect(loadIdentityLine).not.toHaveBeenCalled()
   })
 
+  /** An install from this release on: the config names the key file, never the key. */
+  const keyFileCfg = () => {
+    removeAccountKeyFiles('default')
+    const stored = writeApiKeyFile('default', KEY)
+    return { agents: { defaults: { workspace } }, channels: { agentchat: { apiKeyFile: stored.path, agentHandle: 'alice' } } }
+  }
+
   it('is quiet once everything is placed and the key is in the environment', async () => {
-    const placed = placeIntegration({ cfg: cfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const placed = placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
     const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
     expect(warnings).toEqual([])
   })
 
+  it('an install whose key is in plain text in openclaw.json (an earlier release) is told so, and doctor --fix moves it to an owner-only key file (T6-F09)', async () => {
+    removeAccountKeyFiles('default')
+    const placed = placeIntegration({ cfg: cfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
+    expect(warnings).toEqual([
+      "[agentchat:default] key: the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent's own file tools can read — openclaw doctor --fix moves it to an owner-only key file and leaves only its path (channels.agentchat.apiKeyFile)",
+    ])
+    const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: {} })
+    const file = apiKeyFilePathFor('default', KEY)
+    expect(fixed.changes).toContain(`moved the API key out of openclaw.json: channels.agentchat.apiKey is now channels.agentchat.apiKeyFile = ${file} (owner-only, 0600)`)
+    const section = (fixed.config as { channels: { agentchat: Record<string, unknown> } }).channels.agentchat
+    expect(section.apiKey).toBeUndefined()
+    expect(section.apiKeyFile).toBe(file)
+    expect(JSON.stringify(fixed.config)).not.toContain(KEY)
+    expect(fs.readFileSync(file, 'utf8').trim()).toBe(KEY)
+    if (process.platform !== 'win32') expect(fs.statSync(file).mode & 0o777).toBe(0o600)
+    // The account still runs with the same key, now from the file; nothing more to say.
+    expect(readAgentchatApiKey(fixed.config as never, 'default')).toBe(KEY)
+    const after = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: fixed.config, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
+    expect(after).toEqual([])
+  })
+
+  it("doctor names OpenClaw's own config copies that still hold the moved key — paths only, never the key (T6-F15)", async () => {
+    const configPath = path.join(process.env.OPENCLAW_STATE_DIR!, 'openclaw.json')
+    fs.writeFileSync(`${configPath}.bak`, JSON.stringify({ channels: { agentchat: { apiKey: KEY } } }))
+    fs.writeFileSync(`${configPath}.last-good`, JSON.stringify({ channels: { agentchat: { apiKey: KEY } } }))
+    try {
+      const placed = placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+      const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain(`OpenClaw's own copies of openclaw.json still hold this key in plain text: ${configPath}.bak, ${configPath}.last-good`)
+      expect(warnings[0]).not.toContain(KEY)
+    } finally {
+      fs.rmSync(`${configPath}.bak`, { force: true })
+      fs.rmSync(`${configPath}.last-good`, { force: true })
+    }
+  })
+
   it('repairConfig adds mcp.servers.agentchat as a bearer template and the served identity line, reports both; a second run changes nothing', async () => {
-    const first = await agentchatDoctorAdapter.repairConfig!({ cfg: cfg() as never, doctorFixCommand: 'fix', env: {} })
+    fs.rmSync(path.join(process.env.OPENCLAW_STATE_DIR!, '.env'), { force: true })
+    const first = await agentchatDoctorAdapter.repairConfig!({ cfg: keyFileCfg() as never, doctorFixCommand: 'fix', env: {} })
     expect(first.changes).toEqual([
+      `placed the account's key as AGENTCHAT_API_KEY in ${path.join(process.env.OPENCLAW_STATE_DIR!, '.env')} for the hosted tools (restart the gateway: OpenClaw reads it only at start)`,
       `placed the identity line for @alice in ${path.join(workspace, 'AGENTS.md')}`,
       'added mcp.servers.agentchat → https://api.agentchat.me/mcp (bearer template on AGENTCHAT_API_KEY)',
     ])

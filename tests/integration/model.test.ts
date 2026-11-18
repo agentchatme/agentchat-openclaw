@@ -311,6 +311,17 @@ describe('turnReadiness / withTurnReadiness — a turn only when it can have the
     expect(turnReadiness({ cfg: substituted, apiBase, apiKey, env: { AGENTCHAT_API_KEY: apiKey } })).toEqual({ ready: true })
   })
 
+  it('our entry with a different key in this process is not ready: the turn would act as another agent, or on the old key after a rotation (T6-F10)', () => {
+    const other = testKey('o'.repeat(24))
+    const readiness = turnReadiness({ cfg: ours, apiBase, apiKey, env: { AGENTCHAT_API_KEY: other } })
+    expect(readiness.ready).toBe(false)
+    const reason = (readiness as { reason: string }).reason
+    expect(reason).toMatch(/AGENTCHAT_API_KEY in the gateway's environment is not the key channels\.agentchat is configured with/)
+    expect(reason).toMatch(/the key changed since the gateway started: OpenClaw reads ~\/\.openclaw\/\.env only when the gateway starts/)
+    expect(reason).not.toContain(other)
+    expect(reason).not.toContain(apiKey)
+  })
+
   it("a hand-written entry is the operator's and counts as ready", () => {
     const theirs = { mcp: { servers: { agentchat: { url: 'https://proxy.example/mcp', transport: 'streamable-http' } } } }
     expect(turnReadiness({ cfg: theirs, apiBase, apiKey, env: {} })).toEqual({ ready: true })

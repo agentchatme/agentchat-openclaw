@@ -123,6 +123,49 @@ describe('gateway.startAccount', () => {
     expect((status().lastDisconnect as { error: string }).error).toMatch(/one account per gateway/)
   })
 
+  describe('AGENTCHAT_API_KEY in the gateway environment that is not the account key (T6-F10)', () => {
+    const previous = process.env.AGENTCHAT_API_KEY
+    afterEach(() => {
+      if (previous === undefined) delete process.env.AGENTCHAT_API_KEY
+      else process.env.AGENTCHAT_API_KEY = previous
+    })
+
+    it('another key exported in the shell that started the gateway: the integration refuses to start, plainly — no socket, no gate, no turn acting as another agent', async () => {
+      const other = ['ac', 'o'.repeat(24)].join('_')
+      process.env.AGENTCHAT_API_KEY = other
+      const { ctx, log, status } = ctxFor({ channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } })
+      await agentchatGatewayAdapter.startAccount!(ctx as never)
+      expect(registerIntegration).not.toHaveBeenCalled()
+      expect(log.error).toHaveBeenCalledTimes(1)
+      const line = String(log.error.mock.calls[0]![0])
+      expect(line).toMatch(/integration not started — AGENTCHAT_API_KEY in the gateway's environment is not the key channels\.agentchat is configured with, so the hosted AgentChat tools in its turns would act as another agent/)
+      expect(line).toContain('unset AGENTCHAT_API_KEY')
+      expect(line).toContain('openclaw gateway restart')
+      expect(line).not.toContain(other)
+      expect(line).not.toContain(KEY)
+      expect(status()).toMatchObject({ running: false, connected: false, statusState: 'not-linked', lifecycle: 'blocked' })
+      expect((status().lastDisconnect as { error: string }).error).toMatch(/is not the key channels\.agentchat is configured with/)
+    })
+
+    it('the same key (OpenClaw loaded it from the state-dir .env) starts as usual', async () => {
+      process.env.AGENTCHAT_API_KEY = KEY
+      const { ctx, log } = ctxFor({ channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } })
+      await agentchatGatewayAdapter.startAccount!(ctx as never)
+      expect(registerIntegration).toHaveBeenCalledTimes(1)
+      expect(log.error).not.toHaveBeenCalled()
+    })
+  })
+
+  it('a key kept in plain text in openclaw.json (an earlier release) still starts, with one line pointing at doctor --fix (T6-F09 migration)', async () => {
+    const { ctx, log } = ctxFor({ channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } })
+    ;(ctx.account as { config: Record<string, unknown> }).config = { ...config(), apiKeySource: 'config' }
+    await agentchatGatewayAdapter.startAccount!(ctx as never)
+    expect(registerIntegration).toHaveBeenCalledTimes(1)
+    expect(log.warn.mock.calls.map((c) => String(c[0]))).toContain(
+      "[agentchat:default] the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent's own file tools can read — run `openclaw doctor --fix` to move it to an owner-only key file",
+    )
+  })
+
   it('AGENTCHAT_WAKE=off: no socket, no wakes, no turns; tools and manual stay placed', async () => {
     process.env.AGENTCHAT_WAKE = 'off'
     const { ctx, log, status } = ctxFor({ channels: { agentchat: { apiKey: KEY } } })
@@ -271,7 +314,7 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
     h.onBlocked!({ code: 1008, reason: 'Invalid token', retryInMs: 720_000 })
     expect(errorLines()).toHaveLength(1)
     expect(errorLines()[0]).toMatch(
-      /key rejected \(close 1008 Invalid token\) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted \(next HELLO in about 12 min\); rotate the key with openclaw channels add agentchat/,
+      /key rejected \(close 1008 Invalid token\) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted \(next HELLO in about 12 min\); store a new key with openclaw channels add agentchat \(Recover by email code, or --token-file <path>\), then restart the gateway so the hosted tools use it too/,
     )
     expect(status()).toMatchObject({ running: false, connected: false, statusState: 'not-linked', lifecycle: 'blocked' })
     expect((status().lastDisconnect as { error: string }).error).toBe('key rejected: close 1008 Invalid token')

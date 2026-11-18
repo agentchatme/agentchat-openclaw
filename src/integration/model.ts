@@ -45,7 +45,8 @@ import { readAgentChatCalls, watchRunUntilEnded, type AgentChatCalls, type RunEn
 import { describeMcpEntry } from './mcp.js'
 import { MCP_SERVER_NAME } from './turn.js'
 import { AGENTCHAT_CHANNEL_ID } from '../channel-account.js'
-import { API_KEY_ENV } from '../credentials/read-env.js'
+import { API_KEY_ENV, readApiKeyVariable } from '../credentials/read-env.js'
+import { gatewayKeyMismatch } from '../channel-key.js'
 
 export type { GateModelCall }
 
@@ -280,13 +281,16 @@ export function turnReadiness(params: { cfg: unknown; apiBase: string; apiKey: s
     case 'user_managed':
       return { ready: true }
     case 'ours': {
-      const value = env[API_KEY_ENV]
-      if (typeof value !== 'string' || value.trim().length === 0) {
+      const value = readApiKeyVariable(env)
+      if (value === undefined) {
         return {
           ready: false,
-          reason: `${API_KEY_ENV} is not set in the gateway process, so the hosted tools' bearer template cannot resolve — restart the gateway (or reload its config) once ~/.openclaw/.env carries it`,
+          reason: `${API_KEY_ENV} is not set in the gateway process, so the hosted tools' bearer template cannot resolve — restart the gateway once ~/.openclaw/.env carries it (OpenClaw reads it only when the gateway starts)`,
         }
       }
+      // The tools would act as whoever that variable's key is.
+      const mismatch = gatewayKeyMismatch(params.apiKey, value)
+      if (mismatch) return { ready: false, reason: mismatch }
       return { ready: true }
     }
   }
