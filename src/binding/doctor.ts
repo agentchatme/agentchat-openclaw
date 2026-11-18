@@ -81,8 +81,14 @@ export function moveKeyOutOfConfig(
     } catch (err) {
       warnings.push(`the plain-text ${path}.apiKey could not be moved to a key file (${err instanceof Error ? err.message : String(err)}); it stays in openclaw.json`)
     }
-  } else if (key.loosePermissions && key.file && tightenApiKeyFile(key.file)) {
-    changes.push(`made the key file ${key.file} owner-only (0600)`)
+  } else {
+    if (key.plainTextCopy) {
+      next = applyAgentchatAccountPatch(next, accountId, { apiKey: undefined })
+      changes.push(`removed the plain-text ${path}.apiKey from openclaw.json (the same key is in ${key.file ?? 'the key file'}, which stays in use)`)
+      const copies = describeKeyCopies(openClawCopiesHoldingKey(key.apiKey, options.configPath))
+      if (copies) warnings.push(copies)
+    }
+    if (key.loosePermissions && key.file && tightenApiKeyFile(key.file)) changes.push(`made the key file ${key.file} owner-only (0600)`)
   }
   // One `.env` variable for the hosted tools: with several accounts configured the integration refuses to start, and the line would flip between keys.
   if (options.placeDotEnv !== false && readApiKeyFromDotEnv(options.stateDir) !== key.apiKey) {

@@ -125,16 +125,18 @@ function hasConfiguredKey(cfg: OpenClawConfig | undefined, accountId: string): b
 
 /**
  * Store a key the person has (issued by register or recover, or entered
- * and accepted): its own owner-only key file plus the `.env` line for the
- * hosted tools, and the config patch that names the file — never the key.
+ * and accepted): its own owner-only key file, and the config patch that
+ * names the file — never the key. The `.env` line for the hosted tools is
+ * placed by `finalize`, so a wizard left before the end changes no `.env`.
  * A key file that cannot be written must not lose the key: the patch then
  * keeps it as the plain-text `apiKey` of earlier releases (doctor says so,
  * and `openclaw doctor --fix` moves it once the directory is writable).
  */
 function storeKeyPatch(accountId: string, apiKey: string): { patch: Record<string, unknown>; file?: string; problem?: string } {
   try {
-    const stored = storeAccountKey(accountId, apiKey)
-    return { patch: { apiKeyFile: stored.file, apiKey: undefined }, file: stored.file, ...(stored.dotenvError ? { problem: `AGENTCHAT_API_KEY could not be written to the OpenClaw .env: ${stored.dotenvError}` } : {}) }
+    // The key file only: the .env line is placed by finalize, with the config the wizard returns.
+    const stored = storeAccountKey(accountId, apiKey, { dotenv: 'never' })
+    return { patch: { apiKeyFile: stored.file, apiKey: undefined }, file: stored.file }
   } catch (err) {
     return { patch: { apiKey, apiKeyFile: undefined }, problem: `the key file could not be written (${err instanceof Error ? err.message : String(err)}); the key is kept in openclaw.json for now — run \`openclaw doctor --fix\` once the directory is writable` }
   }

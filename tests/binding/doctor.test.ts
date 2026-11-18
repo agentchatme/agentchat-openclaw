@@ -94,6 +94,18 @@ describe('doctor adapter', () => {
     expect(after).toEqual([])
   })
 
+  it('the same key left in plain text next to the key file is flagged, and doctor --fix removes it (the file stays in use)', async () => {
+    const withCopy = keyFileCfg()
+    ;(withCopy.channels.agentchat as Record<string, unknown>).apiKey = KEY
+    const placed = placeIntegration({ cfg: withCopy, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
+    expect(warnings).toEqual(['[agentchat:default] key: the key file is in use, and the same key is still in plain text in openclaw.json (channels.agentchat.apiKey) — openclaw doctor --fix removes it'])
+    const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: {} })
+    expect(fixed.changes).toContain(`removed the plain-text channels.agentchat.apiKey from openclaw.json (the same key is in ${apiKeyFilePathFor('default', KEY)}, which stays in use)`)
+    expect(JSON.stringify(fixed.config)).not.toContain(KEY)
+    expect(readAgentchatApiKey(fixed.config as never, 'default')).toBe(KEY)
+  })
+
   it("doctor names OpenClaw's own config copies that still hold the moved key — paths only, never the key (T6-F15)", async () => {
     const configPath = path.join(process.env.OPENCLAW_STATE_DIR!, 'openclaw.json')
     fs.writeFileSync(`${configPath}.bak`, JSON.stringify({ channels: { agentchat: { apiKey: KEY } } }))

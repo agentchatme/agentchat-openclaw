@@ -745,9 +745,14 @@ describe('agentchatSetupWizard.credentials — a key is checked before it is sav
 
   it('a pasted key AgentChat accepts is saved with the handle it belongs to', async () => {
     const api = server([me('alice')])
+    const dotenv = path.join(process.env.OPENCLAW_STATE_DIR!, '.env')
+    fs.writeFileSync(dotenv, 'AGENTCHAT_API_KEY=the-key-before\n')
     const cfg = (await credential.applySet!({ cfg: freshCfg, accountId: 'default', credentialValues: {}, value: KEY_PASTED, resolvedValue: KEY_PASTED })) as never
     expect(readAgentchatApiKey(cfg, 'default')).toBe(KEY_PASTED)
     expectKeyFileOnly(cfg, KEY_PASTED)
+    // The .env line waits for finalize: a wizard left before the end changes no .env.
+    expect(fs.readFileSync(dotenv, 'utf8')).toBe('AGENTCHAT_API_KEY=the-key-before\n')
+    fs.rmSync(dotenv, { force: true })
     expect(readAgentchatConfigField(cfg, 'default', 'agentHandle')).toBe('alice')
     expect((cfg as { mcp: { servers: { agentchat: { url: string } } } }).mcp.servers.agentchat.url).toBe(`${API}/mcp`)
     expect(api.seen.map((r) => `${r.method} ${r.path}`)).toEqual(['GET /v1/agents/me'])

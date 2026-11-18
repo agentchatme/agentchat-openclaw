@@ -121,6 +121,8 @@ export type AgentchatChannelConfig = Omit<PersistedChannelConfig, 'apiKey'> & {
   readonly apiKey: string
   /** Where the key came from; set by `parseChannelConfig`. */
   readonly apiKeySource?: ApiKeySource
+  /** The key file is used and the same key is still in plain text as `apiKey`. */
+  readonly apiKeyPlainTextCopy?: boolean
 }
 
 /**
@@ -147,5 +149,5 @@ export function parseChannelConfig(input: unknown): AgentchatChannelConfig {
   const parsed = agentchatChannelConfigSchema.parse(input)
   const key = resolveConfiguredApiKey(parsed)
   if (!key.ok) throw new Error(key.reason)
-  return { ...parsed, apiKey: key.apiKey, apiKeySource: key.source }
+  return { ...parsed, apiKey: key.apiKey, apiKeySource: key.source, ...(key.plainTextCopy ? { apiKeyPlainTextCopy: true } : {}) }
 }

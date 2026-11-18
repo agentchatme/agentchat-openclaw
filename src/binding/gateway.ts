@@ -47,7 +47,7 @@ import { readAgentChatCalls } from '../integration/run.js'
 import { getPluginRuntime } from '../integration/runtime-holder.js'
 import { removeOldStateFiles } from '../integration/state.js'
 import { refreshIdentityLine } from '../integration/placement.js'
-import { NIX_MODE_ERROR_CODE, clientIdentityText, refreshHostedMcpEntry, type ConfigMutator } from '../integration/mcp.js'
+import { NIX_MODE_ERROR_CODE, clientIdentityText, refreshHostedMcpEntry, toolsUseOtherKey, type ConfigMutator } from '../integration/mcp.js'
 import {
   createRuntimeModelCall,
   createRuntimeTurnStarter,
@@ -234,14 +234,15 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     // Two different keys: every turn would act as another agent (or, after
     // a key change, on the old key, without tools) while health stays
     // green. Refused, in plain words; a restart from a clean shell fixes it.
-    const keyMismatch = gatewayKeyMismatch(config.apiKey, readApiKeyVariable())
+    const envKey = readApiKeyVariable()
+    const keyMismatch = toolsUseOtherKey(ctx.cfg, config.apiBase, config.apiKey, envKey) ? gatewayKeyMismatch(config.apiKey, envKey) : null
     if (keyMismatch) {
       ctx.log?.error?.(`[agentchat:${ctx.accountId}] integration not started — ${keyMismatch}`)
       ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastDisconnect: { at: Date.now(), error: keyMismatch } }, 'blocked'))
       await waitUntilAbort(ctx.abortSignal, () => undefined)
       return
     }
-    if (config.apiKeySource === 'config') {
+    if (config.apiKeySource === 'config' || config.apiKeyPlainTextCopy) {
       ctx.log?.warn?.(
         `[agentchat:${ctx.accountId}] the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent's own file tools can read — run \`openclaw doctor --fix\` to move it to an owner-only key file`,
       )

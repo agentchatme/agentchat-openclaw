@@ -241,10 +241,16 @@ function say(runtime: unknown, level: 'log' | 'error', line: string): void {
   if (typeof fn === 'function') fn(line)
 }
 
-/** Store an accepted key (key file + the `.env` line); a key file that cannot be written is a refusal (nothing saved). */
-function storeKeyForSetup(accountId: string, apiKey: string, runtime: unknown): { ok: true } | { ok: false; refusal: string } {
+/**
+ * Store an accepted key before the config write: the key file, and the
+ * `.env` line only as a first placement (`'if-absent'`) — a `.env` already
+ * holding a key is rewritten after the write (`placeIntegration`), so a
+ * write that never lands cannot leave it naming a key the config does not.
+ * A key file that cannot be written is a refusal (nothing saved).
+ */
+function storeKeyForSetup(accountId: string, apiKey: string, runtime: unknown, dotenv: 'if-absent' | 'never' = 'if-absent'): { ok: true } | { ok: false; refusal: string } {
   try {
-    const stored = storeAccountKey(accountId, apiKey)
+    const stored = storeAccountKey(accountId, apiKey, { dotenv })
     if (stored.dotenvError) say(runtime, 'error', `[agentchat:${accountId}] could not write AGENTCHAT_API_KEY to ${dotEnvPath()}: ${stored.dotenvError}`)
     return { ok: true }
   } catch (err) {
@@ -257,6 +263,18 @@ function storeKeyForSetup(accountId: string, apiKey: string, runtime: unknown): 
 
 function accountKeyFilePath(accountId: string, apiKey: string): string {
   return apiKeyFilePathFor(accountId, apiKey)
+}
+
+/** `--url` that is not an http(s) URL; null when absent or fine. */
+function apiBaseProblem(url: unknown): string | null {
+  if (typeof url !== 'string' || url.length === 0) return null
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return 'apiBase must be http(s) — e.g. https://api.agentchat.me'
+  } catch {
+    return 'apiBase is not a valid URL'
+  }
+  return null
 }
 
 type BaseSetupAdapter = NonNullable<ChannelPlugin<AgentchatResolvedAccount>['setup']>
@@ -309,17 +327,7 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
     if (key.apiKey.length < MIN_API_KEY_LENGTH) {
       return `apiKey looks too short (got ${key.apiKey.length} chars, expect ≥${MIN_API_KEY_LENGTH})`
     }
-    if (typeof input.url === 'string' && input.url.length > 0) {
-      try {
-        const parsed = new URL(input.url)
-        if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-          return 'apiBase must be http(s) — e.g. https://api.agentchat.me'
-        }
-      } catch {
-        return 'apiBase is not a valid URL'
-      }
-    }
-    return null
+    return apiBaseProblem(input.url)
   },
 
   /**
@@ -332,12 +340,13 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
    */
   async prepareAccountConfigInput({ cfg, accountId, input, runtime }) {
     const key = keyOfInput(input)
-    if (key === null || 'error' in key || key.apiKey.length < MIN_API_KEY_LENGTH) return input
+    // validateInput runs after this hook: what it will refuse stores nothing here.
+    if (key === null || 'error' in key || key.apiKey.length < MIN_API_KEY_LENGTH || apiBaseProblem(input.url) !== null) return input
     const apiKey = key.apiKey
     // The base this write will hold: `--url`, else the one already configured.
     const apiBase =
       typeof input.url === 'string' && input.url.length > 0 ? input.url : readAgentchatConfigField(cfg, accountId, 'apiBase')
-    keyAskedBeforeWrite = keyDigest(apiKey)
+    keyAskedBeforeWrite = null
     let handle: string | undefined
     try {
       const result = await checkApiKey(apiKey, { apiBase })
@@ -347,11 +356,12 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
     } catch (err) {
       say(runtime, 'error', `[agentchat:${accountId}] no verdict on the API key, saving it for the runtime to try: ${err instanceof Error ? err.message : String(err)}`)
     }
-    // The key file and the .env line NOW, before OpenClaw writes the config
-    // and re-reads it: the config written next names the key file, and the
-    // hosted tools entry references ${AGENTCHAT_API_KEY}.
+    // The key file NOW, before OpenClaw writes the config that names it (and
+    // the .env line when this is its first placement: the hosted tools entry
+    // written next references ${AGENTCHAT_API_KEY}).
     const stored = storeKeyForSetup(accountId, apiKey, runtime)
     if (!stored.ok) return { ...input, keyRefusal: stored.refusal }
+    keyAskedBeforeWrite = keyDigest(apiKey)
     return handle ? { ...input, agentHandle: handle } : input
   },
 
@@ -396,19 +406,31 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
     const via = pending?.via ?? (fromInput !== null && !('error' in fromInput) ? fromInput.via : undefined)
     const apiKey = pending?.apiKey ?? (fromInput !== null && !('error' in fromInput) ? fromInput.apiKey : undefined) ?? readAgentchatApiKey(cfg, accountId)
     if (!apiKey) return
-    // An OpenClaw path that ran neither hook before the write: store the key
-    // now, so the key file the config names exists.
+    const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
+    let handle = handleOf((input as AgentchatSetupInput).agentHandle) ?? handleOf(readAgentchatConfigField(cfg, accountId, 'agentHandle'))
+    // An OpenClaw path that ran neither hook before the write: the config
+    // names a key file that is not there yet. Ask AgentChat first, then store.
     const keyFile = readAgentchatConfigField(cfg, accountId, 'apiKeyFile')
     if (keyFile && !readAgentchatApiKey(cfg, accountId)) {
-      const stored = storeKeyForSetup(accountId, apiKey, runtime)
+      let accepted = false
+      try {
+        const result = await checkApiKey(apiKey, { apiBase })
+        if (!result.ok) {
+          say(runtime, 'error', `${keyRefusal(result).replace('\n', ' ')} The config names ${keyFile}, which does not exist — run \`openclaw channels add agentchat\` again with a key AgentChat accepts`)
+          return
+        }
+        accepted = true
+        handle ??= result.handle
+      } catch (err) {
+        say(runtime, 'error', `[agentchat:${accountId}] no verdict on the API key, saving it for the runtime to try: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      const stored = storeKeyForSetup(accountId, apiKey, runtime, 'never')
       if (!stored.ok) {
         say(runtime, 'error', `[agentchat:${accountId}] ${stored.refusal.replace('\n', ' ')} — run \`openclaw channels add agentchat\` again`)
         return
       }
-      say(runtime, 'log', `[agentchat:${accountId}] stored the key in ${keyFile}; restart the gateway (\`openclaw gateway restart\`) so the channel reads it`)
+      say(runtime, 'log', `[agentchat:${accountId}] stored the key in ${keyFile}${accepted ? '' : ' (not checked)'}; restart the gateway (\`openclaw gateway restart\`) so the channel reads it`)
     }
-    const apiBase = readAgentchatConfigField(cfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
-    let handle = handleOf((input as AgentchatSetupInput).agentHandle) ?? handleOf(readAgentchatConfigField(cfg, accountId, 'agentHandle'))
     if (!handle) {
       // An OpenClaw without `prepareAccountConfigInput`: learn the handle now
       // for the identity line; the config gets it from `openclaw doctor --fix`.
@@ -519,14 +541,17 @@ async function refuseRejectedKey(prevCfg: Cfg, nextCfg: Cfg, accountId: string, 
   if (check !== null && !check.ok) {
     say(runtime, 'error', keyRefusal(check))
     pendingKeys.delete(accountId)
+    keyAskedBeforeWrite = null
     // OpenClaw's commands end on a cancelled setup without writing.
     throw new WizardCancelledError('AgentChat did not accept the API key')
   }
   if (!pendingNamed) return
+  // The key file before the write; the .env line after it (placeIntegration), or now as a first placement.
   const stored = storeKeyForSetup(accountId, apiKey, runtime)
   if (!stored.ok) {
     say(runtime, 'error', stored.refusal)
     pendingKeys.delete(accountId)
+    keyAskedBeforeWrite = null
     throw new WizardCancelledError('the API key could not be stored')
   }
   keyAskedBeforeWrite = keyDigest(apiKey)

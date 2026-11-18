@@ -165,6 +165,12 @@ describe('which key an account runs with', () => {
     expect(account.parseError).toMatch(/are different keys/)
   })
 
+  it('the key file in use and the same key still in plain text: used from the file, and flagged as a copy to remove', () => {
+    const stored = writeApiKeyFile('default', KEY)
+    expect(resolveConfiguredApiKey({ apiKeyFile: stored.path, apiKey: KEY })).toMatchObject({ ok: true, source: 'file', plainTextCopy: true })
+    expect(parseChannelConfig({ apiKeyFile: stored.path, apiKey: KEY })).toMatchObject({ apiKey: KEY, apiKeySource: 'file', apiKeyPlainTextCopy: true })
+  })
+
   it('a key file that cannot be read: the account is not configured and says why (or the plain-text key stands in, with the problem reported)', () => {
     const gone = path.join(scratch, 'gone')
     const account = resolveAgentchatAccount({ channels: { agentchat: { apiKeyFile: gone } } } as never, 'default')
@@ -249,6 +255,45 @@ describe('openclaw channels add agentchat --token-file <path> — the key never 
     expect(refusal).not.toContain(KEY)
     expect(agentchatSetupAdapter.validateInput!({ cfg: {} as never, accountId: 'default', input: { tokenFile: tokenFile(), token: KEY } })).toBe('pass the API key once: --token-file <path> or --token, not both')
     expect(listAccountKeyFiles('default')).toEqual([])
+  })
+
+  it('a rotation: before the write only the new key file is stored; .env still holds the old key until the config naming the new one is written', async () => {
+    vi.mocked(checkApiKey).mockResolvedValue({ ok: true, handle: 'alice' })
+    const old = writeApiKeyFile('default', OTHER)
+    fs.writeFileSync(dotenv(), `AGENTCHAT_API_KEY=${OTHER}\n`)
+    const prevCfg = { channels: { agentchat: { apiKeyFile: old.path, agentHandle: 'alice' } } }
+    const { runtime } = cliRuntime()
+    const input = { tokenFile: tokenFile() }
+    const prepared = await agentchatSetupAdapter.prepareAccountConfigInput!({ cfg: prevCfg as never, accountId: 'default', input, runtime })
+    const next = agentchatPlugin.setup!.applyAccountConfig({ cfg: prevCfg as never, accountId: 'default', input: prepared })
+    await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: next, accountId: 'default', runtime })
+    // A write that never lands here (refused, cancelled) leaves .env and the config agreeing on the old key.
+    expect(fs.readFileSync(dotenv(), 'utf8')).toBe(`AGENTCHAT_API_KEY=${OTHER}\n`)
+    expect(readApiKeyFile(apiKeyFilePathFor('default', KEY))).toMatchObject({ ok: true, apiKey: KEY })
+    expect(fs.readFileSync(old.path, 'utf8').trim()).toBe(OTHER)
+    await agentchatPlugin.setup!.afterAccountConfigWritten!({ previousCfg: prevCfg as never, cfg: next, accountId: 'default', input: prepared, runtime })
+    expect(fs.readFileSync(dotenv(), 'utf8')).toBe(`AGENTCHAT_API_KEY=${KEY}\n`)
+  })
+
+  it('what validateInput will refuse (a bad --url) is refused before anything is asked or stored', async () => {
+    const { runtime } = cliRuntime()
+    const input = { tokenFile: tokenFile(), url: 'ftp://agentchat.example' }
+    const prepared = await agentchatSetupAdapter.prepareAccountConfigInput!({ cfg: {} as never, accountId: 'default', input, runtime })
+    expect(checkApiKey).not.toHaveBeenCalled()
+    expect(agentchatSetupAdapter.validateInput!({ cfg: {} as never, accountId: 'default', input: prepared })).toBe('apiBase must be http(s) — e.g. https://api.agentchat.me')
+    expect(listAccountKeyFiles('default')).toEqual([])
+    expect(fs.existsSync(dotenv())).toBe(false)
+  })
+
+  it('a path that ran no hook before the write: the after-hook asks AgentChat before it stores the key the config names, and stores nothing it turns away', async () => {
+    vi.mocked(checkApiKey).mockResolvedValue({ ok: false, code: 'UNAUTHORIZED', message: 'Invalid API key' })
+    const { runtime, lines } = cliRuntime()
+    const input = { tokenFile: tokenFile() }
+    const cfg = { channels: { agentchat: { apiKeyFile: apiKeyFilePathFor('default', KEY) } } }
+    await agentchatPlugin.setup!.afterAccountConfigWritten!({ previousCfg: {} as never, cfg: cfg as never, accountId: 'default', input, runtime })
+    expect(listAccountKeyFiles('default')).toEqual([])
+    expect(fs.existsSync(dotenv())).toBe(false)
+    expect(lines[0]).toEqual({ level: 'error', line: expect.stringMatching(/^AgentChat did not accept the API key \(UNAUTHORIZED\): Invalid API key .*does not exist — run `openclaw channels add agentchat` again/) })
   })
 
   it('reads the key file once per process (OpenClaw calls several hooks with the same input; - is standard input, which can be read once)', () => {

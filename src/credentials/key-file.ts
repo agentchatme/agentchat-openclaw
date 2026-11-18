@@ -144,7 +144,27 @@ export function writeApiKeyFile(accountId: string, apiKey: string, stateDir?: st
     throw err
   }
   chmodQuietly(file, 0o600)
+  syncDirectory(dir)
   return { path: file, created: true }
+}
+
+/**
+ * Make the rename durable: a config written right after this may name the
+ * file, and a power loss must not leave it naming one that is gone (it can
+ * be the only copy of a key just issued). Best effort; Windows cannot open
+ * a directory for fsync.
+ */
+function syncDirectory(dir: string): void {
+  if (process.platform === 'win32') return
+  let fd: number | undefined
+  try {
+    fd = fs.openSync(dir, 'r')
+    fs.fsyncSync(fd)
+  } catch {
+    // best effort
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd)
+  }
 }
 
 /** Tighten a key file to `0600` (doctor --fix). True when the mode changed. */

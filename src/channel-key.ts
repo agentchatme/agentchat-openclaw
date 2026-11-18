@@ -30,6 +30,8 @@ export type ConfiguredKey =
       readonly loosePermissions?: boolean
       /** `apiKeyFile` is set but unusable; the plain-text `apiKey` was used instead. */
       readonly fileProblem?: string
+      /** The key file is used, and the same key is still in plain text as `apiKey` (a move that has not removed it yet). */
+      readonly plainTextCopy?: boolean
     }
   | { readonly ok: false; readonly reason: string; readonly missing: boolean }
 
@@ -53,7 +55,7 @@ export function resolveConfiguredApiKey(record: { readonly apiKey?: unknown; rea
             'run `openclaw channels add agentchat` with the key you mean (it stores it in a key file and removes apiKey)',
         }
       }
-      return { ok: true, apiKey: read.apiKey, source: 'file', file: read.path, loosePermissions: read.loosePermissions }
+      return { ok: true, apiKey: read.apiKey, source: 'file', file: read.path, loosePermissions: read.loosePermissions, ...(inline ? { plainTextCopy: true } : {}) }
     }
     if (inline && isApiKeyPresent(inline)) return { ok: true, apiKey: inline, source: 'config', file: read.path, fileProblem: read.reason }
     return {
@@ -89,14 +91,18 @@ export function readAgentchatApiKey(cfg: Parameters<typeof readChannelSection>[0
  * An exported variable must never silently win over the configured
  * identity, so this is a refusal, in plain words; null when the variable
  * is unset (the readiness check reports that case) or the same key.
+ * Whether the tools entry reads that variable at all is the caller's
+ * question (`toolsUseOtherKey` in `./integration/mcp.ts`).
  */
 export function gatewayKeyMismatch(apiKey: string, envKey: string | undefined): string | null {
   if (envKey === undefined || envKey === apiKey.trim()) return null
   return (
     'AGENTCHAT_API_KEY in the gateway\'s environment is not the key channels.agentchat is configured with, so the hosted ' +
-    'AgentChat tools in its turns would act as another agent (or on an old key). Not started. Either the shell that started ' +
-    'the gateway exports AGENTCHAT_API_KEY — unset it there (`unset AGENTCHAT_API_KEY`) — or the key changed since the gateway ' +
-    'started: OpenClaw reads ~/.openclaw/.env only when the gateway starts. Then restart the gateway (`openclaw gateway restart`).'
+    'AgentChat tools in its turns would act as another agent (or on an old key). Not started. Where it comes from: an export ' +
+    'in the shell that started the gateway — unset it there (`unset AGENTCHAT_API_KEY`); or the key changed since the gateway ' +
+    'started — OpenClaw reads ~/.openclaw/.env only when the gateway starts, and `openclaw doctor --fix` places the account\'s ' +
+    'key there; or a gateway installed as a service keeps its own copy of .env — if `openclaw gateway restart` warns that the ' +
+    'daemon will use the old environment, reinstall it (`openclaw gateway install --force`). Then restart the gateway (`openclaw gateway restart`).'
   )
 }
 

@@ -44,6 +44,7 @@ import { resolveBoundAgentId, resolveOpenClawConfigPath, resolveOpenClawDefaultA
 import { readAgentchatApiKey, type ConfiguredKey } from '../channel-key.js'
 import {
   CLIENT_HEADER,
+  toolsUseOtherKey,
   clientIdentityHeaders,
   clientIdentityText,
   describeMcpEntry,
@@ -183,14 +184,27 @@ export interface StoredKey {
 }
 
 /**
- * Store an accepted key: the key file first (the copy this plugin reads),
- * then the `.env` line for the hosted tools. Throws when the key file
- * cannot be written — the caller must then not point the config at it;
- * a failed `.env` write is reported, not thrown (the account still works
- * for the socket; status and doctor say the tools lack the key).
+ * Store an accepted key: the key file (the copy this plugin reads), and —
+ * per `dotenv` — the `.env` line for the hosted tools. The key file is safe
+ * to write before a config write that may not happen (its name follows from
+ * the key, so no config's file changes); the `.env` line is not (a `.env`
+ * holding a key the config does not name makes the gateway refuse to
+ * start), so callers before a write pass `'if-absent'` (a first placement:
+ * no account to contradict) or `'never'` and place it once the config is
+ * written (`placeIntegration`). Throws when the key file cannot be written —
+ * the caller must then not point the config at it; a failed `.env` write is
+ * reported, not thrown.
  */
-export function storeAccountKey(accountId: string, apiKey: string, options: { stateDir?: string } = {}): StoredKey {
+export function storeAccountKey(
+  accountId: string,
+  apiKey: string,
+  options: { stateDir?: string; dotenv?: 'always' | 'if-absent' | 'never' } = {},
+): StoredKey {
   const written = writeApiKeyFile(accountId, apiKey, options.stateDir)
+  const mode = options.dotenv ?? 'always'
+  if (mode === 'never' || (mode === 'if-absent' && readApiKeyFromDotEnv(options.stateDir) !== undefined)) {
+    return { file: written.path, created: written.created }
+  }
   try {
     const dotenv = placeApiKeyInDotEnv(apiKey, options.stateDir)
     return { file: written.path, created: written.created, dotenv }
@@ -545,6 +559,7 @@ export function checkPlacement<TCfg extends object>(params: {
  */
 function checkKey(params: {
   cfg: object | undefined
+  apiBase: string
   apiKey: string | undefined
   keySource?: ConfiguredKey | undefined
   accountId: string
@@ -561,7 +576,7 @@ function checkKey(params: {
   const checks: PlacementCheck[] = []
   const inProcess = readApiKeyVariable(params.env)
   const inDotEnv = readApiKeyFromDotEnv(params.stateDir)
-  if (inProcess !== undefined && inProcess !== apiKey && inProcess !== inDotEnv) {
+  if (inProcess !== undefined && inProcess !== inDotEnv && toolsUseOtherKey(params.cfg, params.apiBase, apiKey, inProcess)) {
     checks.push({
       name: 'key',
       ok: false,
@@ -599,6 +614,15 @@ function checkKey(params: {
           keySource.fileProblem
             ? `channels.agentchat.apiKeyFile (${keySource.file ?? '?'}) cannot be used (${keySource.fileProblem}), so the plain-text channels.agentchat.apiKey in openclaw.json stood in — openclaw doctor --fix stores the key in a key file again and removes apiKey`
             : 'the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent\'s own file tools can read — openclaw doctor --fix moves it to an owner-only key file and leaves only its path (channels.agentchat.apiKeyFile)',
+      })
+    }
+    if (keySource.source === 'file' && keySource.plainTextCopy) {
+      checks.push({
+        name: 'key',
+        ok: true,
+        notice: true,
+        repair: true,
+        detail: `the key file is in use, and the same key is still in plain text in openclaw.json (channels.agentchat.apiKey) — openclaw doctor --fix removes it`,
       })
     }
     if (keySource.source === 'file' && keySource.loosePermissions && keySource.file) {

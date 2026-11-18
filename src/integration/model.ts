@@ -42,7 +42,7 @@ import type { GateModelCall } from 'agentchatme'
 
 import { getPluginRuntime } from './runtime-holder.js'
 import { readAgentChatCalls, watchRunUntilEnded, type AgentChatCalls, type RunEndStatus } from './run.js'
-import { describeMcpEntry } from './mcp.js'
+import { describeMcpEntry, toolsUseOtherKey } from './mcp.js'
 import { MCP_SERVER_NAME } from './turn.js'
 import { AGENTCHAT_CHANNEL_ID } from '../channel-account.js'
 import { API_KEY_ENV, readApiKeyVariable } from '../credentials/read-env.js'
@@ -273,6 +273,11 @@ export function readLiveConfig(fallback: unknown, runtime: () => PluginRuntime |
 export function turnReadiness(params: { cfg: unknown; apiBase: string; apiKey: string; env?: NodeJS.ProcessEnv; live?: boolean }): TurnReadiness {
   const env = params.env ?? process.env
   const restart = params.live === false ? ', then restart the gateway (this gateway cannot re-read its config while running)' : ''
+  // The tools would act as whoever the variable's key is (the live config is env-substituted, so check this first).
+  const envKey = readApiKeyVariable(env)
+  if (toolsUseOtherKey(params.cfg, params.apiBase, params.apiKey, envKey)) {
+    return { ready: false, reason: gatewayKeyMismatch(params.apiKey, envKey) ?? 'AGENTCHAT_API_KEY is not the account key' }
+  }
   switch (describeMcpEntry(params.cfg, params.apiBase, params.apiKey)) {
     case 'missing':
       return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is not in the gateway config — run \`openclaw doctor --fix\`${restart}` }
@@ -281,16 +286,13 @@ export function turnReadiness(params: { cfg: unknown; apiBase: string; apiKey: s
     case 'user_managed':
       return { ready: true }
     case 'ours': {
-      const value = readApiKeyVariable(env)
+      const value = envKey
       if (value === undefined) {
         return {
           ready: false,
           reason: `${API_KEY_ENV} is not set in the gateway process, so the hosted tools' bearer template cannot resolve — restart the gateway once ~/.openclaw/.env carries it (OpenClaw reads it only when the gateway starts)`,
         }
       }
-      // The tools would act as whoever that variable's key is.
-      const mismatch = gatewayKeyMismatch(params.apiKey, value)
-      if (mismatch) return { ready: false, reason: mismatch }
       return { ready: true }
     }
   }
