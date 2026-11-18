@@ -121,6 +121,8 @@ describe('gateway.startAccount', () => {
     expect(String(log.error.mock.calls[0]![0])).toMatch(/integration not started — 2 AgentChat accounts are configured \(a, b\); this release runs one account per gateway/)
     expect(status()).toMatchObject({ running: false, connected: false, lifecycle: 'blocked' })
     expect((status().lastDisconnect as { error: string }).error).toMatch(/one account per gateway/)
+    // `lastError`: what `openclaw channels status` prints for a blocked account (the reason, not only "health:blocked").
+    expect(status().lastError).toMatch(/2 AgentChat accounts are configured \(a, b\); this release runs one account per gateway/)
   })
 
   describe('AGENTCHAT_API_KEY in the gateway environment that is not the account key (T6-F10)', () => {
@@ -145,6 +147,11 @@ describe('gateway.startAccount', () => {
       expect(line).not.toContain(KEY)
       expect(status()).toMatchObject({ running: false, connected: false, statusState: 'not-linked', lifecycle: 'blocked' })
       expect((status().lastDisconnect as { error: string }).error).toMatch(/is not the key channels\.agentchat is configured with/)
+      // One sentence there (OpenClaw prints it twice: on the account line and under Warnings); the log has the full text.
+      expect(status().lastError).toBe(
+        "AGENTCHAT_API_KEY in the gateway's environment is not the account's key, so the integration did not start (its turns would act as another agent): " +
+          'unset it in the shell that started the gateway, or after a key change run `openclaw doctor --fix`; then restart the gateway (`openclaw gateway restart`). The gateway log says more.',
+      )
     })
 
     it('the same key (OpenClaw loaded it from the state-dir .env) starts as usual', async () => {
@@ -314,10 +321,14 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
     h.onBlocked!({ code: 1008, reason: 'Invalid token', retryInMs: 720_000 })
     expect(errorLines()).toHaveLength(1)
     expect(errorLines()[0]).toMatch(
-      /key rejected \(close 1008 Invalid token\) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted \(next HELLO in about 12 min\); store a new key with openclaw channels add agentchat \(Recover by email code, or --token-file <path>\), then restart the gateway so the hosted tools use it too/,
+      /key rejected \(close 1008 Invalid token\) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted \(next HELLO in about 12 min\); store a new key with openclaw channels add agentchat \(Recover by email code, or --token-file <path>\), then restart the gateway \(openclaw gateway restart\) so the hosted tools use it too/,
     )
     expect(status()).toMatchObject({ running: false, connected: false, statusState: 'not-linked', lifecycle: 'blocked' })
     expect((status().lastDisconnect as { error: string }).error).toBe('key rejected: close 1008 Invalid token')
+    // The reason in the field `openclaw channels status` prints for a blocked account.
+    expect(status().lastError).toBe(
+      'the server refused the API key (close 1008 Invalid token); store a new key with openclaw channels add agentchat, then restart the gateway (openclaw gateway restart)',
+    )
     const after = setStatusCalls()
 
     // Two retries rejected again, then one that fails on the network instead: debug lines only, the status does not move.
@@ -341,7 +352,7 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
     h.onStateChanged!('connecting', 'backoff')
     h.onStateChanged!('ready', 'connecting')
     h.onConnected!(5)
-    expect(status()).toMatchObject({ running: true, connected: true, statusState: 'linked', lifecycle: 'ready' })
+    expect(status()).toMatchObject({ running: true, connected: true, statusState: 'linked', lifecycle: 'ready', lastError: null })
     expect(log.info.mock.calls.some((c) => /key accepted again — blocked cleared/.test(String(c[0])))).toBe(true)
     h.onError!(new Error('handshake timeout: no hello.ok within 15000ms'))
     expect(warnLines()).toEqual([expect.stringMatching(/socket error: handshake timeout/)])

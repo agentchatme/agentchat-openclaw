@@ -50,6 +50,7 @@ import {
   splitEnabledFromRaw,
 } from './channel-account.js'
 import { agentchatSetupWizard } from './channel.wizard.js'
+import { openclawCommand } from './cli-command.js'
 import {
   agentchatChannelConfigSchema,
   parseChannelConfig,
@@ -74,6 +75,7 @@ import {
   restoreIdentityLine,
   storeAccountKey,
   describeKeyCopies,
+  keyAtRestWarnings,
   openClawCopiesHoldingKey,
   dotEnvPath,
 } from './integration/placement.js'
@@ -190,7 +192,7 @@ function handleOf(value: unknown): string | undefined {
 function keyRefusal(check: Extract<KeyCheck, { ok: false }>): string {
   return [
     `AgentChat did not accept the API key (${check.code}): ${check.message}`,
-    'The key was not saved. Run `openclaw channels add agentchat` to register a new agent or recover a lost key (email code).',
+    `The key was not saved. Run \`${openclawCommand('channels add agentchat')}\` to register a new agent or recover a lost key (email code).`,
   ].join('\n')
 }
 
@@ -321,7 +323,7 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
     if (typeof refusal === 'string' && refusal.length > 0) return refusal
     const key = keyOfInput(input as AgentchatSetupInput)
     if (key === null) {
-      return `an API key is required — pass ${TOKEN_FILE_HINT}, or run \`openclaw channels add agentchat\` to register a new agent or recover a lost key (email code)`
+      return `an API key is required — pass ${TOKEN_FILE_HINT}, or run \`${openclawCommand('channels add agentchat')}\` to register a new agent or recover a lost key (email code)`
     }
     if ('error' in key) return key.error
     if (key.apiKey.length < MIN_API_KEY_LENGTH) {
@@ -416,7 +418,7 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
       try {
         const result = await checkApiKey(apiKey, { apiBase })
         if (!result.ok) {
-          say(runtime, 'error', `${keyRefusal(result).replace('\n', ' ')} The config names ${keyFile}, which does not exist — run \`openclaw channels add agentchat\` again with a key AgentChat accepts`)
+          say(runtime, 'error', `${keyRefusal(result).replace('\n', ' ')} The config names ${keyFile}, which does not exist — run \`${openclawCommand('channels add agentchat')}\` again with a key AgentChat accepts`)
           return
         }
         accepted = true
@@ -426,10 +428,10 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
       }
       const stored = storeKeyForSetup(accountId, apiKey, runtime, 'never')
       if (!stored.ok) {
-        say(runtime, 'error', `[agentchat:${accountId}] ${stored.refusal.replace('\n', ' ')} — run \`openclaw channels add agentchat\` again`)
+        say(runtime, 'error', `[agentchat:${accountId}] ${stored.refusal.replace('\n', ' ')} — run \`${openclawCommand('channels add agentchat')}\` again`)
         return
       }
-      say(runtime, 'log', `[agentchat:${accountId}] stored the key in ${keyFile}${accepted ? '' : ' (not checked)'}; restart the gateway (\`openclaw gateway restart\`) so the channel reads it`)
+      say(runtime, 'log', `[agentchat:${accountId}] stored the key in ${keyFile}${accepted ? '' : ' (not checked)'}; restart the gateway (\`${openclawCommand('gateway restart')}\`) so the channel reads it`)
     }
     if (!handle) {
       // An OpenClaw without `prepareAccountConfigInput`: learn the handle now
@@ -438,7 +440,7 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
         const result = await checkApiKey(apiKey, { apiBase })
         if (result.ok) {
           handle = result.handle
-          say(runtime, 'log', `[agentchat:${accountId}] authenticated as @${handle}; run \`openclaw doctor --fix\` to persist channels.agentchat.agentHandle`)
+          say(runtime, 'log', `[agentchat:${accountId}] authenticated as @${handle}; run \`${openclawCommand('doctor --fix')}\` to persist channels.agentchat.agentHandle`)
         } else {
           say(runtime, 'error', `[agentchat:${accountId}] api key did not pass live check (${result.code}): ${result.message}`)
           return
@@ -453,12 +455,14 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
       const placed = placeIntegration({ cfg, handle, apiKey, apiBase, identityLine, accountId })
       if (keyFile) say(runtime, 'log', `[agentchat:${accountId}] ✓ key file: ${keyFile} (owner-only); openclaw.json holds only its path`)
       for (const line of formatPlacement(placed.steps.filter((s) => s.name !== 'mcp'))) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
-      say(runtime, 'log', `[agentchat:${accountId}] ✓ config: agentHandle and mcp.servers.agentchat written with the account (restart the gateway — \`openclaw gateway restart\` — so the hosted tools resolve \${AGENTCHAT_API_KEY}: OpenClaw reads .env only at start)`)
+      say(runtime, 'log', `[agentchat:${accountId}] ✓ config: agentHandle and mcp.servers.agentchat written with the account (restart the gateway — \`${openclawCommand('gateway restart')}\` — so the hosted tools resolve \${AGENTCHAT_API_KEY}: OpenClaw reads .env only at start)`)
     } catch (err) {
       say(runtime, 'error', `[agentchat:${accountId}] placement failed: ${err instanceof Error ? err.message : String(err)}`)
     }
     // The plain-text key of an earlier release left openclaw.json in this
-    // write; OpenClaw's own config copies may still hold it.
+    // write; OpenClaw's own config copies may still hold it. This hook runs
+    // after OpenClaw's one config write for the add, so the files named are
+    // the ones that hold it now.
     const previousPlain = readAgentchatConfigField(previousCfg, accountId, 'apiKey')
     if (previousPlain && !readAgentchatConfigField(cfg, accountId, 'apiKey')) {
       say(runtime, 'log', `[agentchat:${accountId}] removed the plain-text channels.agentchat.apiKey from openclaw.json`)
@@ -478,7 +482,7 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
 type Cfg = import('./binding/openclaw-types.js').OpenClawConfig
 
 /**
- * `channels remove agentchat` (disable): the config side only — keep the
+ * `channels remove --channel agentchat` (disable): the config side only — keep the
  * key, drop the plugin's own hosted-tools entry, set `enabled: false`.
  * Pure: OpenClaw validates and persists what this returns; the files go in
  * `lifecycle.onAccountConfigChanged`, after the patch has been checked.
@@ -488,7 +492,7 @@ export function disableAccountConfig(cfg: Cfg, accountId: string): Cfg {
   return setAccountEnabledInConfigSection({ cfg: stripped, sectionKey: AGENTCHAT_CHANNEL_ID, accountId, enabled: false, allowTopLevel: true })
 }
 
-/** `channels remove agentchat --delete`: the config side only — the account and the plugin's own hosted-tools entry go. */
+/** `channels remove --channel agentchat --delete`: the config side only — the account and the plugin's own hosted-tools entry go. */
 export function deleteAccountConfig(cfg: Cfg, accountId: string): Cfg {
   const stripped = stripIntegrationConfig(cfg, accountId).cfg
   return deleteAccountFromConfigSection({ cfg: stripped, sectionKey: AGENTCHAT_CHANNEL_ID, accountId, clearBaseFields: ['apiKey', 'apiKeyFile', 'apiBase', 'agentHandle'] })
@@ -591,7 +595,7 @@ export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResol
     }
     const handle = handleOf(readAgentchatConfigField(nextCfg, accountId, 'agentHandle'))
     if (!handle) {
-      say(runtime, 'log', `[agentchat:${accountId}] agentHandle not in config — run \`openclaw doctor --fix\` to learn it from the key and place the identity line`)
+      say(runtime, 'log', `[agentchat:${accountId}] agentHandle not in config — run \`${openclawCommand('doctor --fix')}\` to learn it from the key and place the identity line`)
       return
     }
     const apiKey = readAgentchatApiKey(nextCfg, accountId)
@@ -600,7 +604,7 @@ export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResol
     const restored = restoreIdentityLine(nextCfg, accountId, handle, identityLine)
     if (restored.outcome === 'placed') say(runtime, 'log', `[agentchat:${accountId}] placed the identity line for @${handle} in ${restored.path}`)
     else if (restored.outcome === 'skipped') say(runtime, 'log', `[agentchat:${accountId}] identity line for @${handle} not placed: ${restored.detail ?? 'the served text is not available'}`)
-    else if (restored.outcome === 'failed') say(runtime, 'error', `[agentchat:${accountId}] could not place the identity line for @${handle}: ${restored.detail ?? 'unknown error'} — run \`openclaw doctor --fix\` after fixing the path`)
+    else if (restored.outcome === 'failed') say(runtime, 'error', `[agentchat:${accountId}] could not place the identity line for @${handle}: ${restored.detail ?? 'unknown error'} — run \`${openclawCommand('doctor --fix')}\` after fixing the path`)
   },
 
   async onAccountRemoved({ prevCfg, accountId, runtime }) {
@@ -678,7 +682,7 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
       return AGENTCHAT_DEFAULT_ACCOUNT_ID
     },
 
-    // `openclaw channels remove agentchat` → disable; `--delete` → delete.
+    // `openclaw channels remove --channel agentchat` → disable; `--delete` → delete.
     // OpenClaw routes both here (not through the wizard's `disable`, which
     // only the interactive setup flow reaches). Shared strip logic with it.
     setAccountEnabled({ cfg, accountId, enabled }) {
@@ -749,6 +753,14 @@ export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatP
   status: agentchatStatusAdapter,
   doctor: agentchatDoctorAdapter,
   lifecycle: agentchatLifecycleAdapter,
+
+  // security — where the key sits on disk, as security warnings. OpenClaw
+  // runs them in `openclaw doctor` (Security), in the read-only doctor
+  // (`--lint`; on 2026.11 also a bare `--json` and No at the pause prompt: `core/doctor/security`, on
+  // by default) and in `openclaw security audit`. Local file reads only.
+  security: {
+    collectWarnings: ({ cfg, accountId }) => keyAtRestWarnings(cfg, accountId ?? AGENTCHAT_DEFAULT_ACCOUNT_ID),
+  },
 }
 
 /**

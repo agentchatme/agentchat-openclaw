@@ -35,7 +35,8 @@ import {
   readApiKeyVariable,
 } from '../credentials/read-env.js'
 import { multiAccountRefusal } from '../channel-account.js'
-import { gatewayKeyMismatch } from '../channel-key.js'
+import { gatewayKeyMismatch, gatewayKeyMismatchStatus } from '../channel-key.js'
+import { openclawCommand } from '../cli-command.js'
 import { registerIntegration, unregisterIntegration, getIntegration } from './runtime-registry.js'
 import { createIntegrationLoop } from '../integration/loop.js'
 import { OpenClawTexts, createTextsCache, spellTextsForOpenClaw } from '../integration/texts.js'
@@ -161,12 +162,12 @@ export async function updateHostedMcpEntry(
       mcpUpdateWarned.delete(ctx.accountId)
       ctx.log?.info?.(`${prefix} mcp.servers.agentchat now names this client to the hosted tools (${clientIdentityText()}); under the default reload mode OpenClaw applies it without a restart`)
     } else if (result.outcome === 'unsupported') {
-      warnOnce(`mcp.servers.agentchat does not name this client (${clientIdentityText()}) and this OpenClaw cannot update its config from a plugin — run \`openclaw doctor --fix\``)
+      warnOnce(`mcp.servers.agentchat does not name this client (${clientIdentityText()}) and this OpenClaw cannot update its config from a plugin — run \`${openclawCommand('doctor --fix')}\``)
     } else if (result.outcome === 'failed') {
       warnOnce(
         result.code === NIX_MODE_ERROR_CODE
           ? `mcp.servers.agentchat does not name this client and OpenClaw's config is read-only here (Nix mode) — add ${clientIdentityText()} to its headers in the Nix-managed config`
-          : `mcp.servers.agentchat could not be updated to name this client (${result.error ?? 'unknown error'}) — run \`openclaw doctor --fix\``,
+          : `mcp.servers.agentchat could not be updated to name this client (${result.error ?? 'unknown error'}) — run \`${openclawCommand('doctor --fix')}\``,
       )
     }
   } catch (err) {
@@ -224,7 +225,8 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     const refusal = multiAccountRefusal(ctx.cfg)
     if (refusal) {
       ctx.log?.error?.(`[agentchat:${ctx.accountId}] integration not started — ${refusal}`)
-      ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastDisconnect: { at: Date.now(), error: refusal } }, 'blocked'))
+      // `lastError` is what `openclaw channels status` prints for a blocked account: `error:…` on its line, and from 2026.11 under Warnings too.
+      ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastError: refusal, lastDisconnect: { at: Date.now(), error: refusal } }, 'blocked'))
       await waitUntilAbort(ctx.abortSignal, () => undefined)
       return
     }
@@ -238,13 +240,13 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     const keyMismatch = toolsUseOtherKey(ctx.cfg, config.apiBase, config.apiKey, envKey) ? gatewayKeyMismatch(config.apiKey, envKey) : null
     if (keyMismatch) {
       ctx.log?.error?.(`[agentchat:${ctx.accountId}] integration not started — ${keyMismatch}`)
-      ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastDisconnect: { at: Date.now(), error: keyMismatch } }, 'blocked'))
+      ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastError: gatewayKeyMismatchStatus(), lastDisconnect: { at: Date.now(), error: keyMismatch } }, 'blocked'))
       await waitUntilAbort(ctx.abortSignal, () => undefined)
       return
     }
     if (config.apiKeySource === 'config' || config.apiKeyPlainTextCopy) {
       ctx.log?.warn?.(
-        `[agentchat:${ctx.accountId}] the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent's own file tools can read — run \`openclaw doctor --fix\` to move it to an owner-only key file`,
+        `[agentchat:${ctx.accountId}] the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent's own file tools can read — run \`${openclawCommand('doctor --fix')}\` to move it to an owner-only key file`,
       )
     }
 
@@ -258,7 +260,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     })
     if (agentIdOverride && !readLlmAgentOverrideOptIn(ctx.cfg)) {
       ctx.log?.warn?.(
-        `[agentchat:${ctx.accountId}] this account is routed to agent "${agentIdOverride}", not OpenClaw's default — the gate call will be refused (LLM_COMPLETION_NOT_AUTHORIZED) until ${LLM_AGENT_OVERRIDE_PATH} is true; \`openclaw doctor --fix\` writes it`,
+        `[agentchat:${ctx.accountId}] this account is routed to agent "${agentIdOverride}", not OpenClaw's default — the gate call will be refused (LLM_COMPLETION_NOT_AUTHORIZED) until ${LLM_AGENT_OVERRIDE_PATH} is true; \`${openclawCommand('doctor --fix')}\` writes it`,
       )
     }
     const client = getClient({ accountId: ctx.accountId, config })
@@ -408,7 +410,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
                 ctx.log?.info?.(`[agentchat:${ctx.accountId}] key accepted again — blocked cleared`)
               }
               ctx.log?.info?.(`[agentchat:${ctx.accountId}] connected at ${new Date(at).toISOString()} (agent ${agentId})`)
-              ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: true, linked: true, statusState: 'linked', lastConnectedAt: at }, 'ready'))
+              ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: true, linked: true, statusState: 'linked', lastConnectedAt: at, lastError: null }, 'ready'))
             },
             onBlocked: (info) => {
               const close = `close ${info.code}${info.reason ? ` ${info.reason}` : ''}`
@@ -419,11 +421,18 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
               }
               blocked = true
               ctx.log?.error?.(
-                `[agentchat:${ctx.accountId}] key rejected (${close}) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted (${next}); store a new key with openclaw channels add agentchat (Recover by email code, or --token-file <path>), then restart the gateway so the hosted tools use it too`,
+                `[agentchat:${ctx.accountId}] key rejected (${close}) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted (${next}); store a new key with ${openclawCommand('channels add agentchat')} (Recover by email code, or --token-file <path>), then restart the gateway (${openclawCommand('gateway restart')}) so the hosted tools use it too`,
               )
               ctx.setStatus(
                 withLifecycle(
-                  { ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastDisconnect: { at: Date.now(), error: `key rejected: ${close}` } },
+                  {
+                    ...ctx.getStatus(),
+                    running: false,
+                    connected: false,
+                    statusState: 'not-linked',
+                    lastError: `the server refused the API key (${close}); store a new key with ${openclawCommand('channels add agentchat')}, then restart the gateway (${openclawCommand('gateway restart')})`,
+                    lastDisconnect: { at: Date.now(), error: `key rejected: ${close}` },
+                  },
                   'blocked',
                 ),
               )

@@ -33,15 +33,17 @@
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 
+import { openclawCommand } from '../cli-command.js'
 import { API_KEY_ENV, readApiKeyVariable } from '../credentials/read-env.js'
 import {
   filesHoldingKey,
   listAccountKeyFiles,
+  openClawConfigBackupRing,
   openClawConfigCopyPaths,
   writeApiKeyFile,
 } from '../credentials/key-file.js'
 import { resolveBoundAgentId, resolveOpenClawConfigPath, resolveOpenClawDefaultAgentId, resolveOpenClawStateDir } from '../openclaw-layout.js'
-import { readAgentchatApiKey, type ConfiguredKey } from '../channel-key.js'
+import { readAgentchatApiKey, resolveAgentchatApiKey, type ConfiguredKey } from '../channel-key.js'
 import {
   CLIENT_HEADER,
   toolsUseOtherKey,
@@ -223,14 +225,71 @@ export function openClawCopiesHoldingKey(apiKey: string | undefined, configPath:
   return filesHoldingKey(apiKey, openClawConfigCopyPaths(configPath))
 }
 
-/** One sentence naming OpenClaw's copies that still hold the key, or null. */
-export function describeKeyCopies(paths: readonly string[]): string | null {
+/**
+ * OpenClaw's copies that hold `apiKey` once OpenClaw has written
+ * `openclaw.json` ONE more time — for a hook that runs before that write
+ * and is followed by exactly one (`channels remove --delete`: OpenClaw runs
+ * the removal hook, then writes the config once). The write rotates the
+ * backup ring (`openClawConfigBackupRing`): the config as it is now becomes
+ * `.bak`, each `.bak.N` becomes `.bak.N+1`, `.bak.4` is dropped; the
+ * last-good, pre-update and rejected copies stay as they are. Paths only.
+ */
+export function openClawCopiesHoldingKeyAfterWrite(apiKey: string | undefined, configPath: string = resolveOpenClawConfigPath()): string[] {
+  if (!apiKey) return []
+  const ring = openClawConfigBackupRing(configPath)
+  const others = openClawConfigCopyPaths(configPath).filter((file) => !ring.includes(file))
+  const holding = new Set(filesHoldingKey(apiKey, [configPath, ...ring, ...others]))
+  return [
+    ...(holding.has(configPath) ? [ring[0]!] : []),
+    ...ring.slice(0, -1).flatMap((file, index) => (holding.has(file) ? [ring[index + 1]!] : [])),
+    ...others.filter((file) => holding.has(file)),
+  ]
+}
+
+/**
+ * One sentence naming OpenClaw's copies that hold the key, or null.
+ * `when` says at what point the list is true (`once OpenClaw has written this removal`) when
+ * that is not now.
+ */
+export function describeKeyCopies(paths: readonly string[], when?: string): string | null {
   if (paths.length === 0) return null
   return (
-    `OpenClaw's own copies of openclaw.json still hold this key in plain text: ${paths.join(', ')} — ` +
+    `${when ? `${when.charAt(0).toUpperCase()}${when.slice(1)}, ` : ''}OpenClaw's own copies of openclaw.json still hold this key in plain text: ${paths.join(', ')} — ` +
     'OpenClaw writes and rotates them (its config backup ring and last-good copy) and the plugin does not edit them; ' +
-    'delete them, or rotate the key (openclaw channels add agentchat → Recover) if anyone else could have read them'
+    `delete them, or rotate the key (${openclawCommand('channels add agentchat')} → Recover) if anyone else could have read them`
   )
+}
+
+/**
+ * For a command that moves the key out of `openclaw.json` while its own
+ * config writes are still to come (`openclaw doctor --fix`, the setup
+ * wizard): OpenClaw decides how many writes follow, and each one rotates
+ * the backup ring, so no list of files made now would still be right when
+ * the command ends. The old config holding the key becomes a backup on the
+ * first of them; a read-only check names the copies once it is done.
+ */
+export function keyCopiesAfterRunLine(): string {
+  return (
+    "OpenClaw's own backups of openclaw.json (openclaw.json.bak, .bak.1 … .bak.4, .last-good) keep the old plain-text key until they rotate out, " +
+    `and this command's own config writes rotate them — once it is done, \`${openclawCommand('doctor --lint')}\` names the ones that still hold it; ` +
+    `delete those, or rotate the key (${openclawCommand('channels add agentchat')} → Recover) if anyone else could have read them`
+  )
+}
+
+/**
+ * Set once this process has taken a plain-text key out of the config (doctor
+ * --fix): OpenClaw writes the config after that, so the copies are listed by
+ * a later read-only run, not by this one (`keyAtRestWarnings`).
+ */
+let keyMovedInThisProcess = false
+
+export function noteKeyMovedOutOfConfig(): void {
+  keyMovedInThisProcess = true
+}
+
+/** Test seam. */
+export function resetKeyMovedForTest(): void {
+  keyMovedInThisProcess = false
 }
 
 // ─── the config side of placement (pure) ───────────────────────────────
@@ -325,9 +384,11 @@ export function removeIntegrationFiles(
     const apiKey = readAgentchatApiKey(cfg as never, accountId)
     const files = listAccountKeyFiles(accountId, options.stateDir)
     if (files.length > 0) {
+      const one = files.length === 1
       changes.push(
-        `kept the API key file${files.length === 1 ? '' : 's'} ${files.join(', ')} — ${files.length === 1 ? 'it holds' : 'they hold'} the only copy of the key on this machine: ` +
-          `delete ${files.length === 1 ? 'it' : 'them'} when you no longer need the agent, or add it again with openclaw channels add agentchat --token-file <the file>`,
+        `kept the API key file${one ? '' : 's'} ${files.join(', ')} — ${one ? 'the copy of the key this plugin keeps' : 'the keys this plugin stored for this account'}, ` +
+          'never deleted here because OpenClaw can still refuse this removal: ' +
+          `delete ${one ? 'it' : 'them'} when you no longer need the agent, or add the agent again with ${openclawCommand('channels add agentchat --token-file <the file>')}`,
       )
     }
     try {
@@ -336,7 +397,8 @@ export function removeIntegrationFiles(
     } catch {
       // best effort
     }
-    const copies = describeKeyCopies(openClawCopiesHoldingKey(apiKey, options.configPath))
+    // This hook runs before OpenClaw's one config write for the removal: name the copies as that write leaves them.
+    const copies = describeKeyCopies(openClawCopiesHoldingKeyAfterWrite(apiKey, options.configPath), 'once OpenClaw has written this removal')
     if (copies) changes.push(copies)
   }
   return changes
@@ -365,7 +427,7 @@ export function restoreIdentityLine(cfg: object | undefined, accountId: string, 
     filePath = agentsAnchorPath(cfg as never, agentId)
     if (!isValidHandleShape(bare)) return { outcome: 'failed', path: filePath, detail: `agentHandle "${bare}" is not a valid AgentChat handle` }
     if (identityLine === null) {
-      return { outcome: 'skipped', path: filePath, detail: 'the served identity line is not available (AgentChat unreachable and nothing cached) — run openclaw doctor --fix once it is' }
+      return { outcome: 'skipped', path: filePath, detail: `the served identity line is not available (AgentChat unreachable and nothing cached) — run ${openclawCommand('doctor --fix')} once it is` }
     }
     const present = hasAgentsAnchorFor({ cfg: cfg as never, handle: bare, text: identityLine, agentId })
     filePath = present.path
@@ -453,7 +515,7 @@ export function placeIntegration<TCfg extends object>(params: PlaceParams<TCfg>)
     steps.push({
       name: 'anchor',
       status: 'skipped',
-      detail: `identity line for @${handle} not placed — AgentChat's texts were unreachable and nothing is cached; run openclaw doctor --fix once it is reachable`,
+      detail: `identity line for @${handle} not placed — AgentChat's texts were unreachable and nothing is cached; run ${openclawCommand('doctor --fix')} once it is reachable`,
     })
   } else {
     try {
@@ -502,6 +564,13 @@ export interface PlacementCheck {
   readonly notice?: boolean
   /** `openclaw doctor --fix` repairs it. */
   readonly repair?: boolean
+  /**
+   * About where the key sits on disk (plain text in openclaw.json, a key
+   * file others can read, key files no longer used). Status shows it with
+   * the rest; doctor reports it as a security warning (`keyAtRestWarnings`),
+   * which its read-only runs show too.
+   */
+  readonly atRest?: boolean
 }
 
 export function checkPlacement<TCfg extends object>(params: {
@@ -537,10 +606,10 @@ export function checkPlacement<TCfg extends object>(params: {
       ok: anchor.present,
       detail: anchor.present
         ? `identity line for @${params.handle} in ${anchor.path}`
-        : `identity line for @${params.handle} missing from ${anchor.path} — ${remedy('run openclaw doctor --fix (or openclaw channels add agentchat)')}`,
+        : `identity line for @${params.handle} missing from ${anchor.path} — ${remedy(`run ${openclawCommand('doctor --fix')} (or ${openclawCommand('channels add agentchat')})`)}`,
     })
   } else {
-    checks.push({ name: 'anchor', ok: false, detail: `agentHandle not in config — the identity line cannot be checked; ${remedy('run openclaw doctor --fix (it learns the handle from the key)')}` })
+    checks.push({ name: 'anchor', ok: false, detail: `agentHandle not in config — the identity line cannot be checked; ${remedy(`run ${openclawCommand('doctor --fix')} (it learns the handle from the key)`)}` })
   }
 
   checks.push({ name: 'manual', ok: true, detail: 'manual bundled as the agentchat skill' })
@@ -571,7 +640,7 @@ function checkKey(params: {
   const dotenv = dotEnvPath(params.stateDir)
   if (!apiKey) {
     const reason = keySource && !keySource.ok ? keySource.reason : 'no API key is configured'
-    return [{ name: 'key', ok: false, detail: `${reason} — ${remedy('run openclaw channels add agentchat')}` }]
+    return [{ name: 'key', ok: false, detail: `${reason} — ${remedy(`run ${openclawCommand('channels add agentchat')}`)}` }]
   }
   const checks: PlacementCheck[] = []
   const inProcess = readApiKeyVariable(params.env)
@@ -586,13 +655,13 @@ function checkKey(params: {
         `that way: unset ${API_KEY_ENV} (\`unset ${API_KEY_ENV}\`) before starting the gateway`,
     })
   } else if (inDotEnv === undefined) {
-    checks.push({ name: 'key', ok: false, repair: true, detail: `${API_KEY_ENV} is not in ${dotenv}, so the hosted tools cannot authenticate — ${remedy('run openclaw doctor --fix (it places the account\'s key there), then restart the gateway')}` })
+    checks.push({ name: 'key', ok: false, repair: true, detail: `${API_KEY_ENV} is not in ${dotenv}, so the hosted tools cannot authenticate — ${remedy(`run ${openclawCommand('doctor --fix')} (it places the account's key there), then restart the gateway (${openclawCommand('gateway restart')})`)}` })
   } else if (inDotEnv !== apiKey) {
     checks.push({
       name: 'key',
       ok: false,
       repair: true,
-      detail: `${dotenv} holds another ${API_KEY_ENV} than the account's key, so the hosted tools would act as another agent — ${remedy('run openclaw doctor --fix (it places the account\'s key there), then restart the gateway')}`,
+      detail: `${dotenv} holds another ${API_KEY_ENV} than the account's key, so the hosted tools would act as another agent — ${remedy(`run ${openclawCommand('doctor --fix')} (it places the account's key there), then restart the gateway (${openclawCommand('gateway restart')})`)}`,
     })
   } else {
     checks.push({
@@ -604,43 +673,79 @@ function checkKey(params: {
     })
   }
   if (keySource?.ok) {
-    if (keySource.source === 'config') {
+    if (keySource.source === 'config' && keySource.fileProblem) {
       checks.push({
         name: 'key',
         ok: true,
         notice: true,
         repair: true,
-        detail:
-          keySource.fileProblem
-            ? `channels.agentchat.apiKeyFile (${keySource.file ?? '?'}) cannot be used (${keySource.fileProblem}), so the plain-text channels.agentchat.apiKey in openclaw.json stood in — openclaw doctor --fix stores the key in a key file again and removes apiKey`
-            : 'the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent\'s own file tools can read — openclaw doctor --fix moves it to an owner-only key file and leaves only its path (channels.agentchat.apiKeyFile)',
+        detail: `channels.agentchat.apiKeyFile (${keySource.file ?? '?'}) cannot be used (${keySource.fileProblem}), so the plain-text channels.agentchat.apiKey in openclaw.json stood in — ${openclawCommand('doctor --fix')} stores the key in a key file again and removes apiKey`,
       })
     }
-    if (keySource.source === 'file' && keySource.plainTextCopy) {
-      checks.push({
-        name: 'key',
-        ok: true,
-        notice: true,
-        repair: true,
-        detail: `the key file is in use, and the same key is still in plain text in openclaw.json (channels.agentchat.apiKey) — openclaw doctor --fix removes it`,
-      })
-    }
-    if (keySource.source === 'file' && keySource.loosePermissions && keySource.file) {
-      checks.push({ name: 'key', ok: true, notice: true, repair: true, detail: `the key file ${keySource.file} can be read by other users of this machine — openclaw doctor --fix makes it owner-only (0600)` })
-    }
-    const superseded = listAccountKeyFiles(params.accountId, params.stateDir).filter((file) => file !== keySource.file)
-    if (superseded.length > 0) {
-      checks.push({
-        name: 'key',
-        ok: true,
-        notice: true,
-        detail:
-          `${superseded.length === 1 ? 'a key file' : `${superseded.length} key files`} from an earlier setup ${superseded.length === 1 ? 'is' : 'are'} no longer used by the config: ${superseded.join(', ')} — ` +
-          'a key a setup stored that was then replaced (or a setup that was cancelled after the key was issued); delete what you do not need',
-      })
-    }
+    checks.push(...keyAtRestChecks(keySource, params.accountId, params.stateDir))
   }
   return checks
+}
+
+/** The checks about where an account's key sits on disk (`atRest`), for status and for doctor's security warnings. */
+function keyAtRestChecks(keySource: Extract<ConfiguredKey, { ok: true }>, accountId: string, stateDir?: string): PlacementCheck[] {
+  const checks: PlacementCheck[] = []
+  const atRest = { name: 'key', ok: true, notice: true, atRest: true } as const
+  if (keySource.source === 'config' && !keySource.fileProblem) {
+    checks.push({
+      ...atRest,
+      repair: true,
+      detail: `the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent's own file tools can read — ${openclawCommand('doctor --fix')} moves it to an owner-only key file and leaves only its path (channels.agentchat.apiKeyFile)`,
+    })
+  }
+  if (keySource.source === 'file' && keySource.plainTextCopy) {
+    checks.push({
+      ...atRest,
+      repair: true,
+      detail: `the key file is in use, and the same key is still in plain text in openclaw.json (channels.agentchat.apiKey) — ${openclawCommand('doctor --fix')} removes it`,
+    })
+  }
+  if (keySource.source === 'file' && keySource.loosePermissions && keySource.file) {
+    checks.push({ ...atRest, repair: true, detail: `the key file ${keySource.file} can be read by other users of this machine — ${openclawCommand('doctor --fix')} makes it owner-only (0600)` })
+  }
+  const superseded = listAccountKeyFiles(accountId, stateDir).filter((file) => file !== keySource.file)
+  if (superseded.length > 0) {
+    checks.push({
+      ...atRest,
+      detail:
+        `${superseded.length === 1 ? 'a key file' : `${superseded.length} key files`} from an earlier setup ${superseded.length === 1 ? 'is' : 'are'} no longer used by the config: ${superseded.join(', ')} — ` +
+        'a key a setup stored that was then replaced (or a setup that was cancelled after the key was issued); delete what you do not need',
+    })
+  }
+  return checks
+}
+
+/**
+ * Where the account's key sits on disk, as security warnings: the channel's
+ * `security.collectWarnings`, which OpenClaw runs in `openclaw doctor`
+ * (its Security section), in the read-only doctor (`openclaw doctor
+ * --lint`; on 2026.11 also a bare `--json` and answering No to its pause prompt: the
+ * `core/doctor/security` check, on by default) and in `openclaw security
+ * audit`. Plain text in openclaw.json, the same key left there, a key file
+ * others can read, key files no longer used — and, once the key is in a key
+ * file, OpenClaw's own config copies that still hold it. Those are named
+ * only when nothing in this process is about to rotate them (see
+ * `noteKeyMovedOutOfConfig`). Local file reads only; never the key itself.
+ */
+export function keyAtRestWarnings(cfg: object | undefined, accountId: string, options: { stateDir?: string; configPath?: string } = {}): string[] {
+  try {
+    if (!isAgentchatAccountEnabled(cfg as never, accountId)) return []
+    const keySource = resolveAgentchatApiKey(cfg as never, accountId)
+    if (!keySource.ok) return []
+    const lines = keyAtRestChecks(keySource, accountId, options.stateDir).map((check) => check.detail)
+    if (keySource.source === 'file' && !keyMovedInThisProcess) {
+      const copies = describeKeyCopies(openClawCopiesHoldingKey(keySource.apiKey, options.configPath))
+      if (copies) lines.push(copies)
+    }
+    return lines.map((line) => `[${AGENTCHAT_CHANNEL_ID}:${accountId}] key: ${line}`)
+  } catch {
+    return []
+  }
 }
 
 /**
@@ -663,7 +768,7 @@ function checkMcpEntry(cfg: unknown, apiBase: string, apiKey: string | undefined
         repair: true,
         detail:
           `hosted tools registered as mcp.servers.agentchat, without ${CLIENT_HEADER} — ${unknownClient}; ` +
-          `the gateway adds ${clientIdentityText()} to the entry when it starts (its log says if it could not), and openclaw doctor --fix does now`,
+          `the gateway adds ${clientIdentityText()} to the entry when it starts (its log says if it could not), and ${openclawCommand('doctor --fix')} does now`,
       }
     }
     case 'user_managed': {
@@ -681,7 +786,7 @@ function checkMcpEntry(cfg: unknown, apiBase: string, apiKey: string | undefined
     case 'disabled':
       return { name: 'mcp', ok: false, detail: 'mcp.servers.agentchat is disabled — the agent has no AgentChat tools' }
     case 'missing':
-      return { name: 'mcp', ok: false, repair: true, detail: `mcp.servers.agentchat missing — ${remedy('run openclaw doctor --fix (or openclaw channels add agentchat)')}` }
+      return { name: 'mcp', ok: false, repair: true, detail: `mcp.servers.agentchat missing — ${remedy(`run ${openclawCommand('doctor --fix')} (or ${openclawCommand('channels add agentchat')})`)}` }
   }
 }
 

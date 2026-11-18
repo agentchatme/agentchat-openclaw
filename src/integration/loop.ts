@@ -21,6 +21,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 
 import { integration, type RealtimeClient } from 'agentchatme'
 
+import { openclawCommand } from '../cli-command.js'
 import type { Logger } from '../log.js'
 import type { MetricsRecorder } from '../metrics.js'
 import { createNoopMetrics } from '../metrics.js'
@@ -165,7 +166,7 @@ function singleRunStarter(options: IntegrationLoopOptions, owner: string, logger
     })
     const first = await Promise.race([ended, handedOff])
     if (first === 'let_go') {
-      logger.warn({ sessionKey, runId }, 'gate off — the run is still going after 30 min; no new run starts until it ends (or `openclaw agentchat release <run id> --force`)')
+      logger.warn({ sessionKey, runId }, `gate off — the run is still going after 30 min; no new run starts until it ends (or \`${openclawCommand('agentchat release <run id> --force')}\`)`)
       return { status: 'failed', detail: 'the run was handed off while still going' }
     }
     return first.status === 'ok' && !first.error ? { status: 'completed' } : { status: 'failed', detail: first.error ?? `run ended: ${first.status ?? 'unknown'}` }

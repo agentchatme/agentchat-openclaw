@@ -47,7 +47,7 @@
  * it in the config, never the key itself.
  *
  * `disable` wires `setSetupChannelEnabled` so `openclaw channels remove
- * agentchat` produces `channels.agentchat.enabled: false` and keeps the
+ * --channel agentchat` produces `channels.agentchat.enabled: false` and keeps the
  * key file on disk (in case the operator just wants to pause, not rotate).
  */
 
@@ -88,10 +88,10 @@ import {
   applyIntegrationConfig,
   stripIntegrationConfig,
   storeAccountKey,
-  describeKeyCopies,
-  openClawCopiesHoldingKey,
+  keyCopiesAfterRunLine,
 } from './integration/placement.js'
 import { readAgentchatApiKey, resolveAgentchatApiKey } from './channel-key.js'
+import { openclawCommand } from './cli-command.js'
 import { DEFAULT_API_BASE } from './integration/mcp.js'
 import { loadIdentityLine } from './integration/texts.js'
 import { createSdkClient } from './binding/sdk-client.js'
@@ -138,7 +138,7 @@ function storeKeyPatch(accountId: string, apiKey: string): { patch: Record<strin
     const stored = storeAccountKey(accountId, apiKey, { dotenv: 'never' })
     return { patch: { apiKeyFile: stored.file, apiKey: undefined }, file: stored.file }
   } catch (err) {
-    return { patch: { apiKey, apiKeyFile: undefined }, problem: `the key file could not be written (${err instanceof Error ? err.message : String(err)}); the key is kept in openclaw.json for now — run \`openclaw doctor --fix\` once the directory is writable` }
+    return { patch: { apiKey, apiKeyFile: undefined }, problem: `the key file could not be written (${err instanceof Error ? err.message : String(err)}); the key is kept in openclaw.json for now — run \`${openclawCommand('doctor --fix')}\` once the directory is writable` }
   }
 }
 
@@ -667,8 +667,8 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
           check.message,
           '',
           stored === apiKey
-            ? 'This key is the one in your OpenClaw config. Re-run `openclaw channels add agentchat` → Replace the API key to recover a lost key or paste another one.'
-            : 'The key was not saved. Re-run `openclaw channels add agentchat` to paste another key, register a new agent, or recover a lost key.',
+            ? `This key is the one in your OpenClaw config. Re-run \`${openclawCommand('channels add agentchat')}\` → Replace the API key to recover a lost key or paste another one.`
+            : `The key was not saved. Re-run \`${openclawCommand('channels add agentchat')}\` to paste another key, register a new agent, or recover a lost key.`,
         ].join('\n'),
         'AgentChat API key not accepted',
       )
@@ -694,8 +694,9 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
       const storedKey = storeKeyPatch(accountId, apiKey)
       if (storedKey.file) {
         keyCfg = applyAgentchatAccountPatch(cfg, accountId, storedKey.patch)
-        const copies = describeKeyCopies(openClawCopiesHoldingKey(apiKey))
-        moved = [`✓ key moved out of openclaw.json: the plain-text channels.agentchat.apiKey is now a key file (${storedKey.file}, owner-only)`, ...(copies ? [copies] : [])].join('\n')
+        // OpenClaw writes the config after the wizard returns (its setup flow decides how often), so the
+        // copies it then holds are named by a read-only check afterwards, not listed from the files as they are now.
+        moved = [`✓ key moved out of openclaw.json: the plain-text channels.agentchat.apiKey is now a key file (${storedKey.file}, owner-only)`, keyCopiesAfterRunLine()].join('\n')
       }
     }
     const keyFile = readAgentchatConfigField(keyCfg, accountId, 'apiKeyFile')
@@ -710,12 +711,12 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
         ...formatPlacement(placed.steps),
         '',
         placed.mcp === 'added' || placed.steps.some((s) => s.name === 'key' && s.status === 'changed')
-          ? 'Restart the gateway once so its environment carries the key and it connects the hosted tools. Then `openclaw channels status` shows the integration and the tools.'
+          ? `Restart the gateway once (\`${openclawCommand('gateway restart')}\`) so its environment carries the key and it connects the hosted tools. Then \`${openclawCommand('channels capabilities --channel agentchat')}\` shows the integration and the tools.`
           : 'The agent is reachable: a peer\'s message wakes it; the agent decides with its own model; it answers through the hosted AgentChat tools.',
         ...(failed.length > 0
-          ? ['', 'Some placement failed (above). Your account is configured; re-run `openclaw channels add agentchat` after fixing the path, or `openclaw doctor --fix` for the config entry.']
+          ? ['', `Some placement failed (above). Your account is configured; re-run \`${openclawCommand('channels add agentchat')}\` after fixing the path, or \`${openclawCommand('doctor --fix')}\` for the config entry.`]
           : []),
-        ...(skipped.length > 0 ? ['', 'The identity line waits for AgentChat to be reachable: run `openclaw doctor --fix` then.'] : []),
+        ...(skipped.length > 0 ? ['', `The identity line waits for AgentChat to be reachable: run \`${openclawCommand('doctor --fix')}\` then.`] : []),
       ].join('\n'),
       'AgentChat integration placed',
     )
@@ -742,7 +743,7 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
     lines: ['On the next prompt, choose "Finished" to exit.'],
   },
 
-  // `disable` fires on `openclaw channels remove agentchat`. We strip the
+  // `disable` fires on `openclaw channels remove --channel agentchat`. We strip the
   // AGENTS.md identity line and our own `mcp.servers.agentchat` entry so the
   // agent stops being told it is @handle on AgentChat and stops seeing the
   // hosted tools the moment the channel is removed. The key stays in the

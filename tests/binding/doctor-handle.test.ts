@@ -60,10 +60,10 @@ describe('doctor --fix persists agentHandle', () => {
   it('an unreachable server or a bad key is a warning; the rest of the repair still happens', async () => {
     vi.mocked(checkApiKey).mockReset().mockRejectedValueOnce(new Error('ENOTFOUND'))
     const unreachable = await agentchatDoctorAdapter.repairConfig!({ cfg: { channels: { agentchat: { apiKey: KEY } } } as never, doctorFixCommand: 'fix', env: {} })
-    expect(unreachable.warnings?.[0]).toMatch(/agentHandle not set and AgentChat was not reachable to learn it: ENOTFOUND/)
+    expect(unreachable.warnings?.find((w) => w.includes('agentHandle'))).toMatch(/agentHandle not set and AgentChat was not reachable to learn it: ENOTFOUND/)
     expect(unreachable.changes.some((c) => c.startsWith('added mcp.servers.agentchat'))).toBe(true)
     vi.mocked(checkApiKey).mockReset().mockResolvedValueOnce({ ok: false, code: 'UNAUTHORIZED', message: 'bad key' } as never)
     const bad = await agentchatDoctorAdapter.repairConfig!({ cfg: { channels: { agentchat: { apiKey: KEY } } } as never, doctorFixCommand: 'fix', env: {} })
-    expect(bad.warnings?.[0]).toMatch(/did not pass the live check \(UNAUTHORIZED\): bad key/)
+    expect(bad.warnings?.find((w) => w.includes('agentHandle'))).toMatch(/did not pass the live check \(UNAUTHORIZED\): bad key/)
   })
 })

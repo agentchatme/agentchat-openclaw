@@ -37,6 +37,8 @@
  * agent the operator bound to the account; `main` when nothing is bound.
  */
 
+import * as path from 'node:path'
+
 import type { PluginRuntime } from 'openclaw/plugin-sdk/channel-core'
 import type { GateModelCall } from 'agentchatme'
 
@@ -47,6 +49,8 @@ import { MCP_SERVER_NAME } from './turn.js'
 import { AGENTCHAT_CHANNEL_ID } from '../channel-account.js'
 import { API_KEY_ENV, readApiKeyVariable } from '../credentials/read-env.js'
 import { gatewayKeyMismatch } from '../channel-key.js'
+import { openclawCommand } from '../cli-command.js'
+import { resolveOpenClawStateDir } from '../openclaw-layout.js'
 
 export type { GateModelCall }
 
@@ -280,7 +284,7 @@ export function turnReadiness(params: { cfg: unknown; apiBase: string; apiKey: s
   }
   switch (describeMcpEntry(params.cfg, params.apiBase, params.apiKey)) {
     case 'missing':
-      return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is not in the gateway config — run \`openclaw doctor --fix\`${restart}` }
+      return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is not in the gateway config — run \`${openclawCommand('doctor --fix')}\`${restart}` }
     case 'disabled':
       return { ready: false, reason: `mcp.servers.${MCP_SERVER_NAME} is disabled in the gateway config — enable it${restart}` }
     case 'user_managed':
@@ -290,7 +294,7 @@ export function turnReadiness(params: { cfg: unknown; apiBase: string; apiKey: s
       if (value === undefined) {
         return {
           ready: false,
-          reason: `${API_KEY_ENV} is not set in the gateway process, so the hosted tools' bearer template cannot resolve — restart the gateway once ~/.openclaw/.env carries it (OpenClaw reads it only when the gateway starts)`,
+          reason: `${API_KEY_ENV} is not set in the gateway process, so the hosted tools' bearer template cannot resolve — restart the gateway once ${path.join(resolveOpenClawStateDir(), '.env')} carries it (OpenClaw reads it only when the gateway starts)`,
         }
       }
       return { ready: true }
