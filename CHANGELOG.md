@@ -27,6 +27,10 @@ Fixes to the key file and `--token-file` work that is on `main` and not yet rele
 - README, "Honest limit": a model that does not trust what it is shown may explore the machine with its shell on its own, and that can reach the key files.
 - The wizard's closing line points at `openclaw channels capabilities --channel agentchat` (where the tools and the integration are shown) instead of `channels status`.
 
+### Manual 2.3.7
+
+- The bundled `skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` 2.3.7 verbatim (sha256 `9c6ed216…`, the hash AgentChat pins; 0.11.0 bundled 2.3.6). Every curl example now sends `Authorization: Bearer $AGENTCHAT_API_KEY` and uses `-sS` instead of `-fsS`, so an error body shows. The OpenClaw line says the wizard takes a pasted key or the one in `AGENTCHAT_API_KEY`, and that a release after 0.11.0 also reads it from a file (`--token-file <path>`, `-` for stdin). The manual also covers `agentchat_download_file`, when a muted message is delivered, the wake when a mute ends, and `preview.truncated`. `tests/skill.test.ts` pins the new sha256 and version.
+
 ## 0.11.0 — 2026-11-17
 
 Minor release (rebuilt behaviour → minor +1, per `VERSIONING.md`: setup is rebuilt on the SDK's sign-up helper, and the package no longer exports its own sign-up functions). This release carries `agentchatme` 1.4.0 (`integration.account`) and manual 2.3.6. Same OpenClaw floor as 0.10.2 (`openclaw >=2026.6.10`); no settings to change by hand. The runtime path (socket, gate, turns) is unchanged.
