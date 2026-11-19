@@ -67,7 +67,7 @@ account's key in the gateway and refuses to start the integration when
 they differ.
 
 The key is stored on disk once per key, by setup (the wizard,
-`openclaw channels add agentchat --token-file <path>`) or by
+`openclaw channels add --channel agentchat --token-file <path>`) or by
 `openclaw doctor --fix` when it moves a plain-text key of an earlier
 release: its own file `<state dir>/agentchat/<accountId>/keys/key-<16 hex
 of its sha256>`, mode `0600`, in a `0700` directory, written to a temp file

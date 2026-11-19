@@ -192,7 +192,7 @@ function handleOf(value: unknown): string | undefined {
 function keyRefusal(check: Extract<KeyCheck, { ok: false }>): string {
   return [
     `AgentChat did not accept the API key (${check.code}): ${check.message}`,
-    `The key was not saved. Run \`${openclawCommand('channels add agentchat')}\` to register a new agent or recover a lost key (email code).`,
+    `The key was not saved. Run \`${openclawCommand('channels add --channel agentchat')}\` to register a new agent or recover a lost key (email code).`,
   ].join('\n')
 }
 
@@ -282,7 +282,7 @@ function apiBaseProblem(url: unknown): string | null {
 type BaseSetupAdapter = NonNullable<ChannelPlugin<AgentchatResolvedAccount>['setup']>
 
 /**
- * `channels add agentchat --token-file <path>` (non-interactive) and the
+ * `channels add --channel agentchat --token-file <path>` (non-interactive) and the
  * wizard's credential step both go through this adapter. What OpenClaw
  * persists is exactly what `applyAccountConfig` returns — it is synchronous
  * — so everything that belongs in `openclaw.json` is written there: the
@@ -323,7 +323,12 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
     if (typeof refusal === 'string' && refusal.length > 0) return refusal
     const key = keyOfInput(input as AgentchatSetupInput)
     if (key === null) {
-      return `an API key is required — pass ${TOKEN_FILE_HINT}, or run \`${openclawCommand('channels add agentchat')}\` to register a new agent or recover a lost key (email code)`
+      // On OpenClaw before 2026.8 `--channel agentchat` alone counts as a setup option and lands here instead of in
+      // the wizard, so this line names the route that opens the wizard there too.
+      return (
+        `an API key is required — pass ${TOKEN_FILE_HINT}; or, to register a new agent or recover a lost key (email code), open the setup wizard: ` +
+        `\`${openclawCommand('channels add --channel agentchat')}\` with no other option (OpenClaw before 2026.8: \`${openclawCommand('channels add')}\`, then pick AgentChat)`
+      )
     }
     if ('error' in key) return key.error
     if (key.apiKey.length < MIN_API_KEY_LENGTH) {
@@ -418,7 +423,7 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
       try {
         const result = await checkApiKey(apiKey, { apiBase })
         if (!result.ok) {
-          say(runtime, 'error', `${keyRefusal(result).replace('\n', ' ')} The config names ${keyFile}, which does not exist — run \`${openclawCommand('channels add agentchat')}\` again with a key AgentChat accepts`)
+          say(runtime, 'error', `${keyRefusal(result).replace('\n', ' ')} The config names ${keyFile}, which does not exist — run \`${openclawCommand('channels add --channel agentchat')}\` again with a key AgentChat accepts`)
           return
         }
         accepted = true
@@ -428,7 +433,7 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
       }
       const stored = storeKeyForSetup(accountId, apiKey, runtime, 'never')
       if (!stored.ok) {
-        say(runtime, 'error', `[agentchat:${accountId}] ${stored.refusal.replace('\n', ' ')} — run \`${openclawCommand('channels add agentchat')}\` again`)
+        say(runtime, 'error', `[agentchat:${accountId}] ${stored.refusal.replace('\n', ' ')} — run \`${openclawCommand('channels add --channel agentchat')}\` again`)
         return
       }
       say(runtime, 'log', `[agentchat:${accountId}] stored the key in ${keyFile}${accepted ? '' : ' (not checked)'}; restart the gateway (\`${openclawCommand('gateway restart')}\`) so the channel reads it`)
@@ -517,7 +522,7 @@ export function accountSectionPersistable(cfg: Cfg | undefined, accountId: strin
 }
 
 /**
- * A new key on its way into the config (`channels add agentchat
+ * A new key on its way into the config (`channels add --channel agentchat
  * --token-file` on an OpenClaw without `prepareAccountConfigInput`, which
  * runs this hook before the write): ask AgentChat first. Turned away
  * (401 / 403): say so and end the command, so nothing is written and the

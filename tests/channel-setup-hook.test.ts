@@ -1,5 +1,5 @@
 /**
- * `channels add agentchat --token <key>` (non-interactive). OpenClaw 2026.10.x
+ * `channels add --channel agentchat --token <key>` (non-interactive). OpenClaw 2026.10.x
  * runs `prepareAccountConfigInput` (async) first, persists exactly what the
  * synchronous `applyAccountConfig` returns, then calls
  * `afterAccountConfigWritten` with its CLI `RuntimeEnv` ({ log, error, exit })
@@ -106,7 +106,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
     const refusal = agentchatSetupAdapter.validateInput!({ cfg: {} as never, accountId: 'default', input: prepared })
     expect(refusal).toBe(
       'AgentChat did not accept the API key (UNAUTHORIZED): Invalid API key\n' +
-        'The key was not saved. Run `openclaw channels add agentchat` to register a new agent or recover a lost key (email code).',
+        'The key was not saved. Run `openclaw channels add --channel agentchat` to register a new agent or recover a lost key (email code).',
     )
     expect(lines).toEqual([]) // OpenClaw prints what validateInput returns
     expect(fs.existsSync(dotenv)).toBe(false)
@@ -405,7 +405,7 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
           level: 'error',
           line:
             'AgentChat did not accept the API key (UNAUTHORIZED): Invalid API key\n' +
-            'The key was not saved. Run `openclaw channels add agentchat` to register a new agent or recover a lost key (email code).',
+            'The key was not saved. Run `openclaw channels add --channel agentchat` to register a new agent or recover a lost key (email code).',
         },
       ])
     })

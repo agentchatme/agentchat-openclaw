@@ -142,7 +142,7 @@ describe('doctor adapter', () => {
       expect(line).toBe(
         "[agentchat:default] key: OpenClaw's own backups of openclaw.json (openclaw.json.bak, .bak.1 … .bak.4, .last-good) keep the old plain-text key until they rotate out, " +
           "and this command's own config writes rotate them — once it is done, `openclaw doctor --lint` names the ones that still hold it; " +
-          'delete those, or rotate the key (openclaw channels add agentchat → Recover) if anyone else could have read them',
+          'delete those, or rotate the key (openclaw channels add --channel agentchat → Recover) if anyone else could have read them',
       )
       expect(fixed.warnings?.some((w) => w.includes(`${configPath}.bak`))).toBe(false)
       // The same doctor run's Security section comes before some of those writes: it names no file either.

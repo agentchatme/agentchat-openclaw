@@ -175,12 +175,12 @@ describe('which key an account runs with', () => {
     const gone = path.join(scratch, 'gone')
     const account = resolveAgentchatAccount({ channels: { agentchat: { apiKeyFile: gone } } } as never, 'default')
     expect(account.configured).toBe(false)
-    expect(account.parseError).toBe(`channels.agentchat.apiKeyFile (${gone}) cannot be used: the file does not exist — run \`openclaw channels add agentchat\` to store the key again`)
+    expect(account.parseError).toBe(`channels.agentchat.apiKeyFile (${gone}) cannot be used: the file does not exist — run \`openclaw channels add --channel agentchat\` to store the key again`)
     expect(resolveConfiguredApiKey({ apiKeyFile: gone, apiKey: KEY })).toMatchObject({ ok: true, source: 'config', fileProblem: 'the file does not exist' })
   })
 })
 
-describe('openclaw channels add agentchat --token-file <path> — the key never on the command line (T6-F04) and never in openclaw.json (T6-F09)', () => {
+describe('openclaw channels add --channel agentchat --token-file <path> — the key never on the command line (T6-F04) and never in openclaw.json (T6-F09)', () => {
   const tokenFile = () => {
     const file = path.join(scratch, 'agentchat.key')
     fs.writeFileSync(file, `${KEY}\n`, { mode: 0o600 })
@@ -293,7 +293,7 @@ describe('openclaw channels add agentchat --token-file <path> — the key never 
     await agentchatPlugin.setup!.afterAccountConfigWritten!({ previousCfg: {} as never, cfg: cfg as never, accountId: 'default', input, runtime })
     expect(listAccountKeyFiles('default')).toEqual([])
     expect(fs.existsSync(dotenv())).toBe(false)
-    expect(lines[0]).toEqual({ level: 'error', line: expect.stringMatching(/^AgentChat did not accept the API key \(UNAUTHORIZED\): Invalid API key .*does not exist — run `openclaw channels add agentchat` again/) })
+    expect(lines[0]).toEqual({ level: 'error', line: expect.stringMatching(/^AgentChat did not accept the API key \(UNAUTHORIZED\): Invalid API key .*does not exist — run `openclaw channels add --channel agentchat` again/) })
   })
 
   it('reads the key file once per process (OpenClaw calls several hooks with the same input; - is standard input, which can be read once)', () => {
@@ -377,7 +377,7 @@ describe('openclaw channels remove --channel agentchat --delete (T6-F15)', () =>
     const text = lines.map((l) => l.line).join('\n')
     expect(text).toContain(
       `kept the API key file ${stored.path} — the copy of the key this plugin keeps, never deleted here because OpenClaw can still refuse this removal: ` +
-        'delete it when you no longer need the agent, or add the agent again with openclaw channels add agentchat --token-file <the file>',
+        'delete it when you no longer need the agent, or add the agent again with openclaw channels add --channel agentchat --token-file <the file>',
     )
     // One sentence, not "the only copy on this machine" followed by a list of other copies.
     expect(text).not.toContain('only copy')
@@ -443,7 +443,7 @@ describe('what we document and print: no key on a command line (T6-F04), no prom
   it('the README names --token-file for the non-interactive path; README and RUNBOOK say a new key needs one gateway restart for the tools', () => {
     const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8')
     const runbook = fs.readFileSync(path.join(root, 'RUNBOOK.md'), 'utf8')
-    expect(readme).toContain('openclaw channels add agentchat --token-file')
+    expect(readme).toContain('openclaw channels add --channel agentchat --token-file')
     expect(readme).toContain('the socket picks up the new key at once, the hosted tools only after `openclaw gateway restart`')
     // The runbook's `blocked` section promised "a key rotated back … reconnects without a restart" and offered `config set … apiKey`.
     expect(runbook).not.toMatch(/a key rotated back or an account reinstated reconnects without a restart/)

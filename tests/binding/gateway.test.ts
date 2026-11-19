@@ -321,13 +321,13 @@ describe('gateway.startAccount — lifecycle and the gate agent', () => {
     h.onBlocked!({ code: 1008, reason: 'Invalid token', retryInMs: 720_000 })
     expect(errorLines()).toHaveLength(1)
     expect(errorLines()[0]).toMatch(
-      /key rejected \(close 1008 Invalid token\) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted \(next HELLO in about 12 min\); store a new key with openclaw channels add agentchat \(Recover by email code, or --token-file <path>\), then restart the gateway \(openclaw gateway restart\) so the hosted tools use it too/,
+      /key rejected \(close 1008 Invalid token\) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted \(next HELLO in about 12 min\); store a new key with openclaw channels add --channel agentchat \(Recover by email code, or --token-file <path>\), then restart the gateway \(openclaw gateway restart\) so the hosted tools use it too/,
     )
     expect(status()).toMatchObject({ running: false, connected: false, statusState: 'not-linked', lifecycle: 'blocked' })
     expect((status().lastDisconnect as { error: string }).error).toBe('key rejected: close 1008 Invalid token')
     // The reason in the field `openclaw channels status` prints for a blocked account.
     expect(status().lastError).toBe(
-      'the server refused the API key (close 1008 Invalid token); store a new key with openclaw channels add agentchat, then restart the gateway (openclaw gateway restart)',
+      'the server refused the API key (close 1008 Invalid token); store a new key with openclaw channels add --channel agentchat, then restart the gateway (openclaw gateway restart)',
     )
     const after = setStatusCalls()
 

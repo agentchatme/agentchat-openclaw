@@ -215,7 +215,7 @@ export function removeAccountKeyFiles(accountId: string, stateDir?: string): str
   return removed
 }
 
-// ─── `openclaw channels add agentchat --token-file <path>` ─────────────
+// ─── `openclaw channels add --channel agentchat --token-file <path>` ─────────────
 
 /** What one process already read from a token file (stdin can be read once). */
 const tokenFileReads = new Map<string, TokenFileRead>()

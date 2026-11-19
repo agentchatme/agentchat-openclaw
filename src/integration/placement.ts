@@ -256,7 +256,7 @@ export function describeKeyCopies(paths: readonly string[], when?: string): stri
   return (
     `${when ? `${when.charAt(0).toUpperCase()}${when.slice(1)}, ` : ''}OpenClaw's own copies of openclaw.json still hold this key in plain text: ${paths.join(', ')} — ` +
     'OpenClaw writes and rotates them (its config backup ring and last-good copy) and the plugin does not edit them; ' +
-    `delete them, or rotate the key (${openclawCommand('channels add agentchat')} → Recover) if anyone else could have read them`
+    `delete them, or rotate the key (${openclawCommand('channels add --channel agentchat')} → Recover) if anyone else could have read them`
   )
 }
 
@@ -272,7 +272,7 @@ export function keyCopiesAfterRunLine(): string {
   return (
     "OpenClaw's own backups of openclaw.json (openclaw.json.bak, .bak.1 … .bak.4, .last-good) keep the old plain-text key until they rotate out, " +
     `and this command's own config writes rotate them — once it is done, \`${openclawCommand('doctor --lint')}\` names the ones that still hold it; ` +
-    `delete those, or rotate the key (${openclawCommand('channels add agentchat')} → Recover) if anyone else could have read them`
+    `delete those, or rotate the key (${openclawCommand('channels add --channel agentchat')} → Recover) if anyone else could have read them`
   )
 }
 
@@ -388,7 +388,7 @@ export function removeIntegrationFiles(
       changes.push(
         `kept the API key file${one ? '' : 's'} ${files.join(', ')} — ${one ? 'the copy of the key this plugin keeps' : 'the keys this plugin stored for this account'}, ` +
           'never deleted here because OpenClaw can still refuse this removal: ' +
-          `delete ${one ? 'it' : 'them'} when you no longer need the agent, or add the agent again with ${openclawCommand('channels add agentchat --token-file <the file>')}`,
+          `delete ${one ? 'it' : 'them'} when you no longer need the agent, or add the agent again with ${openclawCommand('channels add --channel agentchat --token-file <the file>')}`,
       )
     }
     try {
@@ -606,7 +606,7 @@ export function checkPlacement<TCfg extends object>(params: {
       ok: anchor.present,
       detail: anchor.present
         ? `identity line for @${params.handle} in ${anchor.path}`
-        : `identity line for @${params.handle} missing from ${anchor.path} — ${remedy(`run ${openclawCommand('doctor --fix')} (or ${openclawCommand('channels add agentchat')})`)}`,
+        : `identity line for @${params.handle} missing from ${anchor.path} — ${remedy(`run ${openclawCommand('doctor --fix')} (or ${openclawCommand('channels add --channel agentchat')})`)}`,
     })
   } else {
     checks.push({ name: 'anchor', ok: false, detail: `agentHandle not in config — the identity line cannot be checked; ${remedy(`run ${openclawCommand('doctor --fix')} (it learns the handle from the key)`)}` })
@@ -640,7 +640,7 @@ function checkKey(params: {
   const dotenv = dotEnvPath(params.stateDir)
   if (!apiKey) {
     const reason = keySource && !keySource.ok ? keySource.reason : 'no API key is configured'
-    return [{ name: 'key', ok: false, detail: `${reason} — ${remedy(`run ${openclawCommand('channels add agentchat')}`)}` }]
+    return [{ name: 'key', ok: false, detail: `${reason} — ${remedy(`run ${openclawCommand('channels add --channel agentchat')}`)}` }]
   }
   const checks: PlacementCheck[] = []
   const inProcess = readApiKeyVariable(params.env)
@@ -786,7 +786,7 @@ function checkMcpEntry(cfg: unknown, apiBase: string, apiKey: string | undefined
     case 'disabled':
       return { name: 'mcp', ok: false, detail: 'mcp.servers.agentchat is disabled — the agent has no AgentChat tools' }
     case 'missing':
-      return { name: 'mcp', ok: false, repair: true, detail: `mcp.servers.agentchat missing — ${remedy(`run ${openclawCommand('doctor --fix')} (or ${openclawCommand('channels add agentchat')})`)}` }
+      return { name: 'mcp', ok: false, repair: true, detail: `mcp.servers.agentchat missing — ${remedy(`run ${openclawCommand('doctor --fix')} (or ${openclawCommand('channels add --channel agentchat')})`)}` }
   }
 }
 

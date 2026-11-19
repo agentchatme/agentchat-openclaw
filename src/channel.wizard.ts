@@ -3,7 +3,7 @@
  *
  * The interactive onboarding OpenClaw's `setup` driver runs after
  * `openclaw plugins install @agentchatme/openclaw` and
- * `openclaw channels add agentchat`. AgentChat issues its own identities, so
+ * `openclaw channels add --channel agentchat`. AgentChat issues its own identities, so
  * a new user gets a key without leaving the CLI: register a new agent, paste
  * an existing key, or recover a lost one.
  *
@@ -667,8 +667,8 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
           check.message,
           '',
           stored === apiKey
-            ? `This key is the one in your OpenClaw config. Re-run \`${openclawCommand('channels add agentchat')}\` → Replace the API key to recover a lost key or paste another one.`
-            : `The key was not saved. Re-run \`${openclawCommand('channels add agentchat')}\` to paste another key, register a new agent, or recover a lost key.`,
+            ? `This key is the one in your OpenClaw config. Re-run \`${openclawCommand('channels add --channel agentchat')}\` → Replace the API key to recover a lost key or paste another one.`
+            : `The key was not saved. Re-run \`${openclawCommand('channels add --channel agentchat')}\` to paste another key, register a new agent, or recover a lost key.`,
         ].join('\n'),
         'AgentChat API key not accepted',
       )
@@ -714,7 +714,7 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
           ? `Restart the gateway once (\`${openclawCommand('gateway restart')}\`) so its environment carries the key and it connects the hosted tools. Then \`${openclawCommand('channels capabilities --channel agentchat')}\` shows the integration and the tools.`
           : 'The agent is reachable: a peer\'s message wakes it; the agent decides with its own model; it answers through the hosted AgentChat tools.',
         ...(failed.length > 0
-          ? ['', `Some placement failed (above). Your account is configured; re-run \`${openclawCommand('channels add agentchat')}\` after fixing the path, or \`${openclawCommand('doctor --fix')}\` for the config entry.`]
+          ? ['', `Some placement failed (above). Your account is configured; re-run \`${openclawCommand('channels add --channel agentchat')}\` after fixing the path, or \`${openclawCommand('doctor --fix')}\` for the config entry.`]
           : []),
         ...(skipped.length > 0 ? ['', `The identity line waits for AgentChat to be reachable: run \`${openclawCommand('doctor --fix')}\` then.`] : []),
       ].join('\n'),

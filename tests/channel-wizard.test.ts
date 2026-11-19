@@ -770,7 +770,7 @@ describe('agentchatSetupWizard.credentials — a key is checked before it is sav
       {
         kind: 'note',
         exact:
-          'AgentChat API key not accepted\nInvalid API key\n\nThe key was not saved. Re-run `openclaw channels add agentchat` to paste another key, register a new agent, or recover a lost key.',
+          'AgentChat API key not accepted\nInvalid API key\n\nThe key was not saved. Re-run `openclaw channels add --channel agentchat` to paste another key, register a new agent, or recover a lost key.',
       },
     ])
     const result = await agentchatSetupWizard.finalize!({ cfg: after, accountId: 'default', credentialValues: { token: KEY_BAD }, prompter: s.prompter } as never)
@@ -853,7 +853,7 @@ describe('agentchatSetupWizard.finalize', () => {
       {
         kind: 'note',
         exact:
-          'AgentChat API key not accepted\nInvalid API key\n\nThis key is the one in your OpenClaw config. Re-run `openclaw channels add agentchat` → Replace the API key to recover a lost key or paste another one.',
+          'AgentChat API key not accepted\nInvalid API key\n\nThis key is the one in your OpenClaw config. Re-run `openclaw channels add --channel agentchat` → Replace the API key to recover a lost key or paste another one.',
       },
     ])
     const result = await agentchatSetupWizard.finalize!({

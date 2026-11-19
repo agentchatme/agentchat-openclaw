@@ -421,7 +421,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
               }
               blocked = true
               ctx.log?.error?.(
-                `[agentchat:${ctx.accountId}] key rejected (${close}) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted (${next}); store a new key with ${openclawCommand('channels add agentchat')} (Recover by email code, or --token-file <path>), then restart the gateway (${openclawCommand('gateway restart')}) so the hosted tools use it too`,
+                `[agentchat:${ctx.accountId}] key rejected (${close}) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted (${next}); store a new key with ${openclawCommand('channels add --channel agentchat')} (Recover by email code, or --token-file <path>), then restart the gateway (${openclawCommand('gateway restart')}) so the hosted tools use it too`,
               )
               ctx.setStatus(
                 withLifecycle(
@@ -430,7 +430,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
                     running: false,
                     connected: false,
                     statusState: 'not-linked',
-                    lastError: `the server refused the API key (${close}); store a new key with ${openclawCommand('channels add agentchat')}, then restart the gateway (${openclawCommand('gateway restart')})`,
+                    lastError: `the server refused the API key (${close}); store a new key with ${openclawCommand('channels add --channel agentchat')}, then restart the gateway (${openclawCommand('gateway restart')})`,
                     lastDisconnect: { at: Date.now(), error: `key rejected: ${close}` },
                   },
                   'blocked',

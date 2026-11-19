@@ -56,7 +56,7 @@ export function resolveConfiguredApiKey(record: { readonly apiKey?: unknown; rea
           missing: false,
           reason:
             `channels.agentchat.apiKey and the key in channels.agentchat.apiKeyFile (${read.path}) are different keys — keep one: ` +
-            `run \`${openclawCommand('channels add agentchat')}\` with the key you mean (it stores it in a key file and removes apiKey)`,
+            `run \`${openclawCommand('channels add --channel agentchat')}\` with the key you mean (it stores it in a key file and removes apiKey)`,
         }
       }
       return { ok: true, apiKey: read.apiKey, source: 'file', file: read.path, loosePermissions: read.loosePermissions, ...(inline ? { plainTextCopy: true } : {}) }
@@ -65,14 +65,14 @@ export function resolveConfiguredApiKey(record: { readonly apiKey?: unknown; rea
     return {
       ok: false,
       missing: false,
-      reason: `channels.agentchat.apiKeyFile (${read.path}) cannot be used: ${read.reason} — run \`${openclawCommand('channels add agentchat')}\` to store the key again`,
+      reason: `channels.agentchat.apiKeyFile (${read.path}) cannot be used: ${read.reason} — run \`${openclawCommand('channels add --channel agentchat')}\` to store the key again`,
     }
   }
   if (inline) {
     if (isApiKeyPresent(inline)) return { ok: true, apiKey: inline, source: 'config' }
     return { ok: false, missing: false, reason: 'channels.agentchat.apiKey looks too short for an AgentChat API key' }
   }
-  return { ok: false, missing: true, reason: `no API key configured (channels.agentchat.apiKeyFile) — run \`${openclawCommand('channels add agentchat')}\`` }
+  return { ok: false, missing: true, reason: `no API key configured (channels.agentchat.apiKeyFile) — run \`${openclawCommand('channels add --channel agentchat')}\`` }
 }
 
 /** `resolveConfiguredApiKey` for an account in an OpenClaw config. */

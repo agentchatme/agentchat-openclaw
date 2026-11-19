@@ -3,7 +3,7 @@
  * `/dev/stdin`, a path — each in a process of its own, with fd 0 set up the
  * way the shell sets it up (./helpers/read-key-input.mjs).
  *
- * The case that broke: `openclaw channels add agentchat --token-file - <
+ * The case that broke: `openclaw channels add --channel agentchat --token-file - <
  * ~/agentchat.key` typed in a terminal answered "standard input is not one
  * API key: it is empty". In a terminal OpenClaw's CLI puts `process.stdin`
  * into flowing mode; for a redirected file that stream reads the file to its
