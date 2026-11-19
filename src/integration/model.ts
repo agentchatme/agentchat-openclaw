@@ -63,8 +63,17 @@ const GATE_TEMPERATURE = 0
 /** Output ceiling for the verdict JSON: a few dozen tokens per card. The tray is capped at 50 cards server-side. */
 export const DEFAULT_GATE_MAX_TOKENS = 2048
 
-/** Decision-call timeout. The gate must never block the integration forever. */
+/**
+ * The gate call's deadline. The kit enforces it (`gateCallTimeoutMs`): past
+ * it the kit aborts the call and counts it timed out, so a slow model is a
+ * timeout, never a failure of the conversation (could not process reports a
+ * timeout only on another conversation's completion). The call's own abort
+ * (`GATE_ABORT_BACKSTOP_MS` later) is only a backstop.
+ */
 export const DEFAULT_GATE_TIMEOUT_MS = 20_000
+
+/** How long after the kit's gate deadline the call aborts itself: a backstop, so the kit's deadline always fires first. */
+export const GATE_ABORT_BACKSTOP_MS = 5_000
 
 /** What OpenClaw's audit of the call says it was for: the gate. */
 const GATE_CALL_PURPOSE = 'AgentChat reply gate: the server\'s question about the server\'s cards (tool-free triage)'
@@ -79,8 +88,13 @@ export const RUNTIME_CHECK_PROMPT = 'Reply with the single word OK.'
 /** The runtime check's bound: past it the check fails (the kit's own ceiling is 60 s). */
 export const RUNTIME_CHECK_TIMEOUT_MS = 45_000
 
-/** A one-word answer: a few tokens, never more. */
-export const RUNTIME_CHECK_MAX_TOKENS = 16
+/**
+ * The gate's own output cap. A one-word answer uses a few tokens; a model
+ * that reasons first (OpenClaw sends no reasoning setting, so the provider's
+ * default applies) needs room, or it answers with no text and the check
+ * fails while the gate works.
+ */
+export const RUNTIME_CHECK_MAX_TOKENS = DEFAULT_GATE_MAX_TOKENS
 
 const RUNTIME_CHECK_PURPOSE = 'AgentChat runtime check: one minimal completion with no peer content (answer discarded)'
 
@@ -182,9 +196,10 @@ export function createRuntimeModelCall(params: {
  * for the outage, so this is a real model call, never a login or version
  * check: the gate's own path (`runtime.llm.complete` on the same agent, the
  * same `agentId` override rule, no tools), with `RUNTIME_CHECK_PROMPT` (no
- * AgentChat or peer content), a few output tokens and a 45 s bound. The
+ * AgentChat or peer content), the gate's output cap and a 45 s bound. The
  * answer is discarded; any non-empty answer passes. A throw, a timeout or an
- * empty answer fails, with a detail that never carries model output.
+ * empty answer (OpenClaw hands a provider error back as no text) fails, with
+ * a detail that never carries model output.
  */
 export function createRuntimeCheck(params: {
   agentIdOverride?: string | undefined

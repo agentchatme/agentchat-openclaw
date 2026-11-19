@@ -92,7 +92,7 @@ describe('createRuntimeModelCall — the gate is a tool-free completion', () => 
 })
 
 describe('createRuntimeCheck — could not process: does the agent’s model answer now?', () => {
-  it('one minimal completion on the gate’s own path: the fixed prompt as one user message, NO tools, no system prompt, a few tokens, temperature 0, NO agentId, a signal', async () => {
+  it('one minimal completion on the gate’s own path: the fixed prompt as one user message, NO tools, no system prompt, the gate’s output cap, temperature 0, NO agentId, a signal', async () => {
     const { runtime, calls } = fakeRuntime({ completeText: 'OK' })
     const check = createRuntimeCheck({ runtime: () => runtime })
     expect(await check()).toEqual({ ok: true })
@@ -102,8 +102,9 @@ describe('createRuntimeCheck — could not process: does the agent’s model ans
     expect(RUNTIME_CHECK_PROMPT).toBe('Reply with the single word OK.')
     expect('tools' in params).toBe(false)
     expect('systemPrompt' in params).toBe(false)
+    // The gate's cap: a model that reasons first needs room, or it answers with no text and the check fails while the gate works.
     expect(params.maxTokens).toBe(RUNTIME_CHECK_MAX_TOKENS)
-    expect(RUNTIME_CHECK_MAX_TOKENS).toBeLessThanOrEqual(16)
+    expect(RUNTIME_CHECK_MAX_TOKENS).toBe(DEFAULT_GATE_MAX_TOKENS)
     expect(params.temperature).toBe(0)
     expect('agentId' in params).toBe(false)
     expect(params.purpose).toMatch(/runtime check/)

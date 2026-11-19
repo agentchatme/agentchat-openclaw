@@ -50,6 +50,8 @@ import { removeOldStateFiles } from '../integration/state.js'
 import { refreshIdentityLine } from '../integration/placement.js'
 import { NIX_MODE_ERROR_CODE, clientIdentityText, refreshHostedMcpEntry, toolsUseOtherKey, type ConfigMutator } from '../integration/mcp.js'
 import {
+  DEFAULT_GATE_TIMEOUT_MS,
+  GATE_ABORT_BACKSTOP_MS,
   createRuntimeCheck,
   createRuntimeModelCall,
   createRuntimeTurnStarter,
@@ -265,7 +267,7 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       )
     }
     const client = getClient({ accountId: ctx.accountId, config })
-    const gateTimeoutMs = readReplyGateTimeoutMsFromEnv()
+    const gateDeadlineMs = readReplyGateTimeoutMsFromEnv() ?? DEFAULT_GATE_TIMEOUT_MS
     /** Which 30-minute mark each long run was last reported at. */
     const overdueWarned = new Map<string, number>()
     /** The account's turns for this process (shared with any later loop for the account). */
@@ -363,7 +365,12 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           texts,
           socket: socket.realtime,
           handle: config.agentHandle,
-          callModel: createRuntimeModelCall({ agentIdOverride, ...(gateTimeoutMs !== undefined ? { timeoutMs: gateTimeoutMs } : {}) }),
+          // The gate call's deadline is the kit's (AGENTCHAT_REPLY_GATE_TIMEOUT_MS,
+          // default 20 s): past it the kit aborts the call and counts it timed
+          // out — a slow model is a timeout, never the conversation's failure.
+          // The call's own abort comes later, as a backstop.
+          callModel: createRuntimeModelCall({ agentIdOverride, timeoutMs: gateDeadlineMs + GATE_ABORT_BACKSTOP_MS }),
+          gateCallTimeoutMs: gateDeadlineMs,
           // Could not process: before a failed gate call or turn is reported as
           // its conversation's, the kit may ask whether the model answers now —
           // one minimal call on the gate's path (same agent, no tools, no peer

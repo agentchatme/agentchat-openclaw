@@ -20,7 +20,7 @@ import { placeIntegration } from '../../src/integration/placement.js'
 import { probeHostedMcp } from '../../src/integration/mcp.js'
 import { registerIntegration, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
 import { createInMemoryMetrics } from '../../src/metrics.js'
-import { notePausedFrom, resetPausedConversationsForTest } from '../../src/integration/could-not-process.js'
+import { noteCouldNotProcess, resetCouldNotProcessForTest } from '../../src/integration/could-not-process.js'
 import type { IntegrationSocket, SocketState } from '../../src/integration/socket.js'
 import { IDENTITY_LINE } from '../helpers/texts.js'
 import { testKey } from '../helpers/keys.js'
@@ -187,12 +187,12 @@ describe('status adapter — the doctor-style probe', () => {
       awaitingEvidence: 1, runtimeChecksOk: 1, runtimeChecksFailed: 0, splitsStopped: 0,
       lastRuntimeCheck: { at: new Date().toISOString(), ok: true, detail: null },
     }
-    notePausedFrom('default', {
+    noteCouldNotProcess('default', {
       type: 'processing_failure', conversationId: 'conv_bad', source: 'turn', throughMessageId: 'msg_9', outcome: 'failed', evidence: 'other_run_completed',
       result: { action: 'paused', attempts: 3, hidden_message_ids: [], paused_until: until }, next: 'stop',
     })
     // A pause already over is not shown.
-    notePausedFrom('default', {
+    noteCouldNotProcess('default', {
       type: 'processing_failure', conversationId: 'conv_old', source: 'gate', throughMessageId: 'msg_1', outcome: 'failed', evidence: 'runtime_check',
       result: { action: 'paused', attempts: 2, hidden_message_ids: [], paused_until: new Date(Date.now() - 1000).toISOString() }, next: 'stop',
     })
@@ -211,10 +211,10 @@ describe('status adapter — the doctor-style probe', () => {
         tone: 'muted',
       })
       expect(lines.filter((l) => l.text.startsWith('conversation '))).toEqual([
-        { text: `conversation conv_bad paused until ${until} — could not process; a 24 h mute that ends on its own`, tone: 'warn' },
+        { text: `conversation conv_bad paused until ${until} — could not process; the mute ends on its own`, tone: 'warn' },
       ])
     } finally {
-      resetPausedConversationsForTest()
+      resetCouldNotProcessForTest()
     }
   })
 

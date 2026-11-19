@@ -18,7 +18,7 @@ import { AccountTurns } from '../../src/integration/running.js'
 import { createAfterTurnRecorder } from '../../src/integration/after-turn.js'
 import { IntegrationSocket } from '../../src/integration/socket.js'
 import { turnEndOf } from '../../src/integration/turns.js'
-import { couldNotProcessView, pausedConversations, resetPausedConversationsForTest } from '../../src/integration/could-not-process.js'
+import { couldNotProcessView, pausedConversations, resetCouldNotProcessForTest } from '../../src/integration/could-not-process.js'
 import { spellTextsForOpenClaw } from '../../src/integration/texts.js'
 import { card, invite, tray } from '../helpers/fake-client.js'
 import { capturingLogger } from '../helpers/logger.js'
@@ -112,8 +112,9 @@ async function start(
     readiness?: () => TurnReadiness
     gateEnabled?: boolean
     texts?: ReturnType<typeof staticTexts>
-    callModel?: (calls: string[]) => (prompt: string) => Promise<string>
+    callModel?: (calls: string[]) => (prompt: string, options?: { signal?: AbortSignal }) => Promise<string>
     checkRuntime?: () => Promise<{ ok: boolean; detail?: string }>
+    gateCallTimeoutMs?: number
   } = {},
 ): Promise<Harness> {
   const config = parseChannelConfig({ apiKey: KEY, apiBase: 'https://api.agentchat.me', agentHandle: 'alice' })
@@ -132,6 +133,7 @@ async function start(
     handle: 'alice',
     callModel: (opts.callModel ?? gateModel)(modelCalls),
     ...(opts.checkRuntime ? { checkRuntime: opts.checkRuntime } : {}),
+    ...(opts.gateCallTimeoutMs !== undefined ? { gateCallTimeoutMs: opts.gateCallTimeoutMs } : {}),
     startRun: runs.start,
     turns,
     logger,
@@ -509,7 +511,7 @@ function onTray(h: Harness, conversationId: string, seq: number, text: string, e
 }
 
 describe('could not process (the kit reports; OpenClaw supplies the runtime check)', () => {
-  afterEach(() => resetPausedConversationsForTest())
+  afterEach(() => resetCouldNotProcessForTest())
 
   it('a failed gate chunk is gated again one card per call: the card the model cannot handle fails alone, the other is decided now and gets its turn', async () => {
     const server = fakeServer({ answers: [{ action: 'retry', attempts: 1, hidden_message_ids: [], paused_until: null }] })
@@ -534,7 +536,7 @@ describe('could not process (the kit reports; OpenClaw supplies the runtime chec
     expect(counts.retry).toBe(1)
   })
 
-  it('alone on the tray, its failure is reported only after the runtime check (the gate’s own path) passes; the server’s pause shows in status', async () => {
+  it('alone on the tray, its failure is reported only after the runtime check passes; the server’s pause shows in status', async () => {
     const until = new Date(Date.now() + 24 * 3600_000).toISOString()
     const server = fakeServer({
       answers: [
@@ -555,7 +557,7 @@ describe('could not process (the kit reports; OpenClaw supplies the runtime chec
     const view = couldNotProcessView(h.integration.loop.status().processingFailures, pausedConversations('default'))
     expect(view.summary).toMatch(/^could not process — reported 2 \(retry 1, paused 1\)/)
     expect(view.summary).toMatch(/runtime checks: ok \d/)
-    expect(view.paused).toEqual([`conversation conv_bad paused until ${until} — could not process; a 24 h mute that ends on its own`])
+    expect(view.paused).toEqual([`conversation conv_bad paused until ${until} — could not process; the mute ends on its own`])
     expect(h.logger.at('warn').some((l) => /the server answered paused/.test(l.msg ?? '') && l.obj.pausedUntil === until)).toBe(true)
   })
 
@@ -570,6 +572,25 @@ describe('could not process (the kit reports; OpenClaw supplies the runtime chec
     const view = couldNotProcessView(counts, [])
     expect(view.attention).toBe(true)
     expect(view.summary).toMatch(/last runtime check failed: the model did not answer/)
+  })
+
+  it('a slow gate call is the kit’s timeout (the deadline this plugin hands it), so alone on the tray it is never reported on the runtime check', async () => {
+    const server = fakeServer()
+    const checks: number[] = []
+    const slow = (calls: string[]) => (prompt: string, options?: { signal?: AbortSignal }) =>
+      new Promise<string>((_, reject) => {
+        calls.push(prompt)
+        options?.signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true })
+      })
+    const h = await start({ server, callModel: slow, gateCallTimeoutMs: 50, checkRuntime: async () => (checks.push(1), { ok: true }) })
+    await message(h, 'conv_slow', 1, 'a long question')
+    await new Promise((resolve) => setTimeout(resolve, 150))
+    await flushAsync(60)
+    expect(h.modelCalls.length).toBeGreaterThanOrEqual(1)
+    expect(h.logger.at('warn').some((l) => /gate failed closed/.test(l.msg ?? '') && /no answer within 50 ms/.test(String(l.obj.failure)))).toBe(true)
+    expect(server.reports).toEqual([])
+    expect(checks).toEqual([])
+    expect(h.integration.loop.status().processingFailures.awaitingEvidence).toBe(1)
   })
 
   it('a card whose preview is hidden (could_not_process) reaches the gate with the served note as its text, untouched, and the gate prompt still renders', async () => {
@@ -612,6 +633,20 @@ describe('could not process (the kit reports; OpenClaw supplies the runtime chec
     h.server.cards.clear()
     for (let i = 2; i < h.runs.requests.length; i += 1) h.runs.end(i)
     await flushAsync(30)
+  })
+
+  it('gate off: a conversation run whose end OpenClaw never confirmed (the plugin runtime gone) is not reported', async () => {
+    const template = 'AgentChat started this run for ONE conversation: <conversation_id>.'
+    const server = fakeServer()
+    const h = await start({ server, gateEnabled: false, texts: staticTexts({ ...SERVED_TEXTS, conversation_run_template: template }), checkRuntime: async () => ({ ok: true }) })
+    await message(h, 'conv_a', 1)
+    expect(h.runs.requests).toHaveLength(1)
+    h.runs.end(0, { status: 'gone' })
+    await flushAsync(60)
+    expect(server.reports).toEqual([])
+    expect(h.integration.loop.status().counters.runsFailed).toBe(0)
+    expect(h.integration.loop.status().counters.runsNotStarted).toBe(1)
+    h.server.cards.clear()
   })
 
   it('gate off: a conversation run handed off after 30 minutes is still going, so it is not reported as its conversation’s failure', async () => {

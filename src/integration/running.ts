@@ -30,11 +30,13 @@
  * was still admitting it starts out let go of. Either way the old run can
  * never release a newer turn's hold on the same conversation.
  *
- * Gate off (single-run mode) one run reads the whole tray, so two would
- * answer the same cards: past `TURN_OVERDUE_MS` the cycle waiting on the run
- * is let go of (the loop is not stuck in it), but no new run starts while the
- * handed-off one lives — readiness says not-ready, status and doctor say why,
- * and `openclaw agentchat release <run id> --force` frees it.
+ * Gate off (single-run mode) a gate-off run never runs alongside another: a
+ * run for the whole tray (from a server without the conversation-run
+ * template) reads every card, so two would answer the same cards. Past
+ * `TURN_OVERDUE_MS` the kit's wait on the run is let go of (the loop is not
+ * stuck in it), but no new run starts while the handed-off one lives —
+ * readiness says not-ready, status and doctor say why, and `openclaw
+ * agentchat release <run id> --force` frees it.
  *
  * A gateway restart ends every run with the process, and OpenClaw (current
  * main) may continue a plugin's turn session afterwards: a plugin run with
@@ -727,7 +729,7 @@ function deadlineText(cfg: unknown): string {
 export function overdueTurnLine(turn: { readonly kind: TurnKind; readonly id: string; readonly elapsedMs: number }, cfg: unknown): string {
   const minutes = Math.round(turn.elapsedMs / 60_000)
   if (turn.kind === 'run') {
-    return `${whatOf(turn.kind, turn.id)} has run ${minutes} min — no new run starts until it ends (one run reads the whole tray); ${deadlineText(cfg)}`
+    return `${whatOf(turn.kind, turn.id)} has run ${minutes} min — no new run starts until it ends (a gate-off run never runs alongside another); ${deadlineText(cfg)}`
   }
   return `a turn for ${whatOf(turn.kind, turn.id)} has run ${minutes} min — that conversation stays held (no second reply) until the run ends; ${deadlineText(cfg)}; other conversations are not held up by it`
 }
@@ -754,7 +756,7 @@ export function restartHoldLines(turns: AccountTurns, now: number = Date.now()):
 export function hungTurnsReason(turns: AccountTurns, cfg: unknown, now: number = Date.now()): string | null {
   const single = turns.hungSingleRun()
   if (single) {
-    return `${whatOf('run', single.runId)} has run ${Math.floor((now - single.startedAt) / 60_000)} min and is still going in OpenClaw — no new run starts while it lives (one run reads the whole tray; a second would answer the same cards), so the cards wait on the tray; ${deadlineText(cfg)}. \`${openclawCommand(`agentchat release ${single.runId} --force`)}\` lets a new run start (the old one may still answer)`
+    return `${whatOf('run', single.runId)} has run ${Math.floor((now - single.startedAt) / 60_000)} min and is still going in OpenClaw — no new run starts while it lives (a gate-off run never runs alongside another; a run for the whole tray would answer the same cards twice), so the cards wait on the tray; ${deadlineText(cfg)}. \`${openclawCommand(`agentchat release ${single.runId} --force`)}\` lets a new run start (the old one may still answer)`
   }
   if (turns.hungCount < MAX_HUNG_TURNS) return null
   const held = turns

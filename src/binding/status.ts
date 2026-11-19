@@ -26,7 +26,7 @@ import { checkPlacement, resolvePlacementAgentId, type PlacementCheck } from '..
 import { cachedIdentityLine } from '../integration/texts.js'
 import { findAccountTurns, hungTurnsReason, overdueTurnLines, restartHoldLines } from '../integration/running.js'
 import { cycleTroubleLine } from '../integration/loop.js'
-import { couldNotProcessView, pausedConversations, type CouldNotProcessView } from '../integration/could-not-process.js'
+import { couldNotProcessView, pausedConversations, recentTrouble, type CouldNotProcessView } from '../integration/could-not-process.js'
 import type { SocketState } from '../integration/socket.js'
 import type { MetricsSnapshot } from '../metrics.js'
 import { getIntegration } from './runtime-registry.js'
@@ -127,7 +127,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
     const hungReason = turnsHere ? hungTurnsReason(turnsHere, cfg) : null
     const overdue = turnsHere ? [...(hungReason ? [hungReason] : []), ...overdueTurnLines(turnsHere.runningRuns(), cfg), ...restartHoldLines(turnsHere)] : []
     const trouble = loopStatus ? cycleTroubleLine(loopStatus.recentCycles ?? []) : null
-    const couldNotProcess = loopStatus ? couldNotProcessView(loopStatus.processingFailures, pausedConversations(account.accountId)) : null
+    const couldNotProcess = loopStatus ? couldNotProcessView(loopStatus.processingFailures, pausedConversations(account.accountId), recentTrouble(account.accountId)) : null
     const servedFrom = live?.texts?.source
     const textsSource: 'server' | 'cache' | 'missing' | undefined = live ? (servedFrom === 'server' || servedFrom === 'cache' ? servedFrom : 'missing') : undefined
     const socketCounters = live?.metrics?.snapshot?.()

@@ -39,7 +39,7 @@ import type { GateModelCall, TurnReadiness, TurnStarter as RuntimeTurnStarter } 
 import { OPENCLAW_TOOL_NAMER, integrationLane, wakeSessionKey } from './turn.js'
 import { createLoopTurnStarter } from './turns.js'
 import type { AccountTurns } from './running.js'
-import { notePausedFrom } from './could-not-process.js'
+import { noteCouldNotProcess } from './could-not-process.js'
 
 export interface IntegrationLoopOptions {
   readonly accountId: string
@@ -51,6 +51,12 @@ export interface IntegrationLoopOptions {
   /** The agent's handle, for the echo filter (learned from the tray when absent). */
   readonly handle?: string | undefined
   readonly callModel: GateModelCall
+  /**
+   * The kit's deadline for one gate call (`gateCallTimeoutMs`; the kit's
+   * default 60 s when absent). Past it the kit aborts the call and counts it
+   * timed out. Keep `callModel`'s own abort later than this.
+   */
+  readonly gateCallTimeoutMs?: number
   /**
    * Could not process: does the agent's AI answer now (`createRuntimeCheck`,
    * one minimal call on the gate's path)? The kit asks it before it reports a
@@ -116,6 +122,7 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
     mode: gateEnabled ? 'gateCall' : 'singleRun',
     ...(gateEnabled ? { callModel: options.callModel, startTurn } : { startRun: singleRunStarter(options, owner, logger, now) }),
     ...(options.checkRuntime ? { checkRuntime: options.checkRuntime } : {}),
+    ...(options.gateCallTimeoutMs !== undefined ? { gateCallTimeoutMs: options.gateCallTimeoutMs } : {}),
     socket: options.socket,
     ...(options.handle ? { handle: options.handle } : {}),
     toolNamer: OPENCLAW_TOOL_NAMER,
@@ -131,7 +138,7 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
     ...(options.setTimeout ? { setTimeout: options.setTimeout } : {}),
     ...(options.clearTimeout ? { clearTimeout: options.clearTimeout } : {}),
     onEvent: (event) => {
-      notePausedFrom(options.accountId, event)
+      noteCouldNotProcess(options.accountId, event, now())
       logEvent(event, logger, metrics)
     },
   })
