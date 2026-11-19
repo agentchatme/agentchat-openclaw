@@ -7,11 +7,16 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
-## Unreleased
+## 0.11.1 — 2026-11-19
 
-Fixes to the key file and `--token-file` work that is on `main` and not yet released, found by running it on a real OpenClaw 2026.11.5 install. No settings to change by hand.
+Fixed existing behaviour, so patch +1 (`VERSIONING.md`). The API key is out of reach wherever the plugin can take it. Nothing to change by hand: `openclaw doctor --fix`, or the next `openclaw channels add --channel agentchat`, moves an existing key into its file.
 
 ### Fixed
+
+- **The key is no longer in `openclaw.json`.** Setup, the wizard and `openclaw doctor --fix` keep it in its own owner-only file, `<state dir>/agentchat/<accountId>/keys/key-<16 hex of its sha256>` (file `0600`, folder `0700`). The config holds only its path, `channels.agentchat.apiKeyFile`. A plain-text `channels.agentchat.apiKey` from an earlier release still works; the gateway log, `openclaw channels capabilities` and `openclaw doctor` say it is there until `doctor --fix` moves it.
+- **The key is never on a command line.** Non-interactive setup takes `openclaw channels add --channel agentchat --token-file <path>` (or `--token-file -` for standard input). `--token` still works and says that it put the key on the command line.
+- **No silent second identity.** When the gateway's `AGENTCHAT_API_KEY` is not the account's key (another agent's key exported in the shell, or the old key after a rotation), the integration does not start and says why in the log and in `openclaw channels status`. Before, the socket ran as one agent and the tools as another.
+- **`channels remove --delete` says where the key still is.** It keeps the key file and names it, because OpenClaw can still refuse the config write after the plugin's removal hook has run.
 
 - **`--token-file -` works in a terminal.** `openclaw channels add --channel agentchat --token-file - < ~/agentchat.key`, typed in a terminal, answered "standard input is not one API key: it is empty" and saved nothing. In a terminal OpenClaw's CLI reads standard input itself, which leaves a redirected file's shared read offset at its end. A regular file on standard input is now read from its first byte whatever that offset says. `--token-file /dev/stdin` (and `/dev/fd/0`) is read as standard input itself: on macOS it is the same descriptor, and on Linux opening it fails for a socket, which is what a runtime spawning `openclaw` from Node hands it. A pipe (`cat ~/agentchat.key | …`) is read in order, as before. Standard input left on the terminal is refused and pointed to `--token-file <path>`, instead of competing with OpenClaw for the keystrokes; so is empty standard input. The reader is its own module (`src/credentials/key-input.ts`, `node:fs` and `node:tty` only).
 - **Printed commands and paths follow the OpenClaw profile.** Under `openclaw --profile <name>`, the refusal for a foreign `AGENTCHAT_API_KEY` named `~/.openclaw/.env` and `openclaw gateway restart`, which, typed as printed, act on the default profile: another agent's gateway restarts and the refused one stays down. Every command the plugin prints now goes through OpenClaw's own formatter (`formatCliCommand`: `--profile <name>`, or `--container <name>`), and every path is that profile's state dir.
