@@ -41,6 +41,7 @@ import { checkApiKey } from '../setup-client.js'
 import { getIntegration, listActiveAccounts } from './runtime-registry.js'
 import { findAccountTurns, hungTurnsReason, overdueTurnLines, restartHoldLines } from '../integration/running.js'
 import { cycleTroubleLine } from '../integration/loop.js'
+import { couldNotProcessView, pausedConversations } from '../integration/could-not-process.js'
 import {
   checkPlacement,
   dotEnvPath,
@@ -147,6 +148,9 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
     // A turn the running integration (this process) has held past 30 minutes,
     // or a conversation held after a gateway restart.
     // And cycles that decided nothing several times in a row.
+    // And could not process: a conversation the server paused for this agent,
+    // and the kit's counts when one needs a look (a report failed, the gate's
+    // split stopped, the last runtime check failed).
     for (const accountId of listActiveAccounts()) {
       const status = getIntegration(accountId)?.loop?.loop.status()
       if (!status) continue
@@ -158,6 +162,9 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
       }
       const trouble = cycleTroubleLine(status.recentCycles ?? [])
       if (trouble) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${trouble}`)
+      const couldNotProcess = couldNotProcessView(status.processingFailures, pausedConversations(accountId))
+      if (couldNotProcess.attention) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${couldNotProcess.summary}`)
+      for (const line of couldNotProcess.paused) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${line}`)
     }
     return warnings
   },

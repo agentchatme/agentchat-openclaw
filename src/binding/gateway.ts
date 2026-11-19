@@ -50,6 +50,7 @@ import { removeOldStateFiles } from '../integration/state.js'
 import { refreshIdentityLine } from '../integration/placement.js'
 import { NIX_MODE_ERROR_CODE, clientIdentityText, refreshHostedMcpEntry, toolsUseOtherKey, type ConfigMutator } from '../integration/mcp.js'
 import {
+  createRuntimeCheck,
   createRuntimeModelCall,
   createRuntimeTurnStarter,
   createRunWatcher,
@@ -363,6 +364,11 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
           socket: socket.realtime,
           handle: config.agentHandle,
           callModel: createRuntimeModelCall({ agentIdOverride, ...(gateTimeoutMs !== undefined ? { timeoutMs: gateTimeoutMs } : {}) }),
+          // Could not process: before a failed gate call or turn is reported as
+          // its conversation's, the kit may ask whether the model answers now —
+          // one minimal call on the gate's path (same agent, no tools, no peer
+          // content, 45 s), never a login check.
+          checkRuntime: createRuntimeCheck({ agentIdOverride }),
           // A turn holds its conversation until OpenClaw confirms its run
           // ended; a wait that elapses is asked again (`integration/run.ts`).
           startRun: createRuntimeTurnStarter({

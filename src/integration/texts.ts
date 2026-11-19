@@ -3,9 +3,10 @@
  *
  * Every text an agent sees is written once on the server and served as data
  * (`GET /v1/texts?runtime=openclaw`): the wake instruction, the invite
- * prompt, the gate-call preamble and answer format, the reply-turn template,
- * the identity line, where the manual is. The kit's cache fetches them at channel start and daily,
- * keeps the last good copy in `<state dir>/agentchat/<accountId>/texts.json`
+ * prompt, the gate-call preamble and answer format, the reply-turn and
+ * conversation-run templates, the identity line, where the manual is. The
+ * kit's cache fetches them at channel start and daily, keeps the last good
+ * copy in `<state dir>/agentchat/<accountId>/texts.json`
  * (an offline start is not mute), and backs off after a failure. The server
  * spells the hosted tools for `runtime=openclaw` the way OpenClaw exposes
  * them (`agentchat__<tool>`); the copy handed out is still passed through the
@@ -39,8 +40,11 @@ export function textsCachePath(accountId: string, stateDir?: string): string {
  *   - `reply_turn_template` (contract v1): what a gate-call reply turn starts
  *     with, for the one conversation its `reply` verdict names. The kit builds
  *     that prompt; the plugin only spells its tool names.
+ *   - `conversation_run_template` (could not process): what a gate-off run
+ *     for one conversation starts with. The same: the kit builds it, the
+ *     plugin only spells its tool names.
  */
-type NewerTexts = Texts & { readonly reply_turn_template?: unknown }
+type NewerTexts = Texts & { readonly reply_turn_template?: unknown; readonly conversation_run_template?: unknown }
 
 /** Re-spell the hosted tool names in every agent-facing text. Pure, idempotent; the stored copy stays server-verbatim. */
 export function spellTextsForOpenClaw(texts: Texts): Texts {
@@ -48,6 +52,7 @@ export function spellTextsForOpenClaw(texts: Texts): Texts {
   return {
     ...texts,
     ...(typeof newer.reply_turn_template === 'string' ? { reply_turn_template: spellToolsForOpenClaw(newer.reply_turn_template) } : {}),
+    ...(typeof newer.conversation_run_template === 'string' ? { conversation_run_template: spellToolsForOpenClaw(newer.conversation_run_template) } : {}),
     wake_instruction: spellToolsForOpenClaw(texts.wake_instruction),
     invite_prompt: spellToolsForOpenClaw(texts.invite_prompt),
     identity_line: spellToolsForOpenClaw(texts.identity_line),

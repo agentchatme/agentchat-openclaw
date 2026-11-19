@@ -66,6 +66,24 @@ export const DEFAULT_GATE_MAX_TOKENS = 2048
 /** Decision-call timeout. The gate must never block the integration forever. */
 export const DEFAULT_GATE_TIMEOUT_MS = 20_000
 
+/** What OpenClaw's audit of the call says it was for: the gate. */
+const GATE_CALL_PURPOSE = 'AgentChat reply gate: the server\'s question about the server\'s cards (tool-free triage)'
+
+/**
+ * The runtime check (could not process): one minimal completion through the
+ * gate's own path, so a pass shows the agent's model answers now. The prompt
+ * holds no AgentChat or peer content; the answer is discarded.
+ */
+export const RUNTIME_CHECK_PROMPT = 'Reply with the single word OK.'
+
+/** The runtime check's bound: past it the check fails (the kit's own ceiling is 60 s). */
+export const RUNTIME_CHECK_TIMEOUT_MS = 45_000
+
+/** A one-word answer: a few tokens, never more. */
+export const RUNTIME_CHECK_MAX_TOKENS = 16
+
+const RUNTIME_CHECK_PURPOSE = 'AgentChat runtime check: one minimal completion with no peer content (answer discarded)'
+
 
 export class RuntimeUnavailableError extends Error {
   constructor(what: string) {
@@ -125,13 +143,16 @@ export function createRuntimeModelCall(params: {
   runtime?: () => PluginRuntime | null
   maxTokens?: number
   timeoutMs?: number
+  /** What OpenClaw's audit says the call was for (default: the gate). */
+  purpose?: string
 }): GateModelCall {
   const getRuntime = params.runtime ?? getPluginRuntime
   const maxTokens = params.maxTokens ?? DEFAULT_GATE_MAX_TOKENS
   const timeoutMs = params.timeoutMs ?? DEFAULT_GATE_TIMEOUT_MS
+  const purpose = params.purpose ?? GATE_CALL_PURPOSE
   return async (prompt, options) => {
     const runtime = getRuntime()
-    if (!runtime) throw new RuntimeUnavailableError('the gate call')
+    if (!runtime) throw new RuntimeUnavailableError(purpose === GATE_CALL_PURPOSE ? 'the gate call' : 'the runtime check')
     // Two reasons to stop: our own timeout, and the kit's gate-call deadline
     // (the loop aborts its signal when it no longer wants the answer).
     // OpenClaw's `llm.complete` takes an AbortSignal, so both reach the call.
@@ -145,10 +166,45 @@ export function createRuntimeModelCall(params: {
       maxTokens,
       temperature: GATE_TEMPERATURE,
       ...(params.agentIdOverride ? { agentId: params.agentIdOverride } : {}),
-      purpose: 'AgentChat reply gate: the server\'s question about the server\'s cards (tool-free triage)',
+      purpose,
       ...(signal ? { signal } : {}),
     })
     return typeof result?.text === 'string' ? result.text : ''
+  }
+}
+
+/**
+ * The kit's `checkRuntime` (could not process): does the agent's AI answer
+ * right now? When a conversation's gate call or turn fails and no other
+ * conversation's work completed since, the kit asks this before it reports
+ * the failure to the server as that conversation's (`runtime_check`
+ * evidence). A pass during a provider outage would blame the conversation
+ * for the outage, so this is a real model call, never a login or version
+ * check: the gate's own path (`runtime.llm.complete` on the same agent, the
+ * same `agentId` override rule, no tools), with `RUNTIME_CHECK_PROMPT` (no
+ * AgentChat or peer content), a few output tokens and a 45 s bound. The
+ * answer is discarded; any non-empty answer passes. A throw, a timeout or an
+ * empty answer fails, with a detail that never carries model output.
+ */
+export function createRuntimeCheck(params: {
+  agentIdOverride?: string | undefined
+  runtime?: () => PluginRuntime | null
+  timeoutMs?: number
+} = {}): () => Promise<{ ok: boolean; detail?: string }> {
+  const call = createRuntimeModelCall({
+    agentIdOverride: params.agentIdOverride,
+    ...(params.runtime ? { runtime: params.runtime } : {}),
+    maxTokens: RUNTIME_CHECK_MAX_TOKENS,
+    timeoutMs: params.timeoutMs ?? RUNTIME_CHECK_TIMEOUT_MS,
+    purpose: RUNTIME_CHECK_PURPOSE,
+  })
+  return async () => {
+    try {
+      const text = await call(RUNTIME_CHECK_PROMPT)
+      return text.trim().length > 0 ? { ok: true } : { ok: false, detail: 'the model answered with no text' }
+    } catch (err) {
+      return { ok: false, detail: err instanceof Error ? err.message : String(err) }
+    }
   }
 }
 

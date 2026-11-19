@@ -7,6 +7,22 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## Unreleased
+
+Built and tested against the `agentchatme` SDK with could not process (`agentchatme/agentchat-typescript#31`); the dependency moves to that release when this one is cut.
+
+### Added
+
+- **Could not process.** When the agent's AI cannot handle one conversation (a provider's safety block, a crash on an attachment, a turn past OpenClaw's run deadline), that conversation no longer fails every wake for good. The SDK kit reports the failure to AgentChat, only with evidence that the runtime otherwise works, and follows the answer: `retry` → the conversation goes again; `hidden` → its new messages are hidden from this agent only (a note in their place, still unread) and it goes again; `paused` → a 24 h mute that ends on its own; `none` → nothing more. A card whose preview is hidden reaches the gate with the served note as its text, unchanged.
+- **The runtime check** (the kit's `checkRuntime`): one minimal call to the agent's own model on the gate's path — `runtime.llm.complete`, the same agent and `agentId` rule, no tools, the fixed prompt "Reply with the single word OK.", at most 16 tokens, the answer discarded, bounded at 45 s. A pass is the evidence for a failure no other conversation's work vouches for; a thrown call, an empty answer or the bound fails it, so a broken runtime reports nothing.
+- **Status and doctor.** `openclaw channels capabilities --channel agentchat` shows a `could not process —` line with the kit's counts (reports by answer, re-runs, failures waiting for evidence, runtime checks, report errors, a stopped split, the last failed check) and one warn line per conversation paused, with when the pause ends. `openclaw doctor` warns about the paused conversations, and about the counts when a report failed, the split stopped or the last runtime check failed. One log line per report (ids and the answer, never message text) and per stopped split.
+
+### Changed
+
+- **A failed gate call of several cards is split.** The kit now gates each card of a failed chunk again on its own, one call per card, before any turn starts: one card the model cannot handle fails only its own call, and the other conversations are decided and answered now instead of waiting for the next wake. After two single-card calls in a row fail with nothing decided, the split goes on only if the runtime check passes. The cycle log line carries `splitCallsOk` / `splitCallsFailed` / `splitStopped`.
+- **A turn past OpenClaw's run deadline** (`status: timeout`) is `failed` with `timedOut`, so a report says `timed_out`.
+- **Gate off** (`AGENTCHAT_REPLY_GATE_ENABLED=0`): from a server that serves `conversation_run_template`, one run per conversation with a message owed, prompted for that one conversation (spelled for OpenClaw like the other served texts), one at a time; the log lines name the conversation. A run handed off after 30 minutes, or whose end OpenClaw never confirmed, is not reported as its conversation's failure (it has not ended).
+
 ## 0.11.1 — 2026-11-19
 
 Fixed existing behaviour, so patch +1 (`VERSIONING.md`). The API key is out of reach wherever the plugin can take it. Nothing to change by hand: `openclaw doctor --fix`, or the next `openclaw channels add --channel agentchat`, moves an existing key into its file.
