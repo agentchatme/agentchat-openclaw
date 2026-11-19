@@ -7,9 +7,9 @@
  *
  * The plugin itself carries both:
  *   - `plugin.setup`        — the non-interactive adapter used by
- *                             `openclaw channels add agentchat --token-file <path>`
+ *                             `openclaw channels add --channel agentchat --token-file <path>`
  *   - `plugin.setupWizard`  — the interactive login-vs-register wizard used by
- *                             `openclaw channels add agentchat`
+ *                             `openclaw channels add --channel agentchat`
  *
  * Both paths write through the same `applyAgentchatAccountPatch` helper, so
  * the resulting config is identical regardless of entry point.

@@ -175,12 +175,12 @@ describe('which key an account runs with', () => {
     const gone = path.join(scratch, 'gone')
     const account = resolveAgentchatAccount({ channels: { agentchat: { apiKeyFile: gone } } } as never, 'default')
     expect(account.configured).toBe(false)
-    expect(account.parseError).toBe(`channels.agentchat.apiKeyFile (${gone}) cannot be used: the file does not exist — run \`openclaw channels add agentchat\` to store the key again`)
+    expect(account.parseError).toBe(`channels.agentchat.apiKeyFile (${gone}) cannot be used: the file does not exist — run \`openclaw channels add --channel agentchat\` to store the key again`)
     expect(resolveConfiguredApiKey({ apiKeyFile: gone, apiKey: KEY })).toMatchObject({ ok: true, source: 'config', fileProblem: 'the file does not exist' })
   })
 })
 
-describe('openclaw channels add agentchat --token-file <path> — the key never on the command line (T6-F04) and never in openclaw.json (T6-F09)', () => {
+describe('openclaw channels add --channel agentchat --token-file <path> — the key never on the command line (T6-F04) and never in openclaw.json (T6-F09)', () => {
   const tokenFile = () => {
     const file = path.join(scratch, 'agentchat.key')
     fs.writeFileSync(file, `${KEY}\n`, { mode: 0o600 })
@@ -293,7 +293,7 @@ describe('openclaw channels add agentchat --token-file <path> — the key never 
     await agentchatPlugin.setup!.afterAccountConfigWritten!({ previousCfg: {} as never, cfg: cfg as never, accountId: 'default', input, runtime })
     expect(listAccountKeyFiles('default')).toEqual([])
     expect(fs.existsSync(dotenv())).toBe(false)
-    expect(lines[0]).toEqual({ level: 'error', line: expect.stringMatching(/^AgentChat did not accept the API key \(UNAUTHORIZED\): Invalid API key .*does not exist — run `openclaw channels add agentchat` again/) })
+    expect(lines[0]).toEqual({ level: 'error', line: expect.stringMatching(/^AgentChat did not accept the API key \(UNAUTHORIZED\): Invalid API key .*does not exist — run `openclaw channels add --channel agentchat` again/) })
   })
 
   it('reads the key file once per process (OpenClaw calls several hooks with the same input; - is standard input, which can be read once)', () => {
@@ -329,6 +329,7 @@ describe('openclaw channels add agentchat --token-file <path> — the key never 
       await agentchatPlugin.setup!.afterAccountConfigWritten!({ previousCfg: previousCfg as never, cfg: next, accountId: 'default', input: prepared, runtime })
       const text = lines.map((l) => l.line).join('\n')
       expect(text).toContain('removed the plain-text channels.agentchat.apiKey from openclaw.json')
+      // This hook runs after OpenClaw's one config write for the add: the list is the files as they are now.
       expect(text).toContain(`OpenClaw's own copies of openclaw.json still hold this key in plain text: ${configPath}.bak`)
       expect(text).not.toContain(KEY)
     } finally {
@@ -337,30 +338,71 @@ describe('openclaw channels add agentchat --token-file <path> — the key never 
   })
 })
 
-describe('openclaw channels remove agentchat --delete (T6-F15)', () => {
-  it('removes the .env line, names the key file it keeps (the only copy: OpenClaw may still refuse the write) and OpenClaw’s own config copies that still hold the key — paths only', async () => {
+/**
+ * One config write as OpenClaw makes it (`src/config/backup-rotation.ts`): `.bak.4` dropped, each `.bak.N` → `.bak.N+1`,
+ * `.bak` → `.bak.1`, the config as it was → `.bak`, then the new config in place.
+ */
+function writeConfigLikeOpenClaw(configPath: string, next: string): void {
+  const base = `${configPath}.bak`
+  fs.rmSync(`${base}.4`, { force: true })
+  for (let index = 3; index >= 1; index--) if (fs.existsSync(`${base}.${index}`)) fs.renameSync(`${base}.${index}`, `${base}.${index + 1}`)
+  if (fs.existsSync(base)) fs.renameSync(base, `${base}.1`)
+  if (fs.existsSync(configPath)) fs.copyFileSync(configPath, base)
+  fs.writeFileSync(configPath, next)
+}
+
+describe('openclaw channels remove --channel agentchat --delete (T6-F15)', () => {
+  const configCopies = (configPath: string) => [configPath, `${configPath}.bak`, ...[1, 2, 3, 4].map((n) => `${configPath}.bak.${n}`), `${configPath}.last-good`]
+  afterEach(() => {
+    for (const file of configCopies(path.join(stateDir(), 'openclaw.json'))) fs.rmSync(file, { force: true })
+  })
+
+  it('removes the .env line, names the key file it keeps (OpenClaw may still refuse the write) and OpenClaw’s own config copies that hold the key once its write is done — paths only', async () => {
     const stored = writeApiKeyFile('default', KEY)
     fs.writeFileSync(dotenv(), `OTHER_VAR=1\nAGENTCHAT_API_KEY=${KEY}\n`)
     const configPath = path.join(stateDir(), 'openclaw.json')
-    fs.writeFileSync(`${configPath}.bak.2`, JSON.stringify({ channels: { agentchat: { apiKey: KEY } } }))
-    try {
-      const { runtime, lines } = cliRuntime()
-      await agentchatLifecycleAdapter.onAccountRemoved!({ prevCfg: { channels: { agentchat: { apiKeyFile: stored.path, agentHandle: 'alice' } } } as never, accountId: 'default', runtime })
-      // OpenClaw runs this hook before it commits the removal and can still refuse the write (lab: its size-drop guard);
-      // a deleted key file would then be a config naming a key that is gone. Kept, and named.
-      expect(fs.readFileSync(stored.path, 'utf8').trim()).toBe(KEY)
-      expect(fs.readFileSync(dotenv(), 'utf8')).toBe('OTHER_VAR=1\n')
-      const text = lines.map((l) => l.line).join('\n')
-      expect(text).toContain(
-        `kept the API key file ${stored.path} — it holds the only copy of the key on this machine: delete it when you no longer need the agent, or add it again with openclaw channels add agentchat --token-file <the file>`,
-      )
-      expect(text).toContain(`OpenClaw's own copies of openclaw.json still hold this key in plain text: ${configPath}.bak.2`)
-      expect(text).not.toContain(KEY)
-      // OpenClaw's file is OpenClaw's: never edited.
-      expect(fs.readFileSync(`${configPath}.bak.2`, 'utf8')).toContain(KEY)
-    } finally {
-      fs.rmSync(`${configPath}.bak.2`, { force: true })
-    }
+    const prevCfg = { channels: { agentchat: { apiKeyFile: stored.path, agentHandle: 'alice' } } }
+    const plain = JSON.stringify({ channels: { agentchat: { apiKey: KEY } } })
+    fs.writeFileSync(configPath, JSON.stringify(prevCfg))
+    fs.writeFileSync(`${configPath}.bak`, plain)
+    fs.writeFileSync(`${configPath}.bak.2`, plain)
+    fs.writeFileSync(`${configPath}.bak.4`, plain)
+    fs.writeFileSync(`${configPath}.last-good`, plain)
+    const { runtime, lines } = cliRuntime()
+    await agentchatLifecycleAdapter.onAccountRemoved!({ prevCfg: prevCfg as never, accountId: 'default', runtime })
+    // OpenClaw runs this hook before it commits the removal and can still refuse the write (lab: its size-drop guard);
+    // a deleted key file would then be a config naming a key that is gone. Kept, and named.
+    expect(fs.readFileSync(stored.path, 'utf8').trim()).toBe(KEY)
+    expect(fs.readFileSync(dotenv(), 'utf8')).toBe('OTHER_VAR=1\n')
+    const text = lines.map((l) => l.line).join('\n')
+    expect(text).toContain(
+      `kept the API key file ${stored.path} — the copy of the key this plugin keeps, never deleted here because OpenClaw can still refuse this removal: ` +
+        'delete it when you no longer need the agent, or add the agent again with openclaw channels add --channel agentchat --token-file <the file>',
+    )
+    // One sentence, not "the only copy on this machine" followed by a list of other copies.
+    expect(text).not.toContain('only copy')
+    const named = `${configPath}.bak.1, ${configPath}.bak.3, ${configPath}.last-good`
+    // Said as what it is: the state once OpenClaw's write is done (a write it refuses rotates nothing).
+    expect(text).toContain(`Once OpenClaw has written this removal, OpenClaw's own copies of openclaw.json still hold this key in plain text: ${named}`)
+    expect(text).not.toContain(KEY)
+    // OpenClaw's files are OpenClaw's: never edited by the hook.
+    expect(fs.readFileSync(`${configPath}.bak.2`, 'utf8')).toContain(KEY)
+
+    // Then OpenClaw writes the config once: the files named are exactly the ones holding the key when the command ends.
+    writeConfigLikeOpenClaw(configPath, JSON.stringify({}))
+    const holding = configCopies(configPath).filter((file) => fs.existsSync(file) && fs.readFileSync(file, 'utf8').includes(KEY))
+    expect(holding.join(', ')).toBe(named)
+  })
+
+  it('an account still in plain text when it is removed: the config as it was becomes .bak, and is named', async () => {
+    const configPath = path.join(stateDir(), 'openclaw.json')
+    const prevCfg = { channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
+    fs.writeFileSync(configPath, JSON.stringify(prevCfg))
+    const { runtime, lines } = cliRuntime()
+    await agentchatLifecycleAdapter.onAccountRemoved!({ prevCfg: prevCfg as never, accountId: 'default', runtime })
+    expect(lines.map((l) => l.line).join('\n')).toContain(`Once OpenClaw has written this removal, OpenClaw's own copies of openclaw.json still hold this key in plain text: ${configPath}.bak —`)
+    writeConfigLikeOpenClaw(configPath, JSON.stringify({}))
+    expect(fs.readFileSync(`${configPath}.bak`, 'utf8')).toContain(KEY)
   })
 
   it('channels remove without --delete is a pause: the key file stays', async () => {
@@ -401,7 +443,7 @@ describe('what we document and print: no key on a command line (T6-F04), no prom
   it('the README names --token-file for the non-interactive path; README and RUNBOOK say a new key needs one gateway restart for the tools', () => {
     const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8')
     const runbook = fs.readFileSync(path.join(root, 'RUNBOOK.md'), 'utf8')
-    expect(readme).toContain('openclaw channels add agentchat --token-file')
+    expect(readme).toContain('openclaw channels add --channel agentchat --token-file')
     expect(readme).toContain('the socket picks up the new key at once, the hosted tools only after `openclaw gateway restart`')
     // The runbook's `blocked` section promised "a key rotated back … reconnects without a restart" and offered `config set … apiKey`.
     expect(runbook).not.toMatch(/a key rotated back or an account reinstated reconnects without a restart/)

@@ -17,7 +17,7 @@
  * config and the key it names exactly as they were, and the new key stays
  * on disk instead of being lost (register and recover issue a key once).
  * Key files are never deleted behind the operator's back — not even by
- * `openclaw channels remove agentchat --delete`, which names them instead
+ * `openclaw channels remove --channel agentchat --delete`, which names them instead
  * (OpenClaw may still refuse that config write); `openclaw doctor` names
  * the ones the config no longer uses.
  *
@@ -35,6 +35,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 
 import { expandUserPath } from '../openclaw-layout.js'
+import { readKeyInput } from './key-input.js'
 import { integrationStateDir } from '../integration/state.js'
 
 /** The account's key directory under the plugin's state dir. */
@@ -214,39 +215,20 @@ export function removeAccountKeyFiles(accountId: string, stateDir?: string): str
   return removed
 }
 
-// ─── `openclaw channels add agentchat --token-file <path>` ─────────────
+// ─── `openclaw channels add --channel agentchat --token-file <path>` ─────────────
 
 /** What one process already read from a token file (stdin can be read once). */
 const tokenFileReads = new Map<string, TokenFileRead>()
 
 export type TokenFileRead = { readonly ok: true; readonly apiKey: string } | { readonly ok: false; readonly reason: string }
 
-/** Up to `MAX_KEY_FILE_BYTES + 1` bytes from an open descriptor. */
-function readCapped(fd: number): Buffer {
-  const chunks: Buffer[] = []
-  let total = 0
-  const buf = Buffer.alloc(1024)
-  for (;;) {
-    let n: number
-    try {
-      n = fs.readSync(fd, buf, 0, buf.length, null)
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === 'EAGAIN') continue
-      throw err
-    }
-    if (n === 0) break
-    chunks.push(Buffer.from(buf.subarray(0, n)))
-    total += n
-    if (total > MAX_KEY_FILE_BYTES) break
-  }
-  return Buffer.concat(chunks)
-}
-
 /**
  * The key a setup reads from `--token-file <path>` (OpenClaw's own channel
  * setup option; OpenClaw hands the path to the plugin and reads nothing
- * itself). `-` reads standard input. The file holds the key and nothing else
- * (a trailing newline is fine). Read once per process and remembered, since
+ * itself). `-` reads standard input: a file redirected into it is read from
+ * its first byte whatever OpenClaw's CLI did with the shared offset, a pipe
+ * in order (`./key-input.ts`). The file holds the key and nothing else (a
+ * trailing newline is fine). Read once per process and remembered, since
  * OpenClaw calls several setup hooks with the same input. Never throws;
  * never returns the key in a reason.
  */
@@ -262,33 +244,16 @@ export function readTokenFile(file: string): TokenFileRead {
 
 function readTokenFileUncached(source: string, resolved: string): TokenFileRead {
   if (source.length === 0) return { ok: false, reason: '--token-file needs a path (or - for standard input)' }
-  let fd: number
-  let owned = false
-  if (source === '-') {
-    fd = 0
-  } else {
-    try {
-      const stat = fs.statSync(resolved)
-      if (stat.isDirectory()) return { ok: false, reason: `${resolved} is a directory` }
-      fd = fs.openSync(resolved, 'r')
-      owned = true
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException)?.code
-      return { ok: false, reason: `${resolved} ${code === 'ENOENT' ? 'does not exist' : `cannot be read (${code ?? 'error'})`}` }
-    }
-  }
-  let content: string
-  try {
-    const bytes = readCapped(fd)
-    if (bytes.length > MAX_KEY_FILE_BYTES) return { ok: false, reason: `${source === '-' ? 'standard input' : resolved} holds more than ${MAX_KEY_FILE_BYTES} bytes, so it is not a key` }
-    content = bytes.toString('utf8').trim()
-  } catch (err) {
-    return { ok: false, reason: `${source === '-' ? 'standard input' : resolved} cannot be read (${(err as NodeJS.ErrnoException)?.code ?? 'error'})` }
-  } finally {
-    if (owned) fs.closeSync(fd)
-  }
+  const read = readKeyInput(source === '-' ? '-' : resolved)
+  if (!read.ok) return read
+  const content = read.text.trim()
   const problem = keyShapeProblem(content)
-  if (problem) return { ok: false, reason: `${source === '-' ? 'standard input' : resolved} is not one API key: ${problem}` }
+  if (problem) {
+    const what = source === '-' ? 'standard input' : resolved
+    // Empty standard input: nothing was piped or redirected, or the writer sent nothing. The path form has no such case.
+    const hint = content.length === 0 && (source === '-' || resolved === '/dev/stdin') ? ' — pass the key file as --token-file <path>' : ''
+    return { ok: false, reason: `${what} is not one API key: ${problem}${hint}` }
+  }
   return { ok: true, apiKey: content }
 }
 
@@ -303,6 +268,19 @@ export function resetTokenFileReadsForTest(): void {
 export const OPENCLAW_CONFIG_BACKUPS = 5
 
 /**
+ * OpenClaw's backup ring, newest first: `openclaw.json.bak`, `.bak.1` …
+ * `.bak.4`. Every config write rotates it (OpenClaw's
+ * `src/config/backup-rotation.ts`: `rotateConfigBackups` in 2026.6.x,
+ * `prepareConfigFileWrite` in 2026.11.x): `.bak.4` is dropped, each
+ * `.bak.N` becomes `.bak.N+1`, `.bak` becomes `.bak.1`, and the config as
+ * it was before the write becomes `.bak`.
+ */
+export function openClawConfigBackupRing(configPath: string): string[] {
+  const base = `${configPath}.bak`
+  return [base, ...Array.from({ length: OPENCLAW_CONFIG_BACKUPS - 1 }, (_, i) => `${base}.${i + 1}`)]
+}
+
+/**
  * OpenClaw's own copies of its config file: the backup ring
  * (`openclaw.json.bak`, `.bak.1` … `.bak.4`), the last config a gateway
  * started with (`.last-good`), the pre-update snapshot (`.pre-update`) and
@@ -310,8 +288,7 @@ export const OPENCLAW_CONFIG_BACKUPS = 5
  * OpenClaw writes and rotates them; this plugin never edits them.
  */
 export function openClawConfigCopyPaths(configPath: string): string[] {
-  const base = `${configPath}.bak`
-  const ring = [base, ...Array.from({ length: OPENCLAW_CONFIG_BACKUPS - 1 }, (_, i) => `${base}.${i + 1}`)]
+  const ring = openClawConfigBackupRing(configPath)
   let rejected: string[] = []
   try {
     const prefix = `${path.basename(configPath)}.rejected.`

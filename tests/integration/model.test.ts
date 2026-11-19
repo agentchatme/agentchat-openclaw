@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import * as path from 'node:path'
 
 import {
   createRuntimeModelCall,
@@ -317,7 +318,7 @@ describe('turnReadiness / withTurnReadiness — a turn only when it can have the
     expect(readiness.ready).toBe(false)
     const reason = (readiness as { reason: string }).reason
     expect(reason).toMatch(/AGENTCHAT_API_KEY in the gateway's environment is not the key channels\.agentchat is configured with/)
-    expect(reason).toMatch(/the key changed since the gateway started — OpenClaw reads ~\/\.openclaw\/\.env only when the gateway starts, and `openclaw doctor --fix` places the account's key there/)
+    expect(reason).toContain(`the key changed since the gateway started — OpenClaw reads ${path.join(process.env.OPENCLAW_STATE_DIR!, '.env')} only when the gateway starts, and \`openclaw doctor --fix\` places the account's key there`)
     expect(reason).toContain('openclaw gateway install --force')
     expect(reason).not.toContain(other)
     expect(reason).not.toContain(apiKey)

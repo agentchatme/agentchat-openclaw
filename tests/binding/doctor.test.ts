@@ -26,9 +26,10 @@ vi.mock('../../src/integration/texts.js', async (importOriginal) => {
 })
 
 import { agentchatDoctorAdapter } from '../../src/binding/doctor.js'
+import { agentchatPlugin } from '../../src/channel.js'
 import { registerIntegration, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
 import { accountTurns, resetRunningTurnsForTest } from '../../src/integration/running.js'
-import { placeIntegration } from '../../src/integration/placement.js'
+import { placeIntegration, resetKeyMovedForTest } from '../../src/integration/placement.js'
 import { loadIdentityLine } from '../../src/integration/texts.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
 import { testKey } from '../helpers/keys.js'
@@ -43,12 +44,17 @@ describe('doctor adapter', () => {
   beforeEach(() => {
     workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-doctor-'))
     vi.mocked(loadIdentityLine).mockReset().mockResolvedValue(IDENTITY_LINE)
+    resetKeyMovedForTest()
   })
   afterEach(() => {
     fs.rmSync(workspace, { recursive: true, force: true })
   })
 
   const cfg = () => ({ agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } })
+
+  /** What OpenClaw's doctor (Security), its read-only runs (--lint, --json) and `security audit` get from the channel. */
+  const securityWarnings = async (config: object) =>
+    (await agentchatPlugin.security!.collectWarnings!({ cfg: config as never, accountId: 'default', account: {} as never })) as string[]
 
   it('warns about every missing placement and names the fix command for the config entry — without touching the network', async () => {
     const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: cfg() as never, doctorFixCommand: 'openclaw doctor --fix', env: {} })
@@ -75,10 +81,12 @@ describe('doctor adapter', () => {
   it('an install whose key is in plain text in openclaw.json (an earlier release) is told so, and doctor --fix moves it to an owner-only key file (T6-F09)', async () => {
     removeAccountKeyFiles('default')
     const placed = placeIntegration({ cfg: cfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
-    const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
-    expect(warnings).toEqual([
+    // A security warning: doctor shows it under Security, and its read-only runs too (they never call the preview hook).
+    expect(await securityWarnings(placed.cfg)).toEqual([
       "[agentchat:default] key: the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent's own file tools can read — openclaw doctor --fix moves it to an owner-only key file and leaves only its path (channels.agentchat.apiKeyFile)",
     ])
+    // Not twice in one doctor run: the preview leaves it to Security.
+    expect(await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })).toEqual([])
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: {} })
     const file = apiKeyFilePathFor('default', KEY)
     expect(fixed.changes).toContain(`moved the API key out of openclaw.json: channels.agentchat.apiKey is now channels.agentchat.apiKeyFile = ${file} (owner-only, 0600)`)
@@ -92,34 +100,66 @@ describe('doctor adapter', () => {
     expect(readAgentchatApiKey(fixed.config as never, 'default')).toBe(KEY)
     const after = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: fixed.config, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
     expect(after).toEqual([])
+    expect(await securityWarnings(fixed.config)).toEqual([])
   })
 
   it('the same key left in plain text next to the key file is flagged, and doctor --fix removes it (the file stays in use)', async () => {
     const withCopy = keyFileCfg()
     ;(withCopy.channels.agentchat as Record<string, unknown>).apiKey = KEY
     const placed = placeIntegration({ cfg: withCopy, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
-    const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
-    expect(warnings).toEqual(['[agentchat:default] key: the key file is in use, and the same key is still in plain text in openclaw.json (channels.agentchat.apiKey) — openclaw doctor --fix removes it'])
+    expect(await securityWarnings(placed.cfg)).toEqual(['[agentchat:default] key: the key file is in use, and the same key is still in plain text in openclaw.json (channels.agentchat.apiKey) — openclaw doctor --fix removes it'])
+    expect(await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })).toEqual([])
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: {} })
     expect(fixed.changes).toContain(`removed the plain-text channels.agentchat.apiKey from openclaw.json (the same key is in ${apiKeyFilePathFor('default', KEY)}, which stays in use)`)
     expect(JSON.stringify(fixed.config)).not.toContain(KEY)
     expect(readAgentchatApiKey(fixed.config as never, 'default')).toBe(KEY)
   })
 
-  it("doctor names OpenClaw's own config copies that still hold the moved key — paths only, never the key (T6-F15)", async () => {
+  it("doctor names OpenClaw's own config copies that still hold the moved key, as a security warning — paths only, never the key (T6-F15)", async () => {
     const configPath = path.join(process.env.OPENCLAW_STATE_DIR!, 'openclaw.json')
     fs.writeFileSync(`${configPath}.bak`, JSON.stringify({ channels: { agentchat: { apiKey: KEY } } }))
     fs.writeFileSync(`${configPath}.last-good`, JSON.stringify({ channels: { agentchat: { apiKey: KEY } } }))
     try {
       const placed = placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
-      const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
+      const warnings = await securityWarnings(placed.cfg)
       expect(warnings).toHaveLength(1)
-      expect(warnings[0]).toContain(`OpenClaw's own copies of openclaw.json still hold this key in plain text: ${configPath}.bak, ${configPath}.last-good`)
+      expect(warnings[0]).toContain(`[agentchat:default] key: OpenClaw's own copies of openclaw.json still hold this key in plain text: ${configPath}.bak, ${configPath}.last-good`)
       expect(warnings[0]).not.toContain(KEY)
+      expect(await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })).toEqual([])
     } finally {
       fs.rmSync(`${configPath}.bak`, { force: true })
       fs.rmSync(`${configPath}.last-good`, { force: true })
     }
+  })
+
+  it('doctor --fix moving the key names no backups — its own config writes come after and rotate them — and says which read-only check does (R2: a stale list)', async () => {
+    const configPath = path.join(process.env.OPENCLAW_STATE_DIR!, 'openclaw.json')
+    fs.writeFileSync(`${configPath}.bak`, JSON.stringify({ channels: { agentchat: { apiKey: KEY } } }))
+    try {
+      removeAccountKeyFiles('default')
+      const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: cfg() as never, doctorFixCommand: 'fix', env: {} })
+      const line = fixed.warnings?.find((w) => w.includes('backups of openclaw.json'))
+      expect(line).toBe(
+        "[agentchat:default] key: OpenClaw's own backups of openclaw.json (openclaw.json.bak, .bak.1 … .bak.4, .last-good) keep the old plain-text key until they rotate out, " +
+          "and this command's own config writes rotate them — once it is done, `openclaw doctor --lint` names the ones that still hold it; " +
+          'delete those, or rotate the key (openclaw channels add --channel agentchat → Recover) if anyone else could have read them',
+      )
+      expect(fixed.warnings?.some((w) => w.includes(`${configPath}.bak`))).toBe(false)
+      // The same doctor run's Security section comes before some of those writes: it names no file either.
+      expect(await securityWarnings(fixed.config)).toEqual([])
+      // A later read-only run (another process) does.
+      resetKeyMovedForTest()
+      expect((await securityWarnings(fixed.config)).join('\n')).toContain(`OpenClaw's own copies of openclaw.json still hold this key in plain text: ${configPath}.bak`)
+    } finally {
+      fs.rmSync(`${configPath}.bak`, { force: true })
+    }
+  })
+
+  it('security warnings: nothing for a disabled account, or one whose key cannot be read; never the key', async () => {
+    const disabled = { channels: { agentchat: { apiKey: KEY, agentHandle: 'alice', enabled: false } } }
+    expect(await securityWarnings(disabled)).toEqual([])
+    expect(await securityWarnings({ channels: { agentchat: { apiKeyFile: path.join(workspace, 'missing'), agentHandle: 'alice' } } })).toEqual([])
+    expect((await securityWarnings(cfg())).join('\n')).not.toContain(KEY)
   })
 
   it('repairConfig adds mcp.servers.agentchat as a bearer template and the served identity line, reports both; a second run changes nothing', async () => {
@@ -142,7 +182,7 @@ describe('doctor adapter', () => {
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: cfg() as never, doctorFixCommand: 'fix', env: {} })
     expect(fixed.changes.some((c) => c.includes('identity line'))).toBe(false)
     expect(fixed.changes.some((c) => c.startsWith('added mcp.servers.agentchat'))).toBe(true)
-    expect(fixed.warnings?.[0]).toMatch(/identity line for @alice not placed: the served identity line is not available/)
+    expect(fixed.warnings?.find((w) => w.includes('identity line'))).toMatch(/identity line for @alice not placed: the served identity line is not available/)
     expect(fs.existsSync(path.join(workspace, 'AGENTS.md'))).toBe(false)
   })
 

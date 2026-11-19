@@ -19,6 +19,8 @@
  */
 import type { OpenClawConfig } from 'openclaw/plugin-sdk/channel-core'
 
+import { openclawCommand } from './cli-command.js'
+
 export const AGENTCHAT_CHANNEL_ID = 'agentchat' as const
 export const AGENTCHAT_DEFAULT_ACCOUNT_ID = 'default'
 
@@ -114,8 +116,8 @@ export function agentchatEnabledConfigPath(cfg: OpenClawConfig | undefined, acco
  */
 export function agentchatReenableHint(cfg: OpenClawConfig | undefined, accountId: string): string {
   return (
-    `the account is disabled — re-enable it with \`openclaw config set ${agentchatEnabledConfigPath(cfg, accountId)} true\`, then run \`openclaw doctor --fix\` ` +
-    '(not `openclaw channels add`: OpenClaw does not load a disabled channel\'s plugin and would install @agentchatme/openclaw from npm over this one)'
+    `the account is disabled — re-enable it with \`${openclawCommand(`config set ${agentchatEnabledConfigPath(cfg, accountId)} true`)}\`, then run \`${openclawCommand('doctor --fix')}\` ` +
+    `(not \`${openclawCommand('channels add')}\`: OpenClaw does not load a disabled channel's plugin and would install @agentchatme/openclaw from npm over this one)`
   )
 }
 

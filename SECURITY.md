@@ -45,7 +45,7 @@ Out of scope here (report to the respective project instead):
 - The agent itself, when it deliberately looks. Reply turns run with the agent's normal tools: an agent with a shell can find the key file. The plugin removes accidental spread, not a determined reader.
 - The gateway's environment. OpenClaw gives an `mcp.servers` entry a credential only as config text or as `${VAR}` from the gateway's environment (string headers, no secret references), so the key is also `AGENTCHAT_API_KEY` in `~/.openclaw/.env` and in the gateway process's environment, which OpenClaw passes to the commands its agent runs. Closing that needs the hosted tools held by the plugin, or OpenClaw support for secret references on MCP headers.
 - The gateway service's environment. `openclaw gateway install` copies the state-dir `.env` variables into the managed service definition (systemd, launchd), so a gateway installed as a service can hold its own copy of `AGENTCHAT_API_KEY` — OpenClaw's file, outside the plugin.
-- OpenClaw's own config copies (`openclaw.json.bak*`, `.last-good`, `.pre-update`, `.rejected.*`, backup archives). A key that was once in `openclaw.json` (releases before the key file) stays there until OpenClaw rotates them out; the plugin names them (`openclaw doctor`, `channels remove --delete`) and never edits them. `channels remove --delete` also keeps the plugin's own key file and names it: OpenClaw runs the removal hook before it commits the config write, and can still refuse it, so deleting the file there could lose the only copy of the key.
+- OpenClaw's own config copies (`openclaw.json.bak*`, `.last-good`, `.pre-update`, `.rejected.*`, backup archives). A key that was once in `openclaw.json` (releases before the key file) stays there until OpenClaw rotates them out; the plugin names them (as a security warning in `openclaw doctor` and its read-only `openclaw doctor --lint`, and in `channels remove --channel agentchat --delete`) and never edits them. `channels remove --delete` also keeps the plugin's own key file and names it: OpenClaw runs the removal hook before it commits the config write, and can still refuse it, so deleting the file there could lose the only copy of the key.
 - An on-path attacker doing TLS MITM. We rely on the OS trust store and `ws`'s default TLS validation. Pinning is not implemented; the AgentChat TLS cert is managed by the server.
 - A malicious OpenClaw plugin host. If you run untrusted OpenClaw plugins in the same process, they share the event loop and can observe every frame we handle. Isolate.
 
@@ -67,7 +67,7 @@ account's key in the gateway and refuses to start the integration when
 they differ.
 
 The key is stored on disk once per key, by setup (the wizard,
-`openclaw channels add agentchat --token-file <path>`) or by
+`openclaw channels add --channel agentchat --token-file <path>`) or by
 `openclaw doctor --fix` when it moves a plain-text key of an earlier
 release: its own file `<state dir>/agentchat/<accountId>/keys/key-<16 hex
 of its sha256>`, mode `0600`, in a `0700` directory, written to a temp file
@@ -103,7 +103,10 @@ leaves the host. The split below makes the contract obvious:
   `dist/setup-entry`) — the key file and `--token-file`: local
   filesystem I/O only (owner-only modes, atomic writes, symlinks
   refused), no outbound HTTP, no WebSocket, no SDK calls, no
-  environment reads; it never returns a key in an error.
+  environment reads; it never returns a key in an error. The bytes of
+  `--token-file` (a path, or `-` for standard input) are read by
+  `src/credentials/key-input.ts`, which imports only `node:fs` and
+  `node:tty`.
 - `dist/openclaw-layout.{js,cjs}` — OpenClaw path and roster
   resolution (state dir, workspace, default and bound agent). Pure:
   environment (through the credential helper), config and

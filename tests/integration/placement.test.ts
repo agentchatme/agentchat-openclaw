@@ -178,7 +178,7 @@ describe('placeIntegration + checkPlacement', () => {
 
   it("checkPlacement: an enabled account's missing identity line points at doctor --fix", () => {
     const checks = checkPlacement({ cfg: { ...cfgFor(), channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', stateDir, env: {} })
-    expect(checks.find((c) => c.name === 'anchor')!.detail).toMatch(/missing from .*AGENTS\.md — run openclaw doctor --fix \(or openclaw channels add agentchat\)$/)
+    expect(checks.find((c) => c.name === 'anchor')!.detail).toMatch(/missing from .*AGENTS\.md — run openclaw doctor --fix \(or openclaw channels add --channel agentchat\)$/)
   })
 
   it("checkPlacement: a disabled account's remedies name `openclaw config set channels.agentchat.enabled true`, never channels add", () => {

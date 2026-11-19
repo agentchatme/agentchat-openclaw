@@ -16,6 +16,14 @@
  *
  * A disabled account gets one warning naming the re-enable route and no
  * repair: its identity line and tools entry are absent by design.
+ *
+ * Where the key sits on disk (plain text in openclaw.json, a key file others
+ * can read, OpenClaw's own config copies holding it) is not reported here
+ * but as a security warning (`security.collectWarnings`, `channel.ts`):
+ * OpenClaw runs this preview only when doctor may pause the gateway, while
+ * its read-only runs (`openclaw doctor --lint`; on 2026.11 also a bare
+ * `--json` and answering No to the pause) run the security check and never
+ * this hook.
  */
 
 import type { ChannelDoctorAdapter, OpenClawConfig } from './openclaw-types.js'
@@ -35,9 +43,9 @@ import { findAccountTurns, hungTurnsReason, overdueTurnLines, restartHoldLines }
 import { cycleTroubleLine } from '../integration/loop.js'
 import {
   checkPlacement,
-  describeKeyCopies,
   dotEnvPath,
-  openClawCopiesHoldingKey,
+  keyCopiesAfterRunLine,
+  noteKeyMovedOutOfConfig,
   placeApiKeyInDotEnv,
   readApiKeyFromDotEnv,
   resolvePlacementAgentId,
@@ -59,7 +67,9 @@ import { createSdkClient } from './sdk-client.js'
  * is missing or holds another key. The key file is written before OpenClaw
  * persists the config: if that write fails, the plain-text key is still in
  * the config, so the key is never lost. OpenClaw's own config copies are
- * named, never edited.
+ * never edited; they are not named here either, since the doctor run that
+ * called this writes the config afterwards (rotating them) — the line says
+ * which read-only check names them once it is done.
  */
 export function moveKeyOutOfConfig(
   cfg: OpenClawConfig,
@@ -76,8 +86,9 @@ export function moveKeyOutOfConfig(
       const stored = writeApiKeyFile(accountId, key.apiKey, options.stateDir)
       next = applyAgentchatAccountPatch(next, accountId, { apiKeyFile: stored.path, apiKey: undefined })
       changes.push(`moved the API key out of openclaw.json: ${path}.apiKey is now ${path}.apiKeyFile = ${stored.path} (owner-only, 0600)`)
-      const copies = describeKeyCopies(openClawCopiesHoldingKey(key.apiKey, options.configPath))
-      if (copies) warnings.push(copies)
+      // OpenClaw writes the config after this (more than once in a doctor run): the old text lands in its backups, which this run rotates.
+      noteKeyMovedOutOfConfig()
+      warnings.push(keyCopiesAfterRunLine())
     } catch (err) {
       warnings.push(`the plain-text ${path}.apiKey could not be moved to a key file (${err instanceof Error ? err.message : String(err)}); it stays in openclaw.json`)
     }
@@ -85,8 +96,8 @@ export function moveKeyOutOfConfig(
     if (key.plainTextCopy) {
       next = applyAgentchatAccountPatch(next, accountId, { apiKey: undefined })
       changes.push(`removed the plain-text ${path}.apiKey from openclaw.json (the same key is in ${key.file ?? 'the key file'}, which stays in use)`)
-      const copies = describeKeyCopies(openClawCopiesHoldingKey(key.apiKey, options.configPath))
-      if (copies) warnings.push(copies)
+      noteKeyMovedOutOfConfig()
+      warnings.push(keyCopiesAfterRunLine())
     }
     if (key.loosePermissions && key.file && tightenApiKeyFile(key.file)) changes.push(`made the key file ${key.file} owner-only (0600)`)
   }
@@ -119,13 +130,11 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
       const agentId = resolvePlacementAgentId(cfg, accountId)
       for (const check of checkPlacement({ cfg, handle, apiKey, apiBase, identityLine: cachedIdentityLine(accountId), agentId, accountId, keySource, env })) {
         if (check.ok && !check.notice) continue
+        // Where the key sits on disk is a security warning (`security.collectWarnings` → `keyAtRestWarnings`): doctor shows it
+        // under Security, and its read-only runs (--lint) too, which never call this hook.
+        if (check.atRest) continue
         const fix = check.name === 'mcp' && check.repair && !check.ok ? ` (${doctorFixCommand} adds it)` : ''
         warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${check.name}: ${check.detail}${fix}`)
-      }
-      // A key moved out of openclaw.json may still sit in OpenClaw's own config copies.
-      if (keySource.ok && keySource.source === 'file') {
-        const copies = describeKeyCopies(openClawCopiesHoldingKey(keySource.apiKey))
-        if (copies) warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] key: ${copies}`)
       }
       const bound = resolveBoundAgentId(cfg, AGENTCHAT_CHANNEL_ID, accountId)
       const ambient = resolveOpenClawDefaultAgentId(cfg)

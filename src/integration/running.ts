@@ -69,6 +69,7 @@
 
 import { integration, type InboxCard, type TrayInvite } from 'agentchatme'
 
+import { openclawCommand } from '../cli-command.js'
 import type { Logger } from '../log.js'
 import { cardFromStored, type AfterTurnRecorder } from './after-turn.js'
 import { KEEP_ENDED_MS, storedCard, type StoredTurn, type TurnStore } from './turn-store.js'
@@ -753,14 +754,14 @@ export function restartHoldLines(turns: AccountTurns, now: number = Date.now()):
 export function hungTurnsReason(turns: AccountTurns, cfg: unknown, now: number = Date.now()): string | null {
   const single = turns.hungSingleRun()
   if (single) {
-    return `${whatOf('run', single.runId)} has run ${Math.floor((now - single.startedAt) / 60_000)} min and is still going in OpenClaw — no new run starts while it lives (one run reads the whole tray; a second would answer the same cards), so the cards wait on the tray; ${deadlineText(cfg)}. \`openclaw agentchat release ${single.runId} --force\` lets a new run start (the old one may still answer)`
+    return `${whatOf('run', single.runId)} has run ${Math.floor((now - single.startedAt) / 60_000)} min and is still going in OpenClaw — no new run starts while it lives (one run reads the whole tray; a second would answer the same cards), so the cards wait on the tray; ${deadlineText(cfg)}. \`${openclawCommand(`agentchat release ${single.runId} --force`)}\` lets a new run start (the old one may still answer)`
   }
   if (turns.hungCount < MAX_HUNG_TURNS) return null
   const held = turns
     .hungRuns()
     .map((run) => `${whatOf(run.kind, run.id)} for ${Math.floor((now - run.startedAt) / 60_000)} min`)
     .join(', ')
-  return `${turns.hungCount} turns are hung in OpenClaw (${held}) — no gate calls until one ends, so other cards are waiting on the tray; ${deadlineText(cfg)}. \`openclaw agentchat release <conversation_id>\` lets go of one (its run may still answer, so a second reply is possible), or restart the gateway`
+  return `${turns.hungCount} turns are hung in OpenClaw (${held}) — no gate calls until one ends, so other cards are waiting on the tray; ${deadlineText(cfg)}. \`${openclawCommand('agentchat release <conversation_id>')}\` lets go of one (its run may still answer, so a second reply is possible), or restart the gateway`
 }
 
 /** Test hook only. */

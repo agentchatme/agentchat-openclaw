@@ -28,7 +28,7 @@
  *           which reaches no plugin hook), and the running gateway when a
  *           fresh server copy of the text differs from the placed one.
  * remove  — `lifecycle.onAccountConfigChanged` (enabled → disabled,
- *           `channels remove agentchat`) and `lifecycle.onAccountRemoved`
+ *           `channels remove --channel agentchat`) and `lifecycle.onAccountRemoved`
  *           (`--delete`).
  * orphan  — `openclaw plugins uninstall` fires no plugin hook today; an
  *           uninstall without `channels remove` leaves the block behind
