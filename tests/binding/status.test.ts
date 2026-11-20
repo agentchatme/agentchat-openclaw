@@ -20,6 +20,7 @@ import { placeIntegration } from '../../src/integration/placement.js'
 import { probeHostedMcp } from '../../src/integration/mcp.js'
 import { registerIntegration, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
 import { createInMemoryMetrics } from '../../src/metrics.js'
+import { noteCouldNotProcess, resetCouldNotProcessForTest } from '../../src/integration/could-not-process.js'
 import type { IntegrationSocket, SocketState } from '../../src/integration/socket.js'
 import { IDENTITY_LINE } from '../helpers/texts.js'
 import { testKey } from '../helpers/keys.js'
@@ -57,11 +58,17 @@ function stubSocket(state: SocketState): IntegrationSocket {
 const silent = { trace() {}, debug() {}, info() {}, warn() {}, error() {}, child() { return this } } as never
 
 /** A receive loop as the status probe reads it: its `status()` counters. */
-function loopWith(c: { wakes: number; cycles: number; turns: number; running?: Array<Record<string, unknown>>; recent?: Array<Record<string, unknown>> }): never {
+function loopWith(c: { wakes: number; cycles: number; turns: number; running?: Array<Record<string, unknown>>; recent?: Array<Record<string, unknown>>; processingFailures?: Record<string, unknown> }): never {
   return {
     loop: {
       start: async () => undefined,
-      status: () => ({ coalescer: { wakes: c.wakes, cycles: c.cycles }, counters: { turnsStarted: c.turns, inviteTurnsStarted: 0, runsStarted: 0 }, turns: c.running ?? [], recentCycles: c.recent ?? [] }),
+      status: () => ({
+        coalescer: { wakes: c.wakes, cycles: c.cycles },
+        counters: { turnsStarted: c.turns, inviteTurnsStarted: 0, runsStarted: 0 },
+        turns: c.running ?? [],
+        recentCycles: c.recent ?? [],
+        ...(c.processingFailures ? { processingFailures: c.processingFailures } : {}),
+      }),
     },
     stop: async () => undefined,
   } as never
@@ -132,9 +139,18 @@ describe('status adapter — the doctor-style probe', () => {
     })
     const cfg = { agents: { defaults: { workspace } } }
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account(cfg) as never, timeoutMs: 2000, cfg: cfg as never } as never)
-    expect(probe.integration).toEqual({ mode: 'on', state: 'ready', wakes: 3, cycles: 2, turns: 1, texts: 'cache' })
+    expect(probe.integration).toEqual({
+      mode: 'on',
+      state: 'ready',
+      wakes: 3,
+      cycles: 2,
+      turns: 1,
+      texts: 'cache',
+      couldNotProcess: { summary: 'could not process — nothing reported', attention: false, paused: [] },
+    })
     const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
     expect(lines.find((l) => l.text.startsWith('integration ready'))).toEqual({ text: 'integration ready — wakes 3, cycles 2, turns 1', tone: 'success' })
+    expect(lines.find((l) => l.text.startsWith('could not process'))).toEqual({ text: 'could not process — nothing reported', tone: 'muted' })
     expect(lines.find((l) => l.text.startsWith('served texts from the cached copy'))?.tone).toBe('warn')
   })
 
@@ -162,6 +178,65 @@ describe('status adapter — the doctor-style probe', () => {
     const line = lines.find((l) => l.text.startsWith('a turn for conversation conv_slow'))
     expect(line?.tone).toBe('warn')
     expect(line?.text).toMatch(/has run 4[45] min — that conversation stays held \(no second reply\) until the run ends; OpenClaw ends it at its run deadline, agents\.defaults\.timeoutSeconds = 7200; other conversations are not held up by it$/)
+  })
+
+  it('could not process: the kit’s counts on one line, and each conversation the server paused for this agent on a warn line of its own', async () => {
+    const until = new Date(Date.now() + 23 * 3600_000).toISOString()
+    const counts = {
+      reported: 3, retry: 1, hidden: 1, paused: 1, none: 0, reportErrors: 0, reruns: 2, rerunsCapped: 0,
+      awaitingEvidence: 1, runtimeChecksOk: 1, runtimeChecksFailed: 0, splitsStopped: 0,
+      lastRuntimeCheck: { at: new Date().toISOString(), ok: true, detail: null },
+    }
+    noteCouldNotProcess('default', {
+      type: 'processing_failure', conversationId: 'conv_bad', source: 'turn', throughMessageId: 'msg_9', outcome: 'failed', evidence: 'other_run_completed',
+      result: { action: 'paused', attempts: 3, hidden_message_ids: [], paused_until: until }, next: 'stop',
+    })
+    // A pause already over is not shown.
+    noteCouldNotProcess('default', {
+      type: 'processing_failure', conversationId: 'conv_old', source: 'gate', throughMessageId: 'msg_1', outcome: 'failed', evidence: 'runtime_check',
+      result: { action: 'paused', attempts: 2, hidden_message_ids: [], paused_until: new Date(Date.now() - 1000).toISOString() }, next: 'stop',
+    })
+    try {
+      await registerIntegration({
+        accountId: 'default',
+        config: account({}).config as never,
+        logger: silent,
+        createSocket: () => stubSocket('ready'),
+        build: () => ({ loop: loopWith({ wakes: 3, cycles: 2, turns: 1, processingFailures: counts }), texts: { source: 'server' } as never, handlers: {} }),
+      })
+      const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
+      const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+      expect(lines.find((l) => l.text.startsWith('could not process —'))).toEqual({
+        text: 'could not process — reported 3 (retry 1, hidden 1, paused 1) · re-runs 2 · waiting for evidence 1 · runtime checks: ok 1',
+        tone: 'muted',
+      })
+      expect(lines.filter((l) => l.text.startsWith('conversation '))).toEqual([
+        { text: `conversation conv_bad paused until ${until} — could not process; the mute ends on its own`, tone: 'warn' },
+      ])
+    } finally {
+      resetCouldNotProcessForTest()
+    }
+  })
+
+  it('could not process: a failed report, a stopped split or a failing runtime check makes the line a warning', async () => {
+    const counts = {
+      reported: 0, retry: 0, hidden: 0, paused: 0, none: 0, reportErrors: 1, reruns: 0, rerunsCapped: 0,
+      awaitingEvidence: 0, runtimeChecksOk: 0, runtimeChecksFailed: 2, splitsStopped: 1,
+      lastRuntimeCheck: { at: new Date().toISOString(), ok: false, detail: 'the model answered with no text' },
+    }
+    await registerIntegration({
+      accountId: 'default',
+      config: account({}).config as never,
+      logger: silent,
+      createSocket: () => stubSocket('ready'),
+      build: () => ({ loop: loopWith({ wakes: 1, cycles: 1, turns: 0, processingFailures: counts }), texts: { source: 'server' } as never, handlers: {} }),
+    })
+    const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
+    const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+    expect(lines.find((l) => l.text.startsWith('could not process —'))).toEqual({
+      text: 'could not process — report errors 1 · runtime checks: failed 2 · gate split stopped 1× · last runtime check failed: the model answered with no text',
+      tone: 'warn',
+    })
   })
 
   it('a running integration with the gateway recorder shows the socket counters: wakes by source, closes by code/initiator, notices by class', async () => {

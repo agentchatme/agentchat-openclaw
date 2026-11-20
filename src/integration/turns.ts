@@ -11,7 +11,7 @@
  *   - `ok`                        → `completed`, with the AgentChat calls the
  *                                   run made (from its transcript; null = unknown)
  *   - `error`, `timeout`          → `failed` (the run's own deadline is a failure,
- *                                   never an elapsed wait)
+ *                                   never an elapsed wait; `timeout` adds `timedOut`)
  *   - the plugin runtime is gone  → `still_running` with no `next`: the tracker
  *                                   keeps the conversation, nothing in this process
  *                                   starts a second turn for it
@@ -100,9 +100,14 @@ export function createLoopTurnStarter(options: LoopTurnStarterOptions): integrat
   }
 }
 
-/** What OpenClaw reported, as the kit's D5 rule reads it. `ok` without an error is the only completed end. */
+/**
+ * What OpenClaw reported, as the kit's D5 rule reads it. `ok` without an
+ * error is the only completed end. OpenClaw's own run deadline (`timeout`) is
+ * `failed` with `timedOut`, so a could-not-process report says `timed_out`.
+ */
 export function turnEndOf(outcome: TurnOutcome): integration.TurnEnd {
   const agentchatCalls = outcome.agentchatCalls ?? null
   if (outcome.status === 'ok' && !outcome.error) return { status: 'completed', agentchatCalls }
-  return { status: 'failed', agentchatCalls, detail: outcome.error ?? `run ended: ${outcome.status ?? 'unknown'}` }
+  const detail = outcome.error ?? `run ended: ${outcome.status ?? 'unknown'}`
+  return outcome.status === 'timeout' ? { status: 'failed', agentchatCalls, detail, timedOut: true } : { status: 'failed', agentchatCalls, detail }
 }

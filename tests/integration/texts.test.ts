@@ -164,6 +164,15 @@ describe('the re-speller stays (a rolled-back server serves bare names again)', 
     expect(template(new OpenClawTexts(cache).current())).toBe(spelledTemplate)
     expect((JSON.parse(fs.readFileSync(textsCachePath('default', dir), 'utf8')) as { texts: { reply_turn_template: string } }).texts.reply_turn_template).toBe(bareTemplate)
   })
+
+  it('conversation_run_template (gate off: one run per conversation; absent on older servers) is spelled the same way, its placeholder kept', () => {
+    const bare = 'AgentChat started this run for ONE conversation, <conversation_id>. Open it with agentchat_get_conversation, answer with agentchat_send_message, record agentchat_decide.'
+    const spelled = 'AgentChat started this run for ONE conversation, <conversation_id>. Open it with agentchat__agentchat_get_conversation, answer with agentchat__agentchat_send_message, record agentchat__agentchat_decide.'
+    const withTemplate = (template: string) => ({ ...SERVED_TEXTS, conversation_run_template: template }) as Texts
+    expect(spellTextsForOpenClaw(withTemplate(bare)).conversation_run_template).toBe(spelled)
+    expect(spellTextsForOpenClaw(withTemplate(spelled))).toEqual(withTemplate(spelled))
+    expect('conversation_run_template' in spellTextsForOpenClaw(SERVED_TEXTS)).toBe(false)
+  })
 })
 
 describe('upgrade cleanup on start', () => {

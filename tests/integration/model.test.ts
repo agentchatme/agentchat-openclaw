@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import * as path from 'node:path'
 
 import {
+  createRuntimeCheck,
   createRuntimeModelCall,
   createRuntimeTurnStarter,
   resolveIntegrationAgentId,
@@ -11,6 +12,9 @@ import {
   LLM_AGENT_OVERRIDE_PATH,
   RuntimeUnavailableError,
   DEFAULT_GATE_MAX_TOKENS,
+  RUNTIME_CHECK_MAX_TOKENS,
+  RUNTIME_CHECK_PROMPT,
+  RUNTIME_CHECK_TIMEOUT_MS,
   turnReadiness,
   readLiveConfig,
 } from '../../src/integration/model.js'
@@ -84,6 +88,67 @@ describe('createRuntimeModelCall — the gate is a tool-free completion', () => 
   it('throws RuntimeUnavailableError when setRuntime never happened (the gate then fails closed)', async () => {
     const callModel = createRuntimeModelCall({ runtime: () => null })
     await expect(callModel('p')).rejects.toBeInstanceOf(RuntimeUnavailableError)
+  })
+})
+
+describe('createRuntimeCheck — could not process: does the agent’s model answer now?', () => {
+  it('one minimal completion on the gate’s own path: the fixed prompt as one user message, NO tools, no system prompt, the gate’s output cap, temperature 0, NO agentId, a signal', async () => {
+    const { runtime, calls } = fakeRuntime({ completeText: 'OK' })
+    const check = createRuntimeCheck({ runtime: () => runtime })
+    expect(await check()).toEqual({ ok: true })
+    expect(calls.complete).toHaveLength(1)
+    const params = calls.complete[0] as Record<string, unknown>
+    expect(params.messages).toEqual([{ role: 'user', content: RUNTIME_CHECK_PROMPT }])
+    expect(RUNTIME_CHECK_PROMPT).toBe('Reply with the single word OK.')
+    expect('tools' in params).toBe(false)
+    expect('systemPrompt' in params).toBe(false)
+    // The gate's cap: a model that reasons first needs room, or it answers with no text and the check fails while the gate works.
+    expect(params.maxTokens).toBe(RUNTIME_CHECK_MAX_TOKENS)
+    expect(RUNTIME_CHECK_MAX_TOKENS).toBe(DEFAULT_GATE_MAX_TOKENS)
+    expect(params.temperature).toBe(0)
+    expect('agentId' in params).toBe(false)
+    expect(params.purpose).toMatch(/runtime check/)
+    expect(params.signal).toBeInstanceOf(AbortSignal)
+    // The bound: 45 s, inside the kit's own 60 s ceiling.
+    expect(RUNTIME_CHECK_TIMEOUT_MS).toBe(45_000)
+  })
+
+  it('the same agent the gate asks: agentId only when the account is routed to a non-default agent', async () => {
+    const { runtime, calls } = fakeRuntime({ completeText: 'OK' })
+    await createRuntimeCheck({ agentIdOverride: 'ops', runtime: () => runtime })()
+    expect((calls.complete[0] as Record<string, unknown>).agentId).toBe('ops')
+  })
+
+  it('the answer is discarded: any words pass, nothing of it comes back', async () => {
+    const { runtime } = fakeRuntime({ completeText: 'Sure — OK!' })
+    expect(await createRuntimeCheck({ runtime: () => runtime })()).toEqual({ ok: true })
+  })
+
+  it('fails on an empty answer, a thrown call (a provider refusal, the account signed out) and a missing runtime; it never throws', async () => {
+    const empty = fakeRuntime({ completeText: '   ' })
+    expect(await createRuntimeCheck({ runtime: () => empty.runtime })()).toEqual({ ok: false, detail: 'the model answered with no text' })
+    const refusing = {
+      llm: {
+        complete: async () => {
+          throw new Error('401 the provider rejected the credentials')
+        },
+      },
+    } as unknown as PluginRuntime
+    expect(await createRuntimeCheck({ runtime: () => refusing })()).toEqual({ ok: false, detail: '401 the provider rejected the credentials' })
+    const none = await createRuntimeCheck({ runtime: () => null })()
+    expect(none.ok).toBe(false)
+    expect(none.detail).toMatch(/runtime check/)
+  })
+
+  it('bounded: a model that does not answer within the bound fails the check (its signal aborts the call)', async () => {
+    const hanging = {
+      llm: {
+        complete: (params: { signal?: AbortSignal }) =>
+          new Promise((_, reject) => params.signal?.addEventListener('abort', () => reject(new Error('aborted: no answer in time')), { once: true })),
+      },
+    } as unknown as PluginRuntime
+    const answer = await createRuntimeCheck({ runtime: () => hanging, timeoutMs: 20 })()
+    expect(answer).toEqual({ ok: false, detail: 'aborted: no answer in time' })
   })
 })
 

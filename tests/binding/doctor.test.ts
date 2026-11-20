@@ -28,6 +28,7 @@ vi.mock('../../src/integration/texts.js', async (importOriginal) => {
 import { agentchatDoctorAdapter } from '../../src/binding/doctor.js'
 import { agentchatPlugin } from '../../src/channel.js'
 import { registerIntegration, resetRegistryForTest } from '../../src/binding/runtime-registry.js'
+import { noteCouldNotProcess, resetCouldNotProcessForTest } from '../../src/integration/could-not-process.js'
 import { accountTurns, resetRunningTurnsForTest } from '../../src/integration/running.js'
 import { placeIntegration, resetKeyMovedForTest } from '../../src/integration/placement.js'
 import { loadIdentityLine } from '../../src/integration/texts.js'
@@ -375,6 +376,52 @@ describe('doctor adapter — the llm override opt-in for a non-default bound age
     } finally {
       await resetRegistryForTest()
       resetRunningTurnsForTest()
+    }
+  })
+
+  it('could not process: each conversation the server paused for this agent, and the counts when a report failed within the hour', async () => {
+    const config = { apiKey: KEY, apiBase: 'https://api.agentchat.me', reconnect: { initialBackoffMs: 1000, maxBackoffMs: 30000, jitterRatio: 0.2 }, ping: { intervalMs: 45000, timeoutMs: 30000 }, outbound: { maxInFlight: 256, sendTimeoutMs: 15000 }, observability: { logLevel: 'error', redactKeys: [] } }
+    const until = new Date(Date.now() + 3600_000).toISOString()
+    let counts: Record<string, unknown> = {
+      reported: 2, retry: 1, hidden: 0, paused: 1, none: 0, reportErrors: 0, reruns: 1, rerunsCapped: 0,
+      awaitingEvidence: 0, runtimeChecksOk: 1, runtimeChecksFailed: 0, splitsStopped: 0, lastRuntimeCheck: null,
+    }
+    noteCouldNotProcess('default', {
+      type: 'processing_failure', conversationId: 'conv_bad', source: 'gate', throughMessageId: 'msg_2', outcome: 'failed', evidence: 'runtime_check',
+      result: { action: 'paused', attempts: 2, hidden_message_ids: [], paused_until: until }, next: 'stop',
+    })
+    try {
+      await registerIntegration({
+        accountId: 'default',
+        config: config as never,
+        logger: { trace() {}, debug() {}, info() {}, warn() {}, error() {}, child() { return this } } as never,
+        createSocket: () => ({ realtime: { disconnect() {} }, bind() {}, stopped() {}, getHealth: () => ({ state: 'ready', connectedAt: null, counters: { wakeFrames: 0, disconnects: 0 } }) }) as never,
+        build: () => ({
+          loop: { loop: { start: async () => undefined, status: () => ({ turns: [], recentCycles: [], processingFailures: counts }) }, stop: async () => undefined } as never,
+          handlers: {},
+        }),
+      })
+      const doctorCfg = { channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
+      let warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: doctorCfg as never, doctorFixCommand: 'openclaw doctor --fix', env: {} })
+      expect(warnings).toContain(`[agentchat:default] conversation conv_bad paused until ${until} — could not process; the mute ends on its own`)
+      // Counts alone are not a warning; a report that failed within the hour is.
+      expect(warnings.some((w) => w.includes('could not process —'))).toBe(false)
+      counts = { ...counts, reportErrors: 1 }
+      noteCouldNotProcess('default', {
+        type: 'processing_failure', conversationId: 'conv_x', source: 'turn', throughMessageId: 'msg_3', outcome: 'failed', evidence: 'other_run_completed',
+        result: null, error: '503 upstream', next: 'stop',
+      }, Date.now() - 2 * 3600_000)
+      warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: doctorCfg as never, doctorFixCommand: 'openclaw doctor --fix', env: {} })
+      expect(warnings.some((w) => w.includes('could not process —')), 'an error two hours ago is history').toBe(false)
+      noteCouldNotProcess('default', {
+        type: 'processing_failure', conversationId: 'conv_x', source: 'turn', throughMessageId: 'msg_3', outcome: 'failed', evidence: 'other_run_completed',
+        result: null, error: '503 upstream', next: 'stop',
+      })
+      warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: doctorCfg as never, doctorFixCommand: 'openclaw doctor --fix', env: {} })
+      expect(warnings).toContain('[agentchat:default] could not process — reported 2 (retry 1, paused 1) · report errors 1 · re-runs 1 · runtime checks: ok 1')
+    } finally {
+      await resetRegistryForTest()
+      resetCouldNotProcessForTest()
     }
   })
 })

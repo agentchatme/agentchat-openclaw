@@ -11,7 +11,9 @@
  *      AGENTS.md (checked against the last served copy when one is cached),
  *      the manual, the `mcp.servers.agentchat` entry.
  *
- * Plus the socket's live state when the integration is running.
+ * Plus the socket's live state when the integration is running, and what
+ * the kit reported to AgentChat as could not process (its counts, and the
+ * conversations the server paused for this agent).
  */
 
 import { resolveAgentchatApiKey } from '../channel-key.js'
@@ -24,6 +26,7 @@ import { checkPlacement, resolvePlacementAgentId, type PlacementCheck } from '..
 import { cachedIdentityLine } from '../integration/texts.js'
 import { findAccountTurns, hungTurnsReason, overdueTurnLines, restartHoldLines } from '../integration/running.js'
 import { cycleTroubleLine } from '../integration/loop.js'
+import { couldNotProcessView, pausedConversations, recentTrouble, type CouldNotProcessView } from '../integration/could-not-process.js'
 import type { SocketState } from '../integration/socket.js'
 import type { MetricsSnapshot } from '../metrics.js'
 import { getIntegration } from './runtime-registry.js'
@@ -52,6 +55,8 @@ export type AgentchatProbeResult = {
     readonly overdue?: readonly string[]
     /** Set when the most recent cycles decided nothing several times in a row (`recentCycles`). */
     readonly trouble?: string
+    /** Could not process: the kit's counts since the loop started, and the conversations paused for this agent. */
+    readonly couldNotProcess?: CouldNotProcessView
   }
   /** Set when the integration refuses to start (more than one account configured). */
   readonly refusal?: string
@@ -122,6 +127,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
     const hungReason = turnsHere ? hungTurnsReason(turnsHere, cfg) : null
     const overdue = turnsHere ? [...(hungReason ? [hungReason] : []), ...overdueTurnLines(turnsHere.runningRuns(), cfg), ...restartHoldLines(turnsHere)] : []
     const trouble = loopStatus ? cycleTroubleLine(loopStatus.recentCycles ?? []) : null
+    const couldNotProcess = loopStatus ? couldNotProcessView(loopStatus.processingFailures, pausedConversations(account.accountId), recentTrouble(account.accountId)) : null
     const servedFrom = live?.texts?.source
     const textsSource: 'server' | 'cache' | 'missing' | undefined = live ? (servedFrom === 'server' || servedFrom === 'cache' ? servedFrom : 'missing') : undefined
     const socketCounters = live?.metrics?.snapshot?.()
@@ -133,6 +139,7 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
       ...(socketCounters ? { socket: socketCounters } : {}),
       ...(overdue.length > 0 ? { overdue } : {}),
       ...(trouble ? { trouble } : {}),
+      ...(couldNotProcess ? { couldNotProcess } : {}),
     }
     const refusal = multiAccountRefusal(cfg as never)
 
@@ -184,6 +191,10 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
         }
         if (d.trouble) lines.push({ text: d.trouble, tone: 'warn' })
         for (const line of d.overdue ?? []) lines.push({ text: line, tone: 'warn' })
+        if (d.couldNotProcess) {
+          lines.push({ text: d.couldNotProcess.summary, tone: d.couldNotProcess.attention ? 'warn' : 'muted' })
+          for (const line of d.couldNotProcess.paused) lines.push({ text: line, tone: 'warn' })
+        }
         if (d.texts === 'missing') {
           lines.push({ text: 'served texts not available yet (AgentChat unreachable, nothing cached) — turns wait for the first copy', tone: 'error' })
         } else if (d.texts === 'cache') {

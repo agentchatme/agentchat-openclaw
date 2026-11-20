@@ -10,11 +10,21 @@
  * prompts, and what is recorded after a turn are the kit's. This module
  * supplies the runtime parts: the gate call (`runtime.llm.complete`, tool
  * free), the turn (`./turns.ts` over `runtime.subagent.run`), whether a turn
- * can have the hosted tools (`readiness`), and the log lines and metrics.
+ * can have the hosted tools (`readiness`), the runtime check the kit asks
+ * before it reports a conversation its AI could not process
+ * (`checkRuntime`, a minimal call on the gate's path), and the log lines and
+ * metrics.
+ *
+ * Could not process: a failed gate chunk is gated again one card per call,
+ * and a card's own failed gate call or turn is reported to AgentChat only
+ * with evidence that the runtime otherwise works; the server answers retry,
+ * hidden or paused, and the kit follows it. The pauses the answers announce
+ * are kept for status and doctor (`./could-not-process.ts`).
  *
  * `AGENTCHAT_REPLY_GATE_ENABLED=0` switches to the kit's single-run mode:
- * one run with the served wake instruction whenever something is owed; the
- * agent judges every card inside it and records its own verdicts.
+ * one run per conversation with a message owed (one run for the whole tray
+ * from a server that serves no conversation-run template); the agent judges
+ * the card inside it and records its own verdict.
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
@@ -29,6 +39,7 @@ import type { GateModelCall, TurnReadiness, TurnStarter as RuntimeTurnStarter } 
 import { OPENCLAW_TOOL_NAMER, integrationLane, wakeSessionKey } from './turn.js'
 import { createLoopTurnStarter } from './turns.js'
 import type { AccountTurns } from './running.js'
+import { noteCouldNotProcess } from './could-not-process.js'
 
 export interface IntegrationLoopOptions {
   readonly accountId: string
@@ -40,6 +51,20 @@ export interface IntegrationLoopOptions {
   /** The agent's handle, for the echo filter (learned from the tray when absent). */
   readonly handle?: string | undefined
   readonly callModel: GateModelCall
+  /**
+   * The kit's deadline for one gate call (`gateCallTimeoutMs`; the kit's
+   * default 60 s when absent). Past it the kit aborts the call and counts it
+   * timed out. Keep `callModel`'s own abort later than this.
+   */
+  readonly gateCallTimeoutMs?: number
+  /**
+   * Could not process: does the agent's AI answer now (`createRuntimeCheck`,
+   * one minimal call on the gate's path)? The kit asks it before it reports a
+   * failed gate call, turn or run as that conversation's, when no other
+   * conversation's work completed since. Without it such a failure waits for
+   * another conversation's work to complete.
+   */
+  readonly checkRuntime?: integration.RuntimeCheck
   readonly startRun: RuntimeTurnStarter
   /** The account's turns, shared with every loop for the account in this process (`accountTurns`). */
   readonly turns: AccountTurns
@@ -96,6 +121,8 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
     texts: options.texts,
     mode: gateEnabled ? 'gateCall' : 'singleRun',
     ...(gateEnabled ? { callModel: options.callModel, startTurn } : { startRun: singleRunStarter(options, owner, logger, now) }),
+    ...(options.checkRuntime ? { checkRuntime: options.checkRuntime } : {}),
+    ...(options.gateCallTimeoutMs !== undefined ? { gateCallTimeoutMs: options.gateCallTimeoutMs } : {}),
     socket: options.socket,
     ...(options.handle ? { handle: options.handle } : {}),
     toolNamer: OPENCLAW_TOOL_NAMER,
@@ -110,7 +137,10 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
     now,
     ...(options.setTimeout ? { setTimeout: options.setTimeout } : {}),
     ...(options.clearTimeout ? { clearTimeout: options.clearTimeout } : {}),
-    onEvent: (event) => logEvent(event, logger, metrics),
+    onEvent: (event) => {
+      noteCouldNotProcess(options.accountId, event, now())
+      logEvent(event, logger, metrics)
+    },
   })
 
   // The account's live loop: a held run that ends (hung, or started by an
@@ -134,23 +164,34 @@ export function createIntegrationLoop(options: IntegrationLoopOptions): Integrat
 }
 
 /**
- * Single-run mode: one OpenClaw run with the served text; the cycle waits for
- * its confirmed end. The run is recorded with the account's turns, so a run
- * still going after 30 minutes is handed off like a turn: the cycle is let go
- * of (the loop is not stuck in it), but no new run starts while it lives —
- * one run reads the whole tray, a second would answer the same cards
- * (readiness says not-ready too; `openclaw agentchat release <run id>
+ * Single-run mode: one OpenClaw run per request — a conversation run (the
+ * served conversation-run template for one conversation), the invite run,
+ * or, from a server without that template, one run for the whole tray. The
+ * kit waits for each run's confirmed end. The run is recorded with the
+ * account's turns, so a run still going after 30 minutes is handed off like a
+ * turn: the kit's slot is let go of, but no new run starts while it lives (a
+ * run on the tray reads every card, and a second would answer the same
+ * ones; readiness says not-ready too; `openclaw agentchat release <run id>
  * --force` frees it).
+ *
+ * What the kit is told: `ok` without an error is `completed`; OpenClaw's own
+ * run deadline (`timeout`) is `failed` with `timedOut` (a could-not-process
+ * report then says `timed_out`); any other end is `failed`. A handed-off
+ * conversation run has not ended, and one whose end OpenClaw never confirmed
+ * (the plugin runtime gone) may not have either, so neither is a failure of
+ * its conversation: the kit is told it did not start (nothing reported,
+ * nothing paced), and the cards wait until the run ends.
  */
 function singleRunStarter(options: IntegrationLoopOptions, owner: string, logger: Logger, now: () => number): integration.RunStarter {
   return async (request) => {
+    const what = request.kind === 'conversation' && request.conversationId ? { kind: request.kind, conversationId: request.conversationId } : { kind: request.kind ?? 'tray' }
     const hung = options.turns.hungSingleRun()
     if (hung) {
-      logger.warn({ runId: hung.runId }, 'gate off — a handed-off run is still going; no second run while it lives (the cards wait on the tray)')
+      logger.warn({ runId: hung.runId, ...what }, 'gate off — a handed-off run is still going; no second run while it lives (the cards wait on the tray)')
       return { status: 'not_started', detail: `the gate-off run ${hung.runId} is still going` }
     }
     const sessionKey = wakeSessionKey(options.agentId, now())
-    logger.info({ sessionKey, cards: request.cards, invites: request.invites }, 'gate off — one run with the served wake instruction')
+    logger.info({ sessionKey, ...what, cards: request.cards, invites: request.invites }, request.kind === 'conversation' ? 'gate off — one run for one conversation' : 'gate off — one run with the served text')
     const admission = await options.startRun({ sessionKey, prompt: request.prompt, lane: integrationLane(options.accountId, options.turns.laneGeneration) })
     if (!admission.ran) return { status: 'not_started', detail: admission.error }
     let letGo: () => void = () => {}
@@ -161,15 +202,21 @@ function singleRunStarter(options: IntegrationLoopOptions, owner: string, logger
     options.turns.started({ runId, kind: 'run', id: runId, anchor: null, sessionKey: admission.sessionKey, startedAt: now(), owner }, { letGo })
     const ended = admission.done.then((outcome) => {
       if (outcome.status !== 'gone') void options.turns.ended(runId)
-      logger[outcome.status === 'ok' ? 'info' : 'warn']({ sessionKey, runId, status: outcome.status, agentchatCalls: outcome.agentchatCalls ?? null }, 'gate off — run ended')
+      logger[outcome.status === 'ok' ? 'info' : 'warn']({ sessionKey, runId, ...what, status: outcome.status, agentchatCalls: outcome.agentchatCalls ?? null }, 'gate off — run ended')
       return outcome
     })
     const first = await Promise.race([ended, handedOff])
     if (first === 'let_go') {
-      logger.warn({ sessionKey, runId }, `gate off — the run is still going after 30 min; no new run starts until it ends (or \`${openclawCommand('agentchat release <run id> --force')}\`)`)
+      logger.warn({ sessionKey, runId, ...what }, `gate off — the run is still going after 30 min; no new run starts until it ends (or \`${openclawCommand('agentchat release <run id> --force')}\`)`)
+      // Still going: not a failure of its conversation (could not process reports only ended runs).
+      if (request.kind === 'conversation') return { status: 'not_started', detail: 'the run was handed off while still going' }
       return { status: 'failed', detail: 'the run was handed off while still going' }
     }
-    return first.status === 'ok' && !first.error ? { status: 'completed' } : { status: 'failed', detail: first.error ?? `run ended: ${first.status ?? 'unknown'}` }
+    if (first.status === 'ok' && !first.error) return { status: 'completed' }
+    // The gateway is going down: the end was never confirmed, so it is no failure of the conversation either.
+    if (first.status === 'gone' && request.kind === 'conversation') return { status: 'not_started', detail: 'the plugin runtime is gone before the run’s end was confirmed' }
+    const detail = first.error ?? `run ended: ${first.status ?? 'unknown'}`
+    return first.status === 'timeout' ? { status: 'failed', timedOut: true, detail } : { status: 'failed', detail }
   }
 }
 
@@ -192,8 +239,63 @@ function logEvent(event: integration.ReceiveLoopEvent, logger: Logger, metrics: 
       return
     case 'gate_chunk':
       // One gate call of a cycle; the cycle's own line says what was left undecided.
-      logger.debug({ cycle: event.cycle, chunk: event.index, of: event.of, cards: event.cards, outcome: event.outcome, undecided: event.undecided, ...(event.failure ? { failure: event.failure } : {}) }, 'gate chunk')
+      // `split`: a card of a chunk that failed closed, gated again alone.
+      logger.debug(
+        {
+          cycle: event.cycle,
+          chunk: event.index,
+          of: event.of,
+          cards: event.cards,
+          outcome: event.outcome,
+          undecided: event.undecided,
+          ...(event.split ? { split: true, conversationId: event.conversationId } : {}),
+          ...(event.failure ? { failure: event.failure } : {}),
+        },
+        event.split ? 'gate call for one card (its chunk failed)' : 'gate chunk',
+      )
       return
+    case 'split_stopped':
+      logger.warn(
+        { cycle: event.cycle, remaining: event.remaining, reason: event.reason },
+        event.reason === 'no_runtime_check'
+          ? 'gate split stopped — single-card gate calls kept failing with nothing decided; the cards left wait on the tray'
+          : 'gate split stopped — single-card gate calls kept failing and the runtime check did not pass (the model looks down); the cards left wait on the tray',
+      )
+      return
+    case 'processing_failure': {
+      // Could not process: the kit reported a conversation its AI failed on
+      // (only with evidence that the runtime otherwise works) and follows the
+      // server's answer. Ids and the answer only; never message text.
+      const r = event.result
+      const fields = {
+        conversationId: event.conversationId,
+        source: event.source,
+        through: event.throughMessageId,
+        outcome: event.outcome,
+        evidence: event.evidence,
+        next: event.next,
+        ...(r ? { action: r.action, attempts: r.attempts, hidden: r.hidden_message_ids.length, ...(r.paused_until ? { pausedUntil: r.paused_until } : {}) } : {}),
+        ...(event.error ? { error: event.error } : {}),
+      }
+      if (!r) {
+        logger.warn(fields, 'could not process — the report failed; nothing more is done for it (the server re-wakes)')
+        return
+      }
+      const answer: Record<string, string> = {
+        retry: 'retry (the first failure for these messages)',
+        hidden: 'hidden (the new messages are hidden from this agent only, a note in their place, still unread)',
+        paused: `paused (a mute until ${r.paused_until ?? 'later'} that ends on its own)`,
+        none: 'none (nothing left to act on)',
+      }
+      const next: Record<string, string> = {
+        rerun: 'the conversation goes again after the others',
+        running: 'its next attempt is already under way',
+        rerun_capped: 'it already went again as often as one cycle allows; the next wake tries again',
+        stop: 'nothing more is done for it',
+      }
+      logger.warn(fields, `could not process — reported; the server answered ${answer[r.action] ?? r.action}; ${next[event.next] ?? event.next}`)
+      return
+    }
     case 'cycle': {
       const s = event.summary
       const fields = {
@@ -208,6 +310,9 @@ function logEvent(event: integration.ReceiveLoopEvent, logger: Logger, metrics: 
         turnsStarted: s.turnsStarted,
         turnsRefused: s.turnsRefused,
         heldByTurns: s.heldByTurns,
+        // A failed chunk gated again one card per call.
+        ...(s.splitCallsOk > 0 || s.splitCallsFailed > 0 ? { splitCallsOk: s.splitCallsOk, splitCallsFailed: s.splitCallsFailed } : {}),
+        ...(s.splitStopped ? { splitStopped: true } : {}),
         ...(s.truncated ? { truncated: true } : {}),
         ...(s.failure ? { failure: s.failure } : {}),
       }
@@ -232,6 +337,10 @@ function logEvent(event: integration.ReceiveLoopEvent, logger: Logger, metrics: 
           return
         case 'abandoned':
           logger.warn(fields, 'cycle abandoned — it ran past its deadline; nothing more is done for it, the next wake starts a new one')
+          return
+        case 'runs_started':
+          // Gate off, conversation runs: each run's end is logged by the run starter.
+          logger.info(fields, 'gate off — one run per conversation with a message owed, started or queued')
           return
         default: {
           const incomplete = s.turnsRefused > 0 || s.recordFailures > 0 || s.undecided > 0
