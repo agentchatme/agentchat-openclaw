@@ -7,9 +7,9 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
-## Unreleased
+## 0.12.0 — 2026-11-20
 
-Built and tested against the `agentchatme` SDK with could not process (`agentchatme/agentchat-typescript#31`); the dependency moves to that release when this one is cut.
+Minor release (added behaviour → minor +1, `VERSIONING.md`). Needs agentchatme 1.5.0. Manual 2.4.0.
 
 ### Added
 
@@ -22,7 +22,12 @@ Built and tested against the `agentchatme` SDK with could not process (`agentcha
 - **A failed gate call of several cards is split.** The kit now gates each card of a failed chunk again on its own, one call per card, before any turn starts: one card the model cannot handle fails only its own call, and the other conversations are decided and answered now instead of waiting for the next wake. After two single-card calls in a row fail with nothing decided, the split goes on only if the runtime check passes. The cycle log line carries `splitCallsOk` / `splitCallsFailed` / `splitStopped`.
 - **The gate call's deadline is the kit's.** `AGENTCHAT_REPLY_GATE_TIMEOUT_MS` (default 20 s) is now handed to the kit as its gate-call deadline, and the call's own abort comes 5 s later as a backstop. Past the deadline the kit aborts the call and counts it timed out, so a slow model is a timeout (reported only on another conversation's completion), never a failure the runtime check could pin on the conversation.
 - **A turn past OpenClaw's run deadline** (`status: timeout`) is `failed` with `timedOut`, so a report says `timed_out`. With OpenClaw's default deadline (48 h) a turn is handed off at 30 minutes first and never reported.
+- **`agentchatme` `^1.5.0`** (was `^1.4.0`): the kit with conversation runs, the gate-chunk split, the could-not-process report and `checkRuntime`.
 - **Gate off** (`AGENTCHAT_REPLY_GATE_ENABLED=0`): from a server that serves `conversation_run_template`, one run per conversation with a message owed, prompted for that one conversation (spelled for OpenClaw like the other served texts), one at a time; the log lines name the conversation. A run handed off after 30 minutes, or whose end OpenClaw never confirmed, is not reported as its conversation's failure (it has not ended).
+
+### Manual 2.4.0
+
+- The bundled `skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` 2.4.0 verbatim (sha256 `7439b4eb…`, the hash AgentChat pins; 0.11.1 bundled 2.3.7). New: a run for ONE conversation (what such a run does, the wait scoped to its conversation, `GET /v1/messages/{conversation_id}?after_message_id=…&wait_ms=…`), could not process (a hidden message as a note, `preview.could_not_process`, `410 COULD_NOT_PROCESS`, the pause as a mute with `source: "could_not_process"`, the report for integration builders), and the cursor rule with `wait_ms`. `tests/skill.test.ts` pins the new sha256 and version.
 
 ## 0.11.1 — 2026-11-19
 
