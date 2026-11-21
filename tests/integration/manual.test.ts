@@ -672,6 +672,30 @@ describe('status and doctor: local reads only', () => {
     const { primary } = checkManual({ served: SERVED_TEXTS.manual, agentIds: [], configDir })
     expect(primary.state).toBe('stale')
     expect(primary.detail).not.toMatch(/ClawHub|last sync/)
+    // The next attempt is the keeper's re-check of the file, not the kit's retry (it has no failed sync to retry).
+    expect(primary.detail).toMatch(/; the gateway takes it back at its next check of the file \(within 10 minutes\) — `openclaw gateway restart` does it now$/)
+    expect(primary.detail).not.toContain('after 5 minutes')
+  })
+
+  it('the next attempt follows why the copy is stale: a freed file → the 10-minute re-check; a failed sync → the kit retry from 5 minutes', async () => {
+    // Freed, as the running keeper last saw it (its in-process outcome) — the record says nothing yet.
+    writeManaged(manualAt('2.0.0'))
+    const freed = checkManual({ served: SERVED_TEXTS.manual, agentIds: [], configDir, latest: { kind: 'not-ours', path: file, reason: 'x', wins: true } }).primary
+    expect(freed.detail).toContain('the gateway takes it back at its next check of the file (within 10 minutes)')
+    // Freed by removing the folder altogether: bundled only, placed at the same re-check.
+    fs.rmSync(path.dirname(file), { recursive: true })
+    fs.mkdirSync(path.dirname(manualRecordPath(configDir)), { recursive: true })
+    fs.writeFileSync(manualRecordPath(configDir), JSON.stringify({ version: 1, file, written: null, last: { at: 'x', state: 'not-ours', manual: null, served: null, error: 'was installed from ClawHub' } }))
+    const absent = checkManual({ served: SERVED_TEXTS.manual, agentIds: [], configDir }).primary
+    expect(absent.state).toBe('bundled-only')
+    expect(absent.detail).toMatch(/is not placed; the gateway places it at its next check of the file \(within 10 minutes\) — `openclaw gateway restart` places it now$/)
+    // A failed sync: the kit's retry.
+    writeManaged(manualAt('2.0.0'))
+    writeRecordFor(manualAt('2.0.0'), '2.0.0')
+    await placeManual({ texts: textsAnnouncing(manualAt('9.0.0'), '9.0.0'), source: 'server', apiBase: API_BASE, configDir, fetch: refusing })
+    const failed = checkManual({ served: textsAnnouncing(manualAt('9.0.0'), '9.0.0').manual, agentIds: [], configDir }).primary
+    expect(failed.detail).toMatch(/; the gateway tries again on its own \(after 5 minutes, backing off to an hour\) — `openclaw gateway restart` tries now$/)
+    expect(failed.detail).not.toContain('next check of the file')
   })
 
   describe('skills.load.watch: false', () => {

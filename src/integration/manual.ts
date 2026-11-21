@@ -951,6 +951,12 @@ export function checkManual(params: CheckManualParams): { primary: ManualCheck; 
   const served = superseded === null ? params.served : null
   const record = readManualRecord(configDir)
   const lastError = latestError(params.latest ?? null, record, served)
+  // Past the not-ours branch below the file is free; when the last look found it someone else's, the
+  // gateway takes it back at its own re-check (the kit has no failed sync to retry).
+  const freed = params.latest?.kind === 'not-ours' || record?.last?.state === 'not-ours'
+  const nextTry = freed
+    ? `the gateway takes it back at its next check of the file (within ${NOT_OURS_RECHECK_MS / 60_000} minutes)`
+    : 'the gateway tries again on its own (after 5 minutes, backing off to an hour)'
   const check = (state: ManualCheckState, ok: boolean, notice: boolean, repair: boolean, detail: string): ManualCheck => ({ state, ok, notice, repair, detail })
   const home = params.home ?? os.homedir()
   const shadows = findManualShadows(params.cfg, params.agentIds, home, configDir, params.personalSkills ?? loadsPersonalSkills(undefined, home))
@@ -974,7 +980,7 @@ export function checkManual(params: CheckManualParams): { primary: ManualCheck; 
         true,
         true,
         true,
-        `only the copy bundled with the plugin (${bundled.version ?? 'unversioned'}${freshness}) — the copy that keeps itself current (${found.path}) is not placed${lastError ? ` (${lastError})` : ''}; the gateway places it when it starts — ${fix('places it now')}`,
+        `only the copy bundled with the plugin (${bundled.version ?? 'unversioned'}${freshness}) — the copy that keeps itself current (${found.path}) is not placed${lastError ? ` (${lastError})` : ''}; ${freed ? `the gateway places it at its next check of the file (within ${NOT_OURS_RECHECK_MS / 60_000} minutes)` : 'the gateway places it when it starts'} — ${fix('places it now')}`,
       ),
     )
   }
@@ -1013,7 +1019,7 @@ export function checkManual(params: CheckManualParams): { primary: ManualCheck; 
       true,
       true,
       true,
-      `${tampered ? `stale (have ${have} but not the served text: its sha256 differs` : `stale (have ${have}, served ${served.version}`}${why}) — ${found.path}; the gateway tries again on its own (after 5 minutes, backing off to an hour) — ${fix('tries now')}`,
+      `${tampered ? `stale (have ${have} but not the served text: its sha256 differs` : `stale (have ${have}, served ${served.version}`}${why}) — ${found.path}; ${nextTry} — ${fix(freed ? 'does it now' : 'tries now')}`,
     ),
   )
 }
