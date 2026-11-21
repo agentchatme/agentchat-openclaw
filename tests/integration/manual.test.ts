@@ -33,6 +33,7 @@ import {
   findManualShadows,
   inspectManagedManual,
   keepManualCurrent,
+  keeperTextsView,
   loadsPersonalSkills,
   NOT_OURS_RECHECK_MS,
   latestManualOutcome,
@@ -484,28 +485,61 @@ describe('ManualKeeper — the kit ManualSync for the gateway, behind the owners
     cache.stop()
   })
 
-  it('a retry still stale fetches the texts again: a manual released after the texts fetch is downloaded without a restart', async () => {
+  it("the kit's view of the texts: refresh() and lastError are the cache's own (the kit refreshes before a retry); current() and changes are gated and never fetch", async () => {
+    let answer: { texts?: Texts; error?: Error } = { texts: SERVED_TEXTS }
+    const get = vi.fn(async () => {
+      if (answer.error) throw answer.error
+      return answer.texts!
+    })
+    const cache = new integration.TextsCache({ client: { baseUrl: API_BASE, texts: { get } } as never, runtime: 'openclaw', filePath: path.join(configDir, 'texts.json') })
+    await cache.start()
+    let open = true
+    const view = keeperTextsView(cache, () => open)
+    expect(get).toHaveBeenCalledTimes(1)
+    // What the kit's refresh looks for (agentchatme ManualSync: `refresh()` on the source, skipped while `lastError` is a string).
+    expect(typeof view.refresh).toBe('function')
+    expect(view.lastError).toBeNull()
+    expect(view.apiBase).toBe(API_BASE)
+    expect(view.current()).toBe(cache.current())
+    expect(get).toHaveBeenCalledTimes(1) // reading never fetches
+    expect(await view.refresh()).toBe(true)
+    expect(get).toHaveBeenCalledTimes(2) // one fetch per refresh: the cache's own
+    answer = { error: new Error('unreachable') }
+    expect(await view.refresh()).toBe(false)
+    expect(view.lastError).toMatch(/unreachable/) // the kit then leaves the retrying to the cache's own timer
+    open = false
+    expect(view.current()).toBeNull()
+    const heard: string[] = []
+    view.onChange((texts) => heard.push(texts.version))
+    answer = { texts: { ...SERVED_TEXTS, version: '2' } }
+    await view.refresh()
+    expect(heard).toEqual([]) // withheld while not usable
+    open = true
+    answer = { texts: { ...SERVED_TEXTS, version: '3' } }
+    await view.refresh()
+    expect(heard).toEqual(['3'])
+    cache.stop()
+  })
+
+  it("a kit retry through the keeper adds no texts fetch of the plugin's own (no double fetch with the kit's refresh)", async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
     try {
       const old = manualAt('2.0.0')
       writeManaged(old)
       writeRecordFor(old, '2.0.0')
-      const v1 = manualAt('9.0.0')
-      const v2 = manualAt('9.0.1')
-      // The texts in hand announce 9.0.0, but agentchat.me already serves 9.0.1 (released in between).
-      let announced: Texts = textsAnnouncing(v1, '9.0.0')
-      const fetchTexts = vi.fn(async () => announced)
-      const cache = new integration.TextsCache({ client: { baseUrl: API_BASE, texts: { get: fetchTexts } } as never, runtime: 'openclaw', filePath: path.join(configDir, 'texts.json') })
+      const newer = manualAt('9.0.0')
+      const get = vi.fn(async () => textsAnnouncing(newer, '9.0.0'))
+      const cache = new integration.TextsCache({ client: { baseUrl: API_BASE, texts: { get } } as never, runtime: 'openclaw', filePath: path.join(configDir, 'texts.json') })
       await cache.start()
-      const { fetch } = serving(v2)
-      const keeper = new ManualKeeper({ cache, configDir, fetch })
+      const kitRefreshes = get.mock.calls.length
+      const keeper = new ManualKeeper({ cache, configDir, fetch: refusing })
       await keeper.start()
-      expect(readManualRecord(configDir)?.last?.error).toMatch(/the body is version 9\.0\.1, the server announced 9\.0\.0/)
-      expect(fetchTexts).toHaveBeenCalledTimes(1)
-      announced = textsAnnouncing(v2, '9.0.1') // the API has the release now
+      const before = refusing.mock.calls.length
       await vi.advanceTimersByTimeAsync(7 * 60_000) // the kit's first retry (5 min ±20 %)
-      await vi.waitFor(() => expect(fs.readFileSync(file)).toEqual(v2), WAIT)
-      expect(fetchTexts.mock.calls.length).toBeGreaterThanOrEqual(2)
+      await vi.waitFor(() => expect(refusing.mock.calls.length).toBeGreaterThan(before), WAIT)
+      // The installed kit refreshes the texts before a retry only from the release with that fix; either way the
+      // keeper's view fetches nothing by itself: at most one fetch per retry, the kit's.
+      expect(get.mock.calls.length - kitRefreshes).toBeLessThanOrEqual(1)
       keeper.stop()
       cache.stop()
     } finally {

@@ -664,28 +664,11 @@ export class ManualKeeper {
     // The texts the kit reads: withheld while the file is someone else's, or
     // while the announcement is a cached one the bundled copy supersedes. The
     // check runs at each sync the kit starts (a texts change, a retry).
-    const usableNow = (texts: Texts | null, source: string): Texts | null => {
-      if (texts === null || supersededByBundle(texts.manual, source) || !this.writable()) return null
+    const gated = keeperTextsView(cache, (texts, source) => {
+      if (supersededByBundle(texts.manual, source) || !this.writable()) return false
       ensureSkillDir(this.configDir)
-      return texts
-    }
-    const gated: Pick<integration.TextsCache, 'current' | 'onChange' | 'apiBase'> = {
-      current: () => {
-        // The kit's retry (agentchatme 1.6.1+) re-syncs against the texts in hand, which the cache fetches
-        // again only daily after a success. A copy still stale may be stale against an announcement the
-        // server has since replaced (a new manual released between the texts fetch and the download): fetch
-        // the texts again too. A changed copy starts a sync of its own; the same copy changes nothing.
-        if (this.sync?.result?.upToDate === false) void cache.refresh().catch(() => undefined)
-        return usableNow(cache.current(), cache.source)
-      },
-      onChange: (listener) =>
-        cache.onChange((texts, source) => {
-          if (usableNow(texts, source) !== null) listener(texts, source)
-        }),
-      get apiBase() {
-        return cache.apiBase
-      },
-    }
+      return true
+    })
     this.sync = new integration.ManualSync({
       texts: gated,
       targetPath: this.file,
@@ -762,6 +745,40 @@ export class ManualKeeper {
     } else {
       log.info(line)
     }
+  }
+}
+
+/** What the keeper hands the kit's `ManualSync` as its texts source. */
+export type ManualTextsView = Pick<integration.TextsCache, 'current' | 'onChange' | 'apiBase' | 'refresh' | 'lastError'>
+
+/**
+ * The texts cache as the kit's `ManualSync` sees it through the keeper:
+ * `current()` and the change events are withheld while `usable` says no
+ * (someone else's file; a cached announcement the bundled copy supersedes),
+ * and nothing else is changed. `refresh()` and `lastError` are the cache's
+ * own, passed through: the kit refreshes the texts before each retry, and at
+ * once after a download that is another manual, but only on a source that
+ * has `refresh()`, and never while `lastError` says the cache is failing
+ * (its own timer retries then). This view never fetches by itself: one
+ * fetch per kit refresh, coalesced by the cache with any in flight.
+ */
+export function keeperTextsView(cache: integration.TextsCache, usable: (texts: Texts, source: string) => boolean): ManualTextsView {
+  return {
+    current: () => {
+      const texts = cache.current()
+      return texts !== null && usable(texts, cache.source) ? texts : null
+    },
+    onChange: (listener) =>
+      cache.onChange((texts, source) => {
+        if (usable(texts, source)) listener(texts, source)
+      }),
+    refresh: () => cache.refresh(),
+    get apiBase() {
+      return cache.apiBase
+    },
+    get lastError() {
+      return cache.lastError
+    },
   }
 }
 
