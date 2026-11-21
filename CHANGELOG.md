@@ -7,9 +7,9 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
-## Unreleased
+## 0.12.1 — 2026-11-21
 
-Needs agentchatme 1.6.1. Manual 2.4.3.
+Patch release (a fix of existing behaviour → patch +1, `VERSIONING.md`): the plugin placed a manual frozen at its release; it now keeps the served one current. Needs agentchatme 1.6.1. Manual 2.4.3.
 
 ### Fixed
 
