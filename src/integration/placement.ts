@@ -577,7 +577,7 @@ export function manualStep(outcome: ManualOutcome): PlacementStep {
     case 'failed':
       return { name: 'manual', status: floor ? 'warned' : 'failed', detail }
     case 'floor':
-      return { name: 'manual', status: 'changed', detail }
+      return { name: 'manual', status: outcome.error !== null ? 'warned' : 'changed', detail }
     case 'synced': {
       const r = outcome.result
       if (r.state === 'failed') return { name: 'manual', status: floor ? 'warned' : 'failed', detail: floor ? `${detail}; the agent reads the copy bundled with the plugin` : detail }

@@ -28,9 +28,10 @@
  * The plugin's own copy (`skills/agentchat/SKILL.md`, declared in
  * `openclaw.plugin.json`) stays declared: the floor that needs no write. Its
  * bytes are the sync's fallback (a first install offline), and a managed
- * copy older than it is replaced by it when the server has not confirmed
- * the older announcement in this process — the managed copy shadows the
- * plugin's, so it must never be the older of the two.
+ * copy older than it is replaced by it — when the announcement in hand is a
+ * cached one it supersedes, or when the announced manual could not be had —
+ * the managed copy shadows the plugin's, so it must never be the older of
+ * the two (only the announced manual itself, from the server, may be).
  *
  * Ownership. The file is written only when there is none, when its sha256
  * is the one this plugin recorded for its last write
@@ -39,7 +40,7 @@
  * symlink nor managed by ClawHub (`.clawhub/` beside it, or listed in
  * `<config dir>/.clawhub/lock.json`). Anything else is left alone and
  * reported. Cleanup (the last AgentChat account disabled or deleted) removes
- * only a file whose bytes are the recorded ones.
+ * only a file whose bytes are the recorded ones, or the bundled ones.
  *
  * Paths come from OpenClaw's own `CONFIG_DIR` (`openclaw/plugin-sdk/
  * setup-tools`): `$OPENCLAW_STATE_DIR`, else the directory of
@@ -259,13 +260,15 @@ export function inspectManagedManual(configDir: string = openclawConfigDir()): M
   }
   if (dirStat.isSymbolicLink()) return none({ kind: 'not-ours', reason: `${dir} is a symlink (a copy kept by hand)`, wins: true })
   if (!dirStat.isDirectory()) return none({ kind: 'not-ours', reason: `${dir} is not a directory`, wins: false })
-  const clawhub = clawhubMarker(configDir)
+  const clawhubFolder = clawhubFolderMarker(configDir)
   let fileStat: fs.Stats
   try {
     fileStat = fs.lstatSync(file)
   } catch (err) {
     if (errnoCode(err) !== 'ENOENT') return none({ kind: 'not-ours', reason: `${file} cannot be read (${describe(err)})`, wins: false })
-    return none(clawhub ? { kind: 'not-ours', reason: clawhub, wins: false } : { kind: 'absent' })
+    // A folder with no SKILL.md that ClawHub claims: an install in progress, or one being updated.
+    const claimed = clawhubFolder ?? clawhubLockEntry(configDir)
+    return none(claimed ? { kind: 'not-ours', reason: claimed, wins: false } : { kind: 'absent' })
   }
   if (fileStat.isSymbolicLink()) return none({ kind: 'not-ours', reason: `${file} is a symlink (a copy kept by hand)`, wins: true })
   if (!fileStat.isFile()) return none({ kind: 'not-ours', reason: `${file} is not a regular file`, wins: false })
@@ -289,9 +292,16 @@ export function inspectManagedManual(configDir: string = openclawConfigDir()): M
   const found = (owner: ManualOwner): ManagedManual => ({ path: file, owner, size: fileStat.size, bytes, version, sha256: digest })
   const fields = integration.manualFrontMatter(text)
   const named = fields?.get('name') === MANUAL_SKILL
-  if (clawhub) return found({ kind: 'not-ours', reason: clawhub, wins: named })
+  // ClawHub's own metadata in the folder: its install, whatever the bytes.
+  if (clawhubFolder) return found({ kind: 'not-ours', reason: clawhubFolder, wins: named })
+  // The bytes this plugin recorded, or the bytes it ships (a write whose record was lost: an aborted sync's
+  // fallback, a record another process overwrote) — ours, even if a stale ClawHub lock entry names the skill.
   const record = readManualRecord(configDir)
-  if (digest !== null && record?.written && record.file === file && record.written.sha256 === digest) return found({ kind: 'ours' })
+  if (digest !== null && ((record?.written && record.file === file && record.written.sha256 === digest) || digest === bundledManual()?.sha256)) {
+    return found({ kind: 'ours' })
+  }
+  const clawhubLock = clawhubLockEntry(configDir)
+  if (clawhubLock) return found({ kind: 'not-ours', reason: clawhubLock, wins: named })
   if (named) return found({ kind: 'agentchat' })
   return found({
     kind: 'not-ours',
@@ -300,12 +310,18 @@ export function inspectManagedManual(configDir: string = openclawConfigDir()): M
   })
 }
 
-/** Why ClawHub manages the managed `agentchat` skill, or null. */
-function clawhubMarker(configDir: string): string | null {
+/** ClawHub's metadata folder inside the managed `agentchat` skill (`openclaw skills install --global`), as a reason, or null. */
+function clawhubFolderMarker(configDir: string): string | null {
   const dir = managedManualDir(configDir)
   for (const meta of ['.clawhub', '.clawdhub']) {
     if (fs.existsSync(path.join(dir, meta))) return `${dir} was installed from ClawHub (${meta}/ beside it), so \`${openclawCommand('skills update')}\` manages it`
   }
+  return null
+}
+
+/** The managed dir's ClawHub lock file listing `agentchat`, as a reason, or null. */
+function clawhubLockEntry(configDir: string): string | null {
+  const dir = managedManualDir(configDir)
   for (const meta of ['.clawhub', '.clawdhub']) {
     const lock = path.join(configDir, meta, 'lock.json')
     try {
@@ -352,8 +368,19 @@ export function supersededByBundle(served: integration.ServedManual | null, sour
 export type ManualOutcome =
   /** The kit's sync ran. */
   | { readonly kind: 'synced'; readonly result: integration.ManualSyncResult }
-  /** The bundled copy replaced an older copy (no fresh announcement in hand). */
-  | { readonly kind: 'floor'; readonly path: string; readonly version: string | null; readonly previous: string | null; readonly served: string | null }
+  /**
+   * The bundled copy replaced an older copy: no usable announcement in hand
+   * (`error` null; `served` the cached announcement it supersedes), or the
+   * announced manual could not be had (`error` why; `served` its version).
+   */
+  | {
+      readonly kind: 'floor'
+      readonly path: string
+      readonly version: string | null
+      readonly previous: string | null
+      readonly served: string | null
+      readonly error: string | null
+    }
   /** Someone else's file: left alone. */
   | { readonly kind: 'not-ours'; readonly path: string; readonly reason: string; readonly wins: boolean }
   /** The floor could not be written. */
@@ -409,7 +436,7 @@ export async function placeManual(params: PlaceManualParams): Promise<ManualOutc
     ...(params.fetch ?? defaultFetch ? { fetch: (params.fetch ?? defaultFetch)! } : {}),
   })
   recordResult(result, configDir, usable)
-  return { kind: 'synced', result }
+  return floorAfterStale(result, bundled, configDir) ?? { kind: 'synced', result }
 }
 
 /**
@@ -426,8 +453,28 @@ function placeFloor(
 ): ManualOutcome | null {
   // An announcement in hand (the server's, or a cached one the bundle does not supersede): the kit brings the file to it.
   if (usable !== null) return null
+  return writeFloor(current, bundled, configDir, { served: superseded?.version ?? null, error: null })
+}
+
+/**
+ * After a sync that left the file short of the announced manual (offline,
+ * a failed check, a host the download may not use): never older than the
+ * bundled copy. The next sync that can have the announced manual replaces
+ * it, so there is no back and forth.
+ */
+function floorAfterStale(result: integration.ManualSyncResult, bundled: BundledManual | null, configDir: string): ManualOutcome | null {
+  if (result.upToDate !== false) return null
+  return writeFloor(inspectManagedManual(configDir), bundled, configDir, { served: result.served, error: result.error })
+}
+
+/** The bundled copy over `current` when it is writable, present and older (an unversioned agentchat file counts as older; a version that is not dotted numbers does not). */
+function writeFloor(
+  current: ManagedManual,
+  bundled: BundledManual | null,
+  configDir: string,
+  why: { readonly served: string | null; readonly error: string | null },
+): ManualOutcome | null {
   if (bundled === null || !isWritable(current.owner) || current.owner.kind === 'absent' || current.bytes === null) return null
-  // Not older than the bundled copy (an unversioned agentchat file is replaced; a version that is not dotted numbers is kept).
   if (current.version !== null && (compareManualVersions(bundled.version, current.version) ?? 0) <= 0) return null
   if (current.sha256 === bundled.sha256) return null
   try {
@@ -436,8 +483,8 @@ function placeFloor(
   } catch (err) {
     return { kind: 'failed', path: current.path, error: `could not write ${current.path}: ${describe(err)}` }
   }
-  recordWritten(current.path, configDir, { state: 'updated', manual: bundled.version, served: superseded?.version ?? null, error: null })
-  return { kind: 'floor', path: current.path, version: bundled.version, previous: current.version, served: superseded?.version ?? null }
+  recordWritten(current.path, configDir, { state: why.error === null ? 'updated' : 'fallback', manual: bundled.version, served: why.served, error: why.error })
+  return { kind: 'floor', path: current.path, version: bundled.version, previous: current.version, served: why.served, error: why.error }
 }
 
 /**
@@ -466,16 +513,21 @@ export function recordResult(result: integration.ManualSyncResult, configDir: st
     recordWritten(result.path, configDir, last)
     return
   }
-  // The announced bytes (by their sha256) at a path this plugin wrote before,
-  // under another sha: ours again — a write whose record was lost, or a copy
-  // another process (the gateway, `doctor --fix`) wrote at the same time.
-  if (result.state === 'current' && announced !== null) {
-    const hash = announcedSha(announced)
+  // Ours, but not under the recorded sha: the bundled bytes, or the announced
+  // bytes (by their sha256) at a path this plugin wrote before — a write
+  // whose record was lost, or a copy another process (the gateway,
+  // `doctor --fix`) wrote at the same time. Recorded again.
+  if (result.state === 'current') {
     const record = readManualRecord(configDir)
-    const bytes = hash !== null && record?.written && record.file === result.path ? readFileOrNull(result.path) : null
-    if (bytes !== null && hash !== null && sha256(bytes) === hash && record?.written?.sha256 !== hash) {
-      recordWritten(result.path, configDir, last)
-      return
+    const bytes = readFileOrNull(result.path)
+    if (bytes !== null) {
+      const digest = sha256(bytes)
+      const recorded = record?.file === result.path ? record.written?.sha256 : undefined
+      const announcedBytes = announced !== null && recorded !== undefined && announcedSha(announced) === digest
+      if (digest !== recorded && (digest === bundledManual()?.sha256 || announcedBytes)) {
+        recordWritten(result.path, configDir, last)
+        return
+      }
     }
   }
   noteLast(configDir, result.path, last)
@@ -567,7 +619,7 @@ export class ManualKeeper {
       const served = cache.current()?.manual ?? null
       const usable = supersededByBundle(served, cache.source, bundled) ? null : served
       const current = inspectManagedManual(this.configDir)
-      if (usable === null && current.owner.kind === 'absent' && bundled !== null) {
+      if (usable === null && current.owner.kind === 'absent' && bundled !== null && !this.stopped) {
         // Nothing announced in hand (offline, nothing cached, or a cached announcement older than the bundle): the bundled copy, through the kit (its fallback).
         ensureSkillDir(this.configDir)
         const result = await integration.syncManual({ path: this.file, served: null, apiBase: cache.apiBase, fallback: bundled.bytes })
@@ -607,9 +659,12 @@ export class ManualKeeper {
       fallback: bundled?.bytes ?? null,
       maxBytes: manualMaxBytes(this.options.cfg),
       ...(this.options.fetch ?? defaultFetch ? { fetch: (this.options.fetch ?? defaultFetch)! } : {}),
+      // Called inside the kit's serialised chain: a floor written here cannot interleave with its next sync.
       onResult: (result) => {
         recordResult(result, this.configDir, cache.current()?.manual ?? null)
-        this.report({ kind: 'synced', result })
+        const floor = floorAfterStale(result, bundledManual(), this.configDir)
+        if (floor !== null) this.floor = floor
+        this.report(floor ?? { kind: 'synced', result })
       },
     })
     const first = await this.sync.start()
@@ -646,7 +701,7 @@ export class ManualKeeper {
       if (r.state === 'current') log.debug?.(line)
       else if (r.upToDate === false || r.state === 'failed') log.warn(line)
       else log.info(line)
-    } else if (outcome.kind === 'failed' || outcome.kind === 'not-ours') {
+    } else if (outcome.kind === 'failed' || outcome.kind === 'not-ours' || (outcome.kind === 'floor' && outcome.error !== null)) {
       log.warn(line)
     } else {
       log.info(line)
@@ -906,6 +961,7 @@ function notOursLine(reason: string, wins: boolean): string {
 function latestError(latest: ManualOutcome | null, record: ManualRecord | null, served: integration.ServedManual | null): string | null {
   if (latest?.kind === 'synced') return latest.result.upToDate === true ? null : latest.result.error
   if (latest?.kind === 'failed') return latest.error
+  if (latest?.kind === 'floor' && latest.error !== null) return latest.error
   const last = record?.last
   if (!last || last.error === null) return null
   if (served !== null && last.served !== null && last.served !== served.version) return null
@@ -995,7 +1051,9 @@ export function describeManualOutcome(outcome: ManualOutcome): string {
     case 'failed':
       return `${outcome.error}; the agent reads the copy bundled with the plugin`
     case 'floor':
-      return `bundled copy ${outcome.version ?? 'unversioned'} → ${outcome.path} (was ${outcome.previous ?? 'an unversioned file'}${outcome.served !== null ? `; the cached announcement, ${outcome.served}, is older` : ''})`
+      return outcome.error !== null
+        ? `bundled copy ${outcome.version ?? 'unversioned'} → ${outcome.path} (was ${outcome.previous ?? 'an unversioned file'}); served ${outcome.served ?? '?'} could not be fetched: ${outcome.error}`
+        : `bundled copy ${outcome.version ?? 'unversioned'} → ${outcome.path} (was ${outcome.previous ?? 'an unversioned file'}${outcome.served !== null ? `; the cached announcement, ${outcome.served}, is older` : ''})`
     case 'synced':
       return describeSyncResult(outcome.result)
   }

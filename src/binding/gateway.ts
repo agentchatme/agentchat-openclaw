@@ -428,133 +428,139 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     // them: `openclaw channels capabilities --channel agentchat`.
     const metrics = createInMemoryMetrics()
 
-    await registerIntegration({
-      accountId: ctx.accountId,
-      config,
-      logger,
-      socketOptions: { client, metrics },
-      build: (socket) => {
-        const loop = createIntegrationLoop({
-          accountId: ctx.accountId,
-          agentId,
-          client,
-          texts,
-          socket: socket.realtime,
-          handle: config.agentHandle,
-          // The gate call's deadline is the kit's (AGENTCHAT_REPLY_GATE_TIMEOUT_MS,
-          // default 20 s): past it the kit aborts the call and counts it timed
-          // out — a slow model is a timeout, never the conversation's failure.
-          // The call's own abort comes later, as a backstop.
-          callModel: createRuntimeModelCall({ agentIdOverride, timeoutMs: gateDeadlineMs + GATE_ABORT_BACKSTOP_MS }),
-          gateCallTimeoutMs: gateDeadlineMs,
-          // Could not process: before a failed gate call or turn is reported as
-          // its conversation's, the kit may ask whether the model answers now —
-          // one minimal call on the gate's path (same agent, no tools, no peer
-          // content, 45 s), never a login check.
-          checkRuntime: createRuntimeCheck({ agentIdOverride }),
-          // A turn holds its conversation until OpenClaw confirms its run
-          // ended; a wait that elapses is asked again (`integration/run.ts`).
-          startRun: createRuntimeTurnStarter({
-            onStillRunning,
-            onWaitError: ({ runId, sessionKey, error, attempt, retryInMs }) =>
-              logger[attempt === 1 ? 'warn' : 'debug']({ runId, sessionKey, error, attempt, retryInMs }, 'waiting for the turn to end failed — asking OpenClaw again'),
-          }),
-          // Gating waits until a turn can have the hosted tools (the MCP
-          // entry in the LIVE config — OpenClaw hot-applies `mcp.*` — and
-          // its key in this process): a connect wake on a cold gateway
-          // otherwise spends a gate call and runs a turn that cannot look.
-          readiness: () => {
-            const live = readLiveConfig(ctx.cfg)
-            // Too many hung turns: stop gating (each would only add a turn
-            // that waits behind them); status and doctor say why.
-            const hung = hungTurnsReason(turns, live.cfg)
-            if (hung) return { ready: false, reason: hung }
-            return turnReadiness({ cfg: live.cfg, apiBase: config.apiBase, apiKey: config.apiKey, live: live.live })
-          },
-          // The account's runs outlive this loop: a config change restarts
-          // the account while its runs go on in OpenClaw, so every loop for
-          // the account shares the same turns (and the kit tracker in them).
-          turns,
-          logger,
-          metrics,
-          gateEnabled: readReplyGateEnabledFromEnv(),
-        })
-        // True from the first rejected key until a HELLO is accepted again
-        // (or the account stops). The SDK retries a rejected key with a fresh
-        // HELLO every 10–15 min and reports each rejection as `blocked`; a
-        // network failure in between takes it through `backoff`. For the
-        // operator that is one situation, so it is one error line and one
-        // steady `blocked` status at the first `blocked`, cleared at the next
-        // accepted HELLO; every signal in between is a debug line, never a
-        // health flap.
-        let blocked = false
-        return {
-          loop,
-          texts,
-          textsCache,
-          manual: served.manual,
-          handlers: {
-            onConnected: (at) => {
-              if (blocked) {
-                blocked = false
-                ctx.log?.info?.(`[agentchat:${ctx.accountId}] key accepted again — blocked cleared`)
-              }
-              ctx.log?.info?.(`[agentchat:${ctx.accountId}] connected at ${new Date(at).toISOString()} (agent ${agentId})`)
-              ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: true, linked: true, statusState: 'linked', lastConnectedAt: at, lastError: null }, 'ready'))
+    // A registration that throws (the socket or the loop could not start) must not leave the texts cache and the manual claim running.
+    try {
+      await registerIntegration({
+        accountId: ctx.accountId,
+        config,
+        logger,
+        socketOptions: { client, metrics },
+        build: (socket) => {
+          const loop = createIntegrationLoop({
+            accountId: ctx.accountId,
+            agentId,
+            client,
+            texts,
+            socket: socket.realtime,
+            handle: config.agentHandle,
+            // The gate call's deadline is the kit's (AGENTCHAT_REPLY_GATE_TIMEOUT_MS,
+            // default 20 s): past it the kit aborts the call and counts it timed
+            // out — a slow model is a timeout, never the conversation's failure.
+            // The call's own abort comes later, as a backstop.
+            callModel: createRuntimeModelCall({ agentIdOverride, timeoutMs: gateDeadlineMs + GATE_ABORT_BACKSTOP_MS }),
+            gateCallTimeoutMs: gateDeadlineMs,
+            // Could not process: before a failed gate call or turn is reported as
+            // its conversation's, the kit may ask whether the model answers now —
+            // one minimal call on the gate's path (same agent, no tools, no peer
+            // content, 45 s), never a login check.
+            checkRuntime: createRuntimeCheck({ agentIdOverride }),
+            // A turn holds its conversation until OpenClaw confirms its run
+            // ended; a wait that elapses is asked again (`integration/run.ts`).
+            startRun: createRuntimeTurnStarter({
+              onStillRunning,
+              onWaitError: ({ runId, sessionKey, error, attempt, retryInMs }) =>
+                logger[attempt === 1 ? 'warn' : 'debug']({ runId, sessionKey, error, attempt, retryInMs }, 'waiting for the turn to end failed — asking OpenClaw again'),
+            }),
+            // Gating waits until a turn can have the hosted tools (the MCP
+            // entry in the LIVE config — OpenClaw hot-applies `mcp.*` — and
+            // its key in this process): a connect wake on a cold gateway
+            // otherwise spends a gate call and runs a turn that cannot look.
+            readiness: () => {
+              const live = readLiveConfig(ctx.cfg)
+              // Too many hung turns: stop gating (each would only add a turn
+              // that waits behind them); status and doctor say why.
+              const hung = hungTurnsReason(turns, live.cfg)
+              if (hung) return { ready: false, reason: hung }
+              return turnReadiness({ cfg: live.cfg, apiBase: config.apiBase, apiKey: config.apiKey, live: live.live })
             },
-            onBlocked: (info) => {
-              const close = `close ${info.code}${info.reason ? ` ${info.reason}` : ''}`
-              const next = info.retryInMs === null ? 'no retry scheduled' : `next HELLO in about ${Math.max(1, Math.round(info.retryInMs / 60_000))} min`
-              if (blocked) {
-                ctx.log?.debug?.(`[agentchat:${ctx.accountId}] still blocked (${close}; ${next})`)
-                return
-              }
-              blocked = true
-              ctx.log?.error?.(
-                `[agentchat:${ctx.accountId}] key rejected (${close}) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted (${next}); store a new key with ${openclawCommand('channels add --channel agentchat')} (Recover by email code, or --token-file <path>), then restart the gateway (${openclawCommand('gateway restart')}) so the hosted tools use it too`,
-              )
-              ctx.setStatus(
-                withLifecycle(
-                  {
-                    ...ctx.getStatus(),
-                    running: false,
-                    connected: false,
-                    statusState: 'not-linked',
-                    lastError: `the server refused the API key (${close}); store a new key with ${openclawCommand('channels add --channel agentchat')}, then restart the gateway (${openclawCommand('gateway restart')})`,
-                    lastDisconnect: { at: Date.now(), error: `key rejected: ${close}` },
-                  },
-                  'blocked',
-                ),
-              )
-            },
-            onError: (err) => {
-              // While blocked the one error line already said it.
-              ctx.log?.[blocked ? 'debug' : 'warn']?.(`[agentchat:${ctx.accountId}] socket error: ${err.message}`)
-            },
-            onStateChanged: (next, prev) => {
-              // The status follows the SDK's state. `ready` is reported by
-              // onConnected (it has the time); `connecting` keeps whatever
-              // came before (`starting` on the first attempt, `recovering`
-              // after a backoff, `blocked` during a blocked retry).
-              switch (next) {
-                case 'backoff':
-                  if (blocked) {
-                    ctx.log?.debug?.(`[agentchat:${ctx.accountId}] socket in backoff while blocked (from ${prev})`)
+            // The account's runs outlive this loop: a config change restarts
+            // the account while its runs go on in OpenClaw, so every loop for
+            // the account shares the same turns (and the kit tracker in them).
+            turns,
+            logger,
+            metrics,
+            gateEnabled: readReplyGateEnabledFromEnv(),
+          })
+          // True from the first rejected key until a HELLO is accepted again
+          // (or the account stops). The SDK retries a rejected key with a fresh
+          // HELLO every 10–15 min and reports each rejection as `blocked`; a
+          // network failure in between takes it through `backoff`. For the
+          // operator that is one situation, so it is one error line and one
+          // steady `blocked` status at the first `blocked`, cleared at the next
+          // accepted HELLO; every signal in between is a debug line, never a
+          // health flap.
+          let blocked = false
+          return {
+            loop,
+            texts,
+            textsCache,
+            manual: served.manual,
+            handlers: {
+              onConnected: (at) => {
+                if (blocked) {
+                  blocked = false
+                  ctx.log?.info?.(`[agentchat:${ctx.accountId}] key accepted again — blocked cleared`)
+                }
+                ctx.log?.info?.(`[agentchat:${ctx.accountId}] connected at ${new Date(at).toISOString()} (agent ${agentId})`)
+                ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: true, linked: true, statusState: 'linked', lastConnectedAt: at, lastError: null }, 'ready'))
+              },
+              onBlocked: (info) => {
+                const close = `close ${info.code}${info.reason ? ` ${info.reason}` : ''}`
+                const next = info.retryInMs === null ? 'no retry scheduled' : `next HELLO in about ${Math.max(1, Math.round(info.retryInMs / 60_000))} min`
+                if (blocked) {
+                  ctx.log?.debug?.(`[agentchat:${ctx.accountId}] still blocked (${close}; ${next})`)
+                  return
+                }
+                blocked = true
+                ctx.log?.error?.(
+                  `[agentchat:${ctx.accountId}] key rejected (${close}) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted (${next}); store a new key with ${openclawCommand('channels add --channel agentchat')} (Recover by email code, or --token-file <path>), then restart the gateway (${openclawCommand('gateway restart')}) so the hosted tools use it too`,
+                )
+                ctx.setStatus(
+                  withLifecycle(
+                    {
+                      ...ctx.getStatus(),
+                      running: false,
+                      connected: false,
+                      statusState: 'not-linked',
+                      lastError: `the server refused the API key (${close}); store a new key with ${openclawCommand('channels add --channel agentchat')}, then restart the gateway (${openclawCommand('gateway restart')})`,
+                      lastDisconnect: { at: Date.now(), error: `key rejected: ${close}` },
+                    },
+                    'blocked',
+                  ),
+                )
+              },
+              onError: (err) => {
+                // While blocked the one error line already said it.
+                ctx.log?.[blocked ? 'debug' : 'warn']?.(`[agentchat:${ctx.accountId}] socket error: ${err.message}`)
+              },
+              onStateChanged: (next, prev) => {
+                // The status follows the SDK's state. `ready` is reported by
+                // onConnected (it has the time); `connecting` keeps whatever
+                // came before (`starting` on the first attempt, `recovering`
+                // after a backoff, `blocked` during a blocked retry).
+                switch (next) {
+                  case 'backoff':
+                    if (blocked) {
+                      ctx.log?.debug?.(`[agentchat:${ctx.accountId}] socket in backoff while blocked (from ${prev})`)
+                      return
+                    }
+                    ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: false, statusState: 'unstable' }, 'recovering'))
                     return
-                  }
-                  ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: false, statusState: 'unstable' }, 'recovering'))
-                  return
-                case 'stopped':
-                  ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'configured' }, 'stopped'))
-                  return
-                default:
-                  return
-              }
+                  case 'stopped':
+                    ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'configured' }, 'stopped'))
+                    return
+                  default:
+                    return
+                }
+              },
             },
-          },
-        }
-      },
-    })
+          }
+        },
+      })
+    } catch (err) {
+      served.stop()
+      throw err
+    }
 
     // Keep the channel task pending until OpenClaw aborts it. A resolved
     // promise would read as "channel exited" and trigger auto-restart.

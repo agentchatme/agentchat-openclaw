@@ -49,6 +49,8 @@ import {
 import { manualStep, formatPlacement } from '../../src/integration/placement.js'
 import { BUNDLED_MANUAL_SHA256, BUNDLED_MANUAL_VERSION, MANUAL_URL, SERVED_TEXTS } from '../helpers/texts.js'
 
+/** The suite runs files in parallel: a background sync can take longer than waitFor's 1 s default. */
+const WAIT = { timeout: 5_000 }
 const API_BASE = 'https://api.agentchat.me'
 const BUNDLED = fs.readFileSync(path.join(__dirname, '..', '..', 'skills', 'agentchat', 'SKILL.md'))
 
@@ -197,11 +199,14 @@ describe('placeManual — one sync, for setup, re-enable and doctor --fix', () =
   })
 
   it("the announced bytes at a path this plugin wrote, under another sha (a lost record, another process's write): recorded as ours again", async () => {
-    await placeManual({ texts: SERVED_TEXTS, source: 'server', apiBase: API_BASE, configDir })
+    const newer = manualAt('2.5.0')
+    const texts = textsAnnouncing(newer, '2.5.0')
+    await placeManual({ texts, source: 'server', apiBase: API_BASE, configDir, fetch: serving(newer).fetch })
     const record = readManualRecord(configDir)!
     fs.writeFileSync(manualRecordPath(configDir), JSON.stringify({ ...record, written: { ...record.written, sha256: '0'.repeat(64) } }))
     expect(inspectManagedManual(configDir).owner.kind).toBe('agentchat')
-    await placeManual({ texts: SERVED_TEXTS, source: 'server', apiBase: API_BASE, configDir })
+    await placeManual({ texts, source: 'server', apiBase: API_BASE, configDir, fetch: refusing })
+    expect(refusing).not.toHaveBeenCalled()
     expect(inspectManagedManual(configDir).owner.kind).toBe('ours')
   })
 })
@@ -240,6 +245,15 @@ describe('not ours: left alone, reported', () => {
       fs.writeFileSync(path.join(path.dirname(file), '.clawhub', 'origin.json'), '{}')
     }, /was installed from ClawHub \(\.clawhub\/ beside it\), so `openclaw skills update` manages it/)
     expect(step.detail).toContain('the agent reads it instead of the served manual')
+  })
+
+  it('a stale ClawHub lock entry with the folder gone: the manual is placed, and stays ours', async () => {
+    fs.mkdirSync(path.join(configDir, '.clawhub'), { recursive: true })
+    fs.writeFileSync(path.join(configDir, '.clawhub', 'lock.json'), JSON.stringify({ version: 1, skills: { agentchat: { version: '1.0.0' } } }))
+    expect(inspectManagedManual(configDir).owner.kind).toBe('absent')
+    await placeManual({ texts: SERVED_TEXTS, source: 'server', apiBase: API_BASE, configDir })
+    expect(fs.readFileSync(file)).toEqual(BUNDLED)
+    expect(inspectManagedManual(configDir).owner.kind).toBe('ours')
   })
 
   it("an agentchat skill listed in the managed dir's ClawHub lock file", async () => {
@@ -347,6 +361,41 @@ describe('the bundled copy is the floor', () => {
     expect(primary.detail).toContain(`the cached announcement, 2.0.0, is older than the copy bundled with this plugin (${BUNDLED_MANUAL_VERSION}); AgentChat not reached since the update`)
   })
 
+  it('an older copy of ours, a newer manual announced that cannot be had: the bundled copy, a warning; the next sync that can fetch it brings the announced one', async () => {
+    const old = manualAt('2.0.0')
+    writeManaged(old)
+    writeRecordFor(old, '2.0.0')
+    const newer = manualAt('9.0.0')
+    const outcome = await placeManual({ texts: textsAnnouncing(newer, '9.0.0'), source: 'server', apiBase: API_BASE, configDir, fetch: refusing })
+    expect(fs.readFileSync(file)).toEqual(BUNDLED)
+    const step = manualStep(outcome)
+    expect(step.status).toBe('warned')
+    expect(step.detail).toBe(`bundled copy ${BUNDLED_MANUAL_VERSION} → ${file} (was 2.0.0); served 9.0.0 could not be fetched: fetch failed (${MANUAL_URL})`)
+    expect(readManualRecord(configDir)).toMatchObject({ written: { sha256: BUNDLED_MANUAL_SHA256 }, last: { state: 'fallback', served: '9.0.0', error: expect.stringContaining('fetch failed') } })
+    expect(checkManual({ served: textsAnnouncing(newer, '9.0.0').manual, agentIds: [], configDir }).primary.detail).toMatch(/^stale \(have \S+, served 9\.0\.0; last sync: fetch failed/)
+    const { fetch } = serving(newer)
+    await placeManual({ texts: textsAnnouncing(newer, '9.0.0'), source: 'server', apiBase: API_BASE, configDir, fetch })
+    expect(fs.readFileSync(file)).toEqual(newer)
+  })
+
+  it('the gateway keeper applies the same floor after a failed sync, inside the kit chain', async () => {
+    const old = manualAt('2.0.0')
+    writeManaged(old)
+    writeRecordFor(old, '2.0.0')
+    const newer = manualAt('9.0.0')
+    const client = { baseUrl: API_BASE, texts: { get: async () => textsAnnouncing(newer, '9.0.0') } }
+    const cache = new integration.TextsCache({ client: client as never, runtime: 'openclaw', filePath: path.join(configDir, 'texts.json') })
+    await cache.start()
+    const lines = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() }
+    const keeper = new ManualKeeper({ cache, configDir, log: lines, fetch: refusing })
+    await keeper.start()
+    expect(fs.readFileSync(file)).toEqual(BUNDLED)
+    expect(lines.warn).toHaveBeenCalledWith(expect.stringMatching(/^\[agentchat\] manual: bundled copy \S+ → .* \(was 2\.0\.0\); served 9\.0\.0 could not be fetched/))
+    keeper.stop()
+    cache.stop()
+    resetManualKeeperForTest()
+  })
+
   it('the server announcing an older manual (a rollback) is followed: downloaded over the newer copy', async () => {
     writeManaged(BUNDLED)
     const old = manualAt('2.0.0')
@@ -405,9 +454,9 @@ describe('ManualKeeper — the kit ManualSync for the gateway, behind the owners
     expect(fs.readFileSync(file)).toEqual(BUNDLED)
     answer({ texts: textsAnnouncing(newer, '2.5.0') })
     await cache.refresh()
-    await vi.waitFor(() => expect(fs.readFileSync(file)).toEqual(newer))
+    await vi.waitFor(() => expect(fs.readFileSync(file)).toEqual(newer), WAIT)
     expect(calls).toEqual([MANUAL_URL])
-    await vi.waitFor(() => expect(readManualRecord(configDir)?.written?.manual).toBe('2.5.0'))
+    await vi.waitFor(() => expect(readManualRecord(configDir)?.written?.manual).toBe('2.5.0'), WAIT)
     expect(lines.info).toHaveBeenCalledWith(`[agentchat] manual: 2.5.0 downloaded from ${MANUAL_URL} → ${file} (was ${BUNDLED_MANUAL_VERSION})`)
     keeper.stop()
     cache.stop()
@@ -427,7 +476,7 @@ describe('ManualKeeper — the kit ManualSync for the gateway, behind the owners
     fs.rmSync(path.dirname(file), { recursive: true })
     answer({ texts: { ...SERVED_TEXTS, version: '1b' } })
     await cache.refresh()
-    await vi.waitFor(() => expect(fs.existsSync(file) && fs.readFileSync(file).equals(BUNDLED)).toBe(true))
+    await vi.waitFor(() => expect(fs.existsSync(file) && fs.readFileSync(file).equals(BUNDLED)).toBe(true), WAIT)
     expect(lines.warn).toHaveBeenCalledTimes(1)
     keeper.stop()
     cache.stop()
@@ -456,7 +505,7 @@ describe('ManualKeeper — the kit ManualSync for the gateway, behind the owners
     expect(await claimA2.started).toBeNull() // b's keeper ran when a asked
     claimB2.release()
     expect(made).toEqual(['a', 'b', 'a']) // a, still running, takes over
-    await vi.waitFor(() => expect(latestManualOutcome()).toMatchObject({ kind: 'synced' }))
+    await vi.waitFor(() => expect(latestManualOutcome()).toMatchObject({ kind: 'synced' }), WAIT)
     // an old claim of a restarted account never stops the new one
     const restarted = keepManualCurrent('a', () => (made.push('a2'), new ManualKeeper({ cache: a.cache, configDir })))
     claimA2.release()
@@ -485,6 +534,13 @@ describe('cleanup — the last AgentChat account gone', () => {
     expect(removeManagedManual(configDir)).toEqual([`left ${file} in place: it is not the copy this plugin wrote (changed since, or someone else's)`])
     expect(fs.readFileSync(file, 'utf8')).toContain('my own notes')
     expect(fs.existsSync(manualRecordPath(configDir))).toBe(false)
+  })
+
+  it('the bundled bytes with no record (a write whose record was lost) are ours: removed', () => {
+    writeManaged(BUNDLED)
+    expect(inspectManagedManual(configDir).owner.kind).toBe('ours')
+    expect(removeManagedManual(configDir)).toEqual([`removed the AgentChat manual this plugin kept current (${file})`])
+    expect(fs.existsSync(file)).toBe(false)
   })
 
   it("someone else's file, never recorded, stays without a word; anything else in the folder stays too", async () => {

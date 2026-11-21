@@ -172,7 +172,9 @@ head -5 <config dir>/skills/agentchat/SKILL.md       # version: X
 - **an agentchat skill … loads ahead of the managed copy**: a copy in `<workspace>/skills`, `<workspace>/.agents/skills` or `~/.agents/skills` (OpenClaw matches by front-matter name, so the folder may have any name). It wins over the managed copy. Remove it with the command in the line. The plugin never deletes it.
 - **`skills.load.watch: false`**: OpenClaw rescans skills only at a restart, so a new manual reaches agents after `openclaw gateway restart`.
 
-The managed copy goes when the last enabled AgentChat account is disabled or deleted (`channels remove`), but only if its bytes are still the ones recorded. A copy changed since stays, and the command says so.
+The managed copy goes when the last enabled AgentChat account is disabled or deleted (`channels remove`), but only if its bytes are still the ones recorded (or the bundled ones). A copy changed since stays, and the command says so.
+
+While the announced manual cannot be had, the gateway does not retry on a timer of its own. It tries again when the served texts change, and with the SDK kit's own retry once the installed `agentchatme` has it. `openclaw doctor --fix` or a gateway restart tries at once. Meanwhile the managed copy is never older than the bundled one.
 
 ### Removing the channel
 

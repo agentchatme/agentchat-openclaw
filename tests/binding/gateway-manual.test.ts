@@ -43,6 +43,8 @@ import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
 import { latestManualOutcome, managedManualPath, readManualRecord } from '../../src/integration/manual.js'
 import { BUNDLED_MANUAL_SHA256, BUNDLED_MANUAL_VERSION, IDENTITY_LINE } from '../helpers/texts.js'
 
+/** The suite runs files in parallel: a background sync can take longer than waitFor's 1 s default. */
+const WAIT = { timeout: 5_000 }
 const KEY = ['ac', 'm'.repeat(24)].join('_')
 const OLD_LINE = 'I am @alice on AgentChat (api.agentchat.me). Older wording.'
 
@@ -111,7 +113,7 @@ describe('the manual and the identity line on every gateway path', () => {
     const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
     writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: OLD_LINE })
     const run = start(cfg)
-    await vi.waitFor(() => expect(placed()).toBe(true))
+    await vi.waitFor(() => expect(placed()).toBe(true), WAIT)
     expect(registerIntegration).not.toHaveBeenCalled()
     expect(run.lines('info')[0]).toMatch(/AGENTCHAT_WAKE=off — no socket, no wakes, no turns; the hosted tools stay placed, and the manual and the identity line are kept current/)
     expect(run.lines('info')).toContain(`[agentchat] manual: ${BUNDLED_MANUAL_VERSION} placed from the bundled copy (the served version) → ${managedManualPath()}`)
@@ -130,7 +132,7 @@ describe('the manual and the identity line on every gateway path', () => {
     const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { accounts: { a: { apiKey: KEY, agentHandle: 'alice' }, b: { apiKey: KEY, agentHandle: 'bob' } } } } }
     writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: OLD_LINE })
     const run = start(cfg, 'a')
-    await vi.waitFor(() => expect(placed()).toBe(true))
+    await vi.waitFor(() => expect(placed()).toBe(true), WAIT)
     expect(registerIntegration).not.toHaveBeenCalled()
     expect(run.lines('error')).toHaveLength(1)
     expect(run.lines('error')[0]).toMatch(/integration not started — 2 AgentChat accounts are configured/)
@@ -143,7 +145,7 @@ describe('the manual and the identity line on every gateway path', () => {
     const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
     writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: OLD_LINE })
     const run = start(cfg)
-    await vi.waitFor(() => expect(placed()).toBe(true))
+    await vi.waitFor(() => expect(placed()).toBe(true), WAIT)
     expect(registerIntegration).not.toHaveBeenCalled()
     expect(run.lines('error')).toHaveLength(1)
     expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain(OLD_LINE)
@@ -153,13 +155,21 @@ describe('the manual and the identity line on every gateway path', () => {
   it('the full integration: the keeper claim goes to the registry with the texts cache, and is released when the account stops', async () => {
     const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
     const run = start(cfg)
-    await vi.waitFor(() => expect(registerIntegration).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => expect(registerIntegration).toHaveBeenCalledTimes(1), WAIT)
     const built = vi.mocked(registerIntegration).mock.calls[0]![0].build({ realtime: null } as never)
     expect(built.manual).toEqual(expect.objectContaining({ release: expect.any(Function) }))
     expect(built.textsCache).toBeTruthy()
-    await vi.waitFor(() => expect(placed()).toBe(true))
+    await vi.waitFor(() => expect(placed()).toBe(true), WAIT)
     await built.loop?.stop()
     await run.stop()
+    expect(latestManualOutcome()).toBeNull()
+  })
+
+  it('a registration that throws stops the texts cache and releases the manual claim before the error leaves startAccount', async () => {
+    vi.mocked(registerIntegration).mockRejectedValueOnce(new Error('socket could not start'))
+    const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
+    const ctx = start(cfg)
+    await expect(ctx.stop()).rejects.toThrow('socket could not start')
     expect(latestManualOutcome()).toBeNull()
   })
 
@@ -167,7 +177,7 @@ describe('the manual and the identity line on every gateway path', () => {
     process.env.AGENTCHAT_WAKE = 'off'
     const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
     const run = start(cfg)
-    await vi.waitFor(() => expect(placed()).toBe(true))
+    await vi.waitFor(() => expect(placed()).toBe(true), WAIT)
     expect(latestManualOutcome()).not.toBeNull()
     await agentchatGatewayAdapter.stopAccount!({ accountId: 'default', getStatus: () => ({}), setStatus: () => undefined } as never)
     expect(latestManualOutcome()).toBeNull()

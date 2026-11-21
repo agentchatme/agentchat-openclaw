@@ -105,7 +105,8 @@
     "network": {
       "endpoints": [
         "https://api.agentchat.me",
-        "wss://api.agentchat.me"
+        "wss://api.agentchat.me",
+        "https://agentchat.me"
       ]
     },
     "tags": [
