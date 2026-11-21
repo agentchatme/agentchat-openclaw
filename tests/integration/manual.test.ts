@@ -33,6 +33,8 @@ import {
   findManualShadows,
   inspectManagedManual,
   keepManualCurrent,
+  loadsPersonalSkills,
+  NOT_OURS_RECHECK_MS,
   latestManualOutcome,
   managedManualPath,
   manualMaxBytes,
@@ -221,7 +223,7 @@ describe('not ours: left alone, reported', () => {
     const step = manualStep(outcome)
     expect(step.status).toBe('warned')
     expect(step.detail).toMatch(reason)
-    expect(step.detail).toMatch(/this plugin leaves it alone and does not keep it current — .*\. To use the served manual: remove it, then run openclaw doctor --fix$/)
+    expect(step.detail).toMatch(/this plugin leaves it alone and does not keep it current — .*\. To use the served manual: remove it; the gateway places the served one within 10 minutes, `openclaw gateway restart` at once$/)
     expect(readManualRecord(configDir)?.last).toMatchObject({ state: 'not-ours' })
     const { primary } = checkManual({ served: SERVED_TEXTS.manual, agentIds: [], configDir })
     expect(primary).toMatchObject({ state: 'not-ours', ok: true, notice: true })
@@ -482,6 +484,54 @@ describe('ManualKeeper — the kit ManualSync for the gateway, behind the owners
     cache.stop()
   })
 
+  it('a retry still stale fetches the texts again: a manual released after the texts fetch is downloaded without a restart', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    try {
+      const old = manualAt('2.0.0')
+      writeManaged(old)
+      writeRecordFor(old, '2.0.0')
+      const v1 = manualAt('9.0.0')
+      const v2 = manualAt('9.0.1')
+      // The texts in hand announce 9.0.0, but agentchat.me already serves 9.0.1 (released in between).
+      let announced: Texts = textsAnnouncing(v1, '9.0.0')
+      const fetchTexts = vi.fn(async () => announced)
+      const cache = new integration.TextsCache({ client: { baseUrl: API_BASE, texts: { get: fetchTexts } } as never, runtime: 'openclaw', filePath: path.join(configDir, 'texts.json') })
+      await cache.start()
+      const { fetch } = serving(v2)
+      const keeper = new ManualKeeper({ cache, configDir, fetch })
+      await keeper.start()
+      expect(readManualRecord(configDir)?.last?.error).toMatch(/the body is version 9\.0\.1, the server announced 9\.0\.0/)
+      expect(fetchTexts).toHaveBeenCalledTimes(1)
+      announced = textsAnnouncing(v2, '9.0.1') // the API has the release now
+      await vi.advanceTimersByTimeAsync(7 * 60_000) // the kit's first retry (5 min ±20 %)
+      await vi.waitFor(() => expect(fs.readFileSync(file)).toEqual(v2), WAIT)
+      expect(fetchTexts.mock.calls.length).toBeGreaterThanOrEqual(2)
+      keeper.stop()
+      cache.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("someone else's file, then removed: the keeper looks again every 10 minutes and places the manual with no texts change", async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    try {
+      writeManaged('---\nname: mine\ndescription: x\n---\n')
+      const cache = new integration.TextsCache({ client: { baseUrl: API_BASE, texts: { get: async () => SERVED_TEXTS } } as never, runtime: 'openclaw', filePath: path.join(configDir, 'texts.json') })
+      await cache.start()
+      const keeper = new ManualKeeper({ cache, configDir, fetch: refusing })
+      await keeper.start()
+      expect(keeper.latest).toMatchObject({ kind: 'not-ours' })
+      fs.rmSync(path.dirname(file), { recursive: true })
+      await vi.advanceTimersByTimeAsync(NOT_OURS_RECHECK_MS + 1_000)
+      await vi.waitFor(() => expect(fs.existsSync(file) && fs.readFileSync(file).equals(BUNDLED)).toBe(true), WAIT)
+      keeper.stop()
+      cache.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('one keeper per process: the first account keeps it, the next one running takes over when it stops; release is idempotent', async () => {
     const a = cacheWith(SERVED_TEXTS, configDir)
     const b = cacheWith(SERVED_TEXTS, configDir)
@@ -575,8 +625,60 @@ describe('status and doctor: local reads only', () => {
     const { primary } = checkManual({ served: textsAnnouncing(newer, '2.5.0').manual, agentIds: [], configDir })
     expect(primary).toMatchObject({ state: 'stale', ok: true, notice: true, repair: true })
     expect(primary.detail).toBe(
-      `stale (have ${BUNDLED_MANUAL_VERSION}, served 2.5.0; last sync: fetch failed (${MANUAL_URL})) — ${file}; the gateway tries again when the texts change — run openclaw doctor --fix to try now`,
+      `stale (have ${BUNDLED_MANUAL_VERSION}, served 2.5.0; last sync: fetch failed (${MANUAL_URL})) — ${file}; the gateway tries again on its own (after 5 minutes, backing off to an hour) — \`openclaw gateway restart\` tries now`,
     )
+  })
+
+  it("a not-ours reason is not reported as the last sync's error once the file is free again", async () => {
+    writeManaged(manualAt('2.0.0'))
+    fs.mkdirSync(path.join(path.dirname(file), '.clawhub'))
+    await placeManual({ texts: SERVED_TEXTS, source: 'server', apiBase: API_BASE, configDir })
+    expect(readManualRecord(configDir)?.last?.state).toBe('not-ours')
+    fs.rmdirSync(path.join(path.dirname(file), '.clawhub'))
+    const { primary } = checkManual({ served: SERVED_TEXTS.manual, agentIds: [], configDir })
+    expect(primary.state).toBe('stale')
+    expect(primary.detail).not.toMatch(/ClawHub|last sync/)
+  })
+
+  describe('skills.load.watch: false', () => {
+    const off = { skills: { load: { watch: false } } }
+    const writeGatewayStart = (startedAt: Date) => {
+      const record = readManualRecord(configDir)!
+      fs.writeFileSync(manualRecordPath(configDir), JSON.stringify({ ...record, gateway: { started_at: startedAt.toISOString(), pid: 1 } }))
+    }
+
+    it('a copy written after the gateway started: OpenClaw reads it after a restart, and the line says so', async () => {
+      await placeManual({ texts: SERVED_TEXTS, source: 'server', apiBase: API_BASE, configDir })
+      writeGatewayStart(new Date(Date.now() - 60_000))
+      const { primary, watch } = checkManual({ cfg: off, served: SERVED_TEXTS.manual, agentIds: [], configDir })
+      expect(primary.state).toBe('current')
+      expect(watch).toMatch(/^skills watch is off \(skills\.load\.watch: false\): OpenClaw reads the new manual after a gateway restart — .*SKILL\.md was written at \S+, after the gateway started \(\S+\); run `openclaw gateway restart`$/)
+    })
+
+    it('a copy from before the gateway started: nothing to say; the watch on: nothing to say', async () => {
+      await placeManual({ texts: SERVED_TEXTS, source: 'server', apiBase: API_BASE, configDir })
+      writeGatewayStart(new Date(Date.now() + 60_000))
+      expect(checkManual({ cfg: off, served: SERVED_TEXTS.manual, agentIds: [], configDir }).watch).toBeNull()
+      expect(checkManual({ cfg: { skills: { load: { watch: true } } }, served: SERVED_TEXTS.manual, agentIds: [], configDir }).watch).toBeNull()
+      expect(checkManual({ served: SERVED_TEXTS.manual, agentIds: [], configDir }).watch).toBeNull()
+    })
+
+    it('no gateway start recorded (no gateway has run this release): said as a condition', async () => {
+      await placeManual({ texts: SERVED_TEXTS, source: 'server', apiBase: API_BASE, configDir })
+      expect(checkManual({ cfg: off, served: SERVED_TEXTS.manual, agentIds: [], configDir }).watch).toMatch(/— if .*SKILL\.md \(written at \S+\) changed since the gateway started, run `openclaw gateway restart`$/)
+    })
+
+    it('the keeper records its gateway start, and every later write keeps it', async () => {
+      const cache = new integration.TextsCache({ client: { baseUrl: API_BASE, texts: { get: async () => SERVED_TEXTS } } as never, runtime: 'openclaw', filePath: path.join(configDir, 'texts.json') })
+      await cache.start()
+      const keeper = new ManualKeeper({ cache, configDir })
+      await keeper.start()
+      expect(readManualRecord(configDir)?.gateway).toMatchObject({ pid: process.pid, started_at: expect.any(String) })
+      keeper.stop()
+      cache.stop()
+      await placeManual({ texts: SERVED_TEXTS, source: 'server', apiBase: API_BASE, configDir })
+      expect(readManualRecord(configDir)?.gateway?.pid).toBe(process.pid)
+    })
   })
 
   it('stale by sha256: the announced version with other bytes', () => {
@@ -586,11 +688,11 @@ describe('status and doctor: local reads only', () => {
     expect(primary.detail).toMatch(/^stale \(have \S+ but not the served text: its sha256 differs\)/)
   })
 
-  it('bundled only: the copy that updates is not placed (doctor --fix places it; a disabled account gets its re-enable route)', () => {
+  it('bundled only: the copy that updates is not placed (a gateway restart places it; a disabled account gets its re-enable route)', () => {
     const { primary } = checkManual({ served: SERVED_TEXTS.manual, agentIds: [], configDir })
     expect(primary).toMatchObject({ state: 'bundled-only', ok: true, notice: true, repair: true })
     expect(primary.detail).toBe(
-      `only the copy bundled with the plugin (${BUNDLED_MANUAL_VERSION}, the served version) — the copy that keeps itself current (${file}) is not placed; the gateway places it when it starts — run openclaw doctor --fix to place it now`,
+      `only the copy bundled with the plugin (${BUNDLED_MANUAL_VERSION}, the served version) — the copy that keeps itself current (${file}) is not placed; the gateway places it when it starts — \`openclaw gateway restart\` places it now`,
     )
     const disabled = checkManual({ served: null, agentIds: [], configDir, remedy: () => 'the account is disabled — re-enable it first' }).primary
     expect(disabled.detail).toMatch(/is not placed; the gateway places it when it starts — the account is disabled — re-enable it first$/)
@@ -627,7 +729,7 @@ describe('status and doctor: local reads only', () => {
       const inHome = skill(path.join(home, '.agents', 'skills'), 'agentchat', '---\ndescription: named by its folder\n---\n')
       skill(path.join(workspace, 'skills'), 'other', '---\nname: other\ndescription: x\n---\n')
       skill(path.join(workspace, 'skills'), 'agentchat-notes', '---\nname: agentchat\n---\n') // no description: OpenClaw does not load it
-      const shadows = findManualShadows(cfg(), [undefined], home, configDir)
+      const shadows = findManualShadows(cfg(), [undefined], home, configDir, true)
       expect(shadows.map((s) => [s.path, s.where])).toEqual([
         [inHome, 'personal ~/.agents/skills'],
         [inProject, 'workspace .agents/skills'],
@@ -637,8 +739,37 @@ describe('status and doctor: local reads only', () => {
         `${inWorkspace} is an agentchat skill in the workspace skills folder, which OpenClaw loads ahead of the managed copy — the agent reads it, not the served manual; ` +
           `if it is an old copy of the AgentChat manual, remove it (rm -r ${path.dirname(inWorkspace)}); this plugin never deletes it`,
       )
-      expect(checkManual({ cfg: cfg(), served: null, agentIds: [undefined], configDir, home }).shadows).toHaveLength(3)
+      expect(checkManual({ cfg: cfg(), served: null, agentIds: [undefined], configDir, home, personalSkills: true }).shadows).toHaveLength(3)
+      // A state dir OpenClaw does not load ~/.agents/skills for (a named profile, a custom OPENCLAW_STATE_DIR on 2026.8.1+): not a shadow there.
+      expect(findManualShadows(cfg(), [undefined], home, configDir, false).map((s) => s.where)).toEqual(['workspace .agents/skills', 'workspace skills'])
       expect(fs.existsSync(inWorkspace) && fs.existsSync(inProject) && fs.existsSync(inHome)).toBe(true)
+    })
+
+    it('~/.agents/skills is loaded for the default state dir on 2026.8.1+, and for every state dir before (OpenClaw 0f91859)', () => {
+      const saved = { dir: process.env.OPENCLAW_STATE_DIR, profile: process.env.OPENCLAW_PROFILE }
+      try {
+        delete process.env.OPENCLAW_PROFILE
+        process.env.OPENCLAW_STATE_DIR = path.join(home, '.openclaw')
+        expect(loadsPersonalSkills('2026.11.6', home)).toBe(true) // the override is the default dir
+        process.env.OPENCLAW_STATE_DIR = path.join(home, 'elsewhere')
+        expect(loadsPersonalSkills('2026.11.6', home)).toBe(false)
+        expect(loadsPersonalSkills('2026.8.1', home)).toBe(false)
+        expect(loadsPersonalSkills('2026.8.1-beta.1', home)).toBe(true) // before the release
+        expect(loadsPersonalSkills('2026.6.10', home)).toBe(true)
+        expect(loadsPersonalSkills(undefined, home)).toBe(false) // unknown version: the current rule
+        delete process.env.OPENCLAW_STATE_DIR
+        expect(loadsPersonalSkills('2026.11.6', home)).toBe(true)
+        process.env.OPENCLAW_PROFILE = 'oc2'
+        expect(loadsPersonalSkills('2026.11.6', home)).toBe(false)
+        expect(loadsPersonalSkills('2026.7.3', home)).toBe(true)
+        process.env.OPENCLAW_PROFILE = 'default'
+        expect(loadsPersonalSkills('2026.11.6', home)).toBe(true)
+      } finally {
+        if (saved.dir === undefined) delete process.env.OPENCLAW_STATE_DIR
+        else process.env.OPENCLAW_STATE_DIR = saved.dir
+        if (saved.profile === undefined) delete process.env.OPENCLAW_PROFILE
+        else process.env.OPENCLAW_PROFILE = saved.profile
+      }
     })
 
     it('a workspace at the config dir loads the managed copy itself: not a shadow', async () => {

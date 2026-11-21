@@ -26,20 +26,20 @@ function extractFrontmatter(md: string): string {
 describe('bundled agentchat manual', () => {
   const text = readFileSync(skillPath, 'utf8')
 
-  it('is manual 2.4.2 byte for byte: the sha256 AgentChat serves and pins (MANUAL_SHA256)', () => {
+  it('is manual 2.4.3 byte for byte: the sha256 AgentChat serves and pins (MANUAL_SHA256)', () => {
     // The bundled copy is re-fetched at release time; bump this and the version below with it.
-    expect(createHash('sha256').update(readFileSync(skillPath)).digest('hex')).toBe('d8c5d38982314b5f136d633c5c3f467c399782c0556ca0f54ff8ded0b874120a')
+    expect(createHash('sha256').update(readFileSync(skillPath)).digest('hex')).toBe('c7c755bb75dac1df831ca3f4f7e768f8432d03133ccec138e3dd5b4a5eee935d')
   })
 
-  it('starts with the published frontmatter: name, version 2.4.2, description, homepage', () => {
+  it('starts with the published frontmatter: name, version 2.4.3, description, homepage', () => {
     const fm = extractFrontmatter(text)
     expect(fm).toMatch(/^name:\s*agentchat\s*$/m)
-    expect(fm).toMatch(/^version:\s*2\.4\.2\s*$/m)
+    expect(fm).toMatch(/^version:\s*2\.4\.3\s*$/m)
     expect(fm).toMatch(/^description:\s+.{30,}/m)
     expect(fm).toMatch(/^homepage:\s*https:\/\/agentchat\.me\s*$/m)
   })
 
-  it('carries the sections the integration points the agent at (manual 2.4.2 wording)', () => {
+  it('carries the sections the integration points the agent at (manual 2.4.3 wording)', () => {
     expect(text).toMatch(/^## Be reachable: identity, wake, live conversations/m)
     expect(text).toMatch(/^### 1\. The identity line/m)
     expect(text).toMatch(/^### 2\. Being woken/m)
@@ -62,11 +62,18 @@ describe('bundled agentchat manual', () => {
     expect(text).not.toMatch(/the send is (your |the )?verdict|record the verdict first/i)
   })
 
-  it('2.4.2: the key goes only to api.agentchat.me — a person who wants to see the conversations gets a claim link, never the key', () => {
+  it('2.4.2 on: the key goes only to api.agentchat.me — a person who wants to see the conversations gets a claim link, never the key', () => {
     expect(text).toContain('**Send the key to exactly one place: `api.agentchat.me`**')
     expect(text).toContain('To let a person see your conversations, give them a claim link instead')
     expect(text).not.toMatch(/\*\*Your human owner\*\* — once/)
     expect(text).not.toMatch(/paste your API key/)
+  })
+
+  it('2.4.3: no curl line names the key variable on the same line as its URL (install scanners read that as exfiltration); the header is on its own continuation line', () => {
+    for (const line of text.split('\n')) {
+      if (/\$AGENTCHAT_API_KEY/.test(line)) expect(line).not.toMatch(/https?:\/\//)
+    }
+    expect(text).toMatch(/\\\n {2}-H "Authorization: Bearer \$AGENTCHAT_API_KEY"/)
   })
 
   it('tells OpenClaw users to prefer this integration', () => {

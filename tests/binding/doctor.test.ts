@@ -70,7 +70,7 @@ describe('doctor adapter', () => {
     // Only the plugin's own copy: it works, it does not update; doctor --fix places the one that does.
     expect(warnings.filter((w) => w.includes('manual:'))).toEqual([
       expect.stringMatching(
-        /^\[agentchat:default\] manual: only the copy bundled with the plugin \(\d+\.\d+\.\d+\) — the copy that keeps itself current \(.*skills\/agentchat\/SKILL\.md\) is not placed; the gateway places it when it starts — run openclaw doctor --fix to place it now$/,
+        /^\[agentchat:default\] manual: only the copy bundled with the plugin \(\d+\.\d+\.\d+\) — the copy that keeps itself current \(.*skills\/agentchat\/SKILL\.md\) is not placed; the gateway places it when it starts — `openclaw gateway restart` places it now$/,
       ),
     ])
     expect(loadServedTexts).not.toHaveBeenCalled()

@@ -685,7 +685,7 @@ function checkManualPlacement(params: {
   remedy: (forEnabled: string) => string
 }): PlacementCheck[] {
   const served = params.served !== undefined ? params.served : (cachedServedTexts(params.accountId, params.stateDir)?.manual ?? null)
-  const { primary, shadows } = checkManual({
+  const { primary, shadows, watch } = checkManual({
     cfg: params.cfg,
     served,
     ...(params.servedSource !== undefined ? { servedSource: params.servedSource } : {}),
@@ -698,6 +698,7 @@ function checkManualPlacement(params: {
   return [
     { name: 'manual', ok: primary.ok, detail: primary.detail, ...(primary.notice ? { notice: true } : {}), ...(primary.repair ? { repair: true } : {}) },
     ...shadows.map((shadow): PlacementCheck => ({ name: 'manual', ok: true, notice: true, detail: shadowLine(shadow) })),
+    ...(watch !== null ? [{ name: 'manual', ok: true, notice: true, detail: watch } satisfies PlacementCheck] : []),
   ]
 }
 

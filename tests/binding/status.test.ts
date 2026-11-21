@@ -3,10 +3,9 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
+const { getMe } = vi.hoisted(() => ({ getMe: vi.fn(async () => ({ handle: 'alice', status: 'active', paused_by_owner: 'none' })) }))
 vi.mock('../../src/binding/sdk-client.js', () => ({
-  getClient: () => ({
-    getMe: async () => ({ handle: 'alice', status: 'active', paused_by_owner: 'none' }),
-  }),
+  getClient: () => ({ getMe }),
   createSdkClient: () => ({}),
 }))
 vi.mock('../../src/integration/mcp.js', async (importOriginal) => {
@@ -14,7 +13,9 @@ vi.mock('../../src/integration/mcp.js', async (importOriginal) => {
   return { ...actual, probeHostedMcp: vi.fn(async () => ({ ok: true, status: 200, serverName: 'agentchat', serverVersion: '1' })) }
 })
 
-import { agentchatStatusAdapter } from '../../src/binding/status.js'
+import { ConnectionError, UnauthorizedError } from 'agentchatme'
+
+import { agentchatStatusAdapter, describeProbeFailure } from '../../src/binding/status.js'
 import { accountTurns, resetRunningTurnsForTest } from '../../src/integration/running.js'
 import { placeIntegration } from '../../src/integration/placement.js'
 import { probeHostedMcp } from '../../src/integration/mcp.js'
@@ -130,11 +131,35 @@ describe('status adapter — the doctor-style probe', () => {
     expect(probe.ok).toBe(true) // the agent works: warnings, not failures
     expect(manualLines(probe)).toEqual([
       {
-        text: `manual: stale (have ${BUNDLED_MANUAL_VERSION}, served 9.9.9; last sync: no answer from https://agentchat.me/skill.md within 10000 ms) — ${managedManualPath()}; the gateway tries again when the texts change — run openclaw doctor --fix to try now`,
+        text: `manual: stale (have ${BUNDLED_MANUAL_VERSION}, served 9.9.9; last sync: no answer from https://agentchat.me/skill.md within 10000 ms) — ${managedManualPath()}; the gateway tries again on its own (after 5 minutes, backing off to an hour) — \`openclaw gateway restart\` tries now`,
         tone: 'warn',
       },
       { text: expect.stringMatching(/^manual: .*skills\/agentchat\/SKILL\.md is an agentchat skill in the workspace skills folder, which OpenClaw loads ahead of the managed copy/), tone: 'warn' },
     ])
+  })
+
+  it('AgentChat unreachable: says so, and the local lines (key, identity line, manual, tools) still print', async () => {
+    await placeServedManual()
+    process.env.AGENTCHAT_API_KEY = KEY
+    const placed = placeIntegration({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    getMe.mockRejectedValueOnce(new ConnectionError('fetch failed'))
+    vi.mocked(probeHostedMcp).mockClear()
+    const probe = await agentchatStatusAdapter.probeAccount!({ account: account(placed.cfg) as never, timeoutMs: 2000, cfg: placed.cfg as never } as never)
+    expect(probe.ok).toBe(false)
+    expect(probeHostedMcp).not.toHaveBeenCalled() // no point probing the tools without AgentChat
+    const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
+    expect(lines[0]).toEqual({ text: "AgentChat not reachable (fetch failed) — the local checks below are from this machine's files", tone: 'error' })
+    expect(lines.map((l) => l.text.split(':')[0])).toEqual(expect.arrayContaining(['key', 'anchor', 'manual', 'mcp']))
+    expect(lines.find((l) => l.text.startsWith('manual:'))).toEqual({ text: `manual: current (${BUNDLED_MANUAL_VERSION}) — ${managedManualPath()}`, tone: 'muted' })
+    expect(lines.some((l) => l.text.startsWith('authenticated as'))).toBe(false)
+  })
+
+  it('a key AgentChat refuses keeps its own words (it answered: not "unreachable"); missing configuration prints just that', async () => {
+    expect(describeProbeFailure(new UnauthorizedError({ code: 'UNAUTHORIZED', message: 'Invalid API key' } as never, 401))).toBe('Invalid API key')
+    expect(describeProbeFailure(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }))).toMatch(/^AgentChat not reachable \(This operation was aborted\)/)
+    expect(describeProbeFailure(new TypeError('fetch failed'))).toMatch(/^AgentChat not reachable \(fetch failed\)/)
+    const probe = await agentchatStatusAdapter.probeAccount!({ account: { ...account({}), config: null } as never, timeoutMs: 2000, cfg: {} as never } as never)
+    expect(agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)).toEqual([{ text: 'missing channels.agentchat configuration', tone: 'error' }])
   })
 
   it('an unreachable hosted MCP server is an error line', async () => {

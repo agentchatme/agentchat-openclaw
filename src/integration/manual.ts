@@ -59,7 +59,9 @@ import { integration, type Texts } from 'agentchatme'
 import { CONFIG_DIR } from 'openclaw/plugin-sdk/setup-tools'
 
 import { openclawCommand } from '../cli-command.js'
-import { resolveOpenClawWorkspaceDir } from '../openclaw-layout.js'
+import { readOpenClawProfileFromEnv, readOpenClawStateDirFromEnv } from '../credentials/read-env.js'
+import { expandUserPath, resolveOpenClawWorkspaceDir } from '../openclaw-layout.js'
+import { getPluginRuntime } from './runtime-holder.js'
 import { PLUGIN_STATE_DIRNAME } from './state.js'
 
 export const MANUAL_SKILL = integration.MANUAL_SKILL_NAME
@@ -73,6 +75,8 @@ const RECORD_VERSION = 1
 const FRONT_MATTER_READ_BYTES = 8 * 1024
 /** A shadow scan looks at no more child directories of one skills root than this. */
 const SHADOW_SCAN_MAX_DIRS = 512
+/** While the managed file is someone else's, the gateway looks again this often (the kit's own retry needs a result). */
+export const NOT_OURS_RECHECK_MS = 10 * 60_000
 /** A managed file larger than this is not read whole (only its front matter): it is not a manual this plugin wrote. */
 const INSPECT_MAX_BYTES = 4 * integration.MANUAL_MAX_BYTES
 
@@ -174,6 +178,8 @@ export interface ManualRecord {
     readonly served: string | null
     readonly error: string | null
   } | null
+  /** The gateway process keeping the copy: when it started (OpenClaw's skill view with `skills.load.watch: false` is from then). */
+  readonly gateway?: { readonly started_at: string; readonly pid: number } | null
 }
 
 export function readManualRecord(configDir: string = openclawConfigDir()): ManualRecord | null {
@@ -182,6 +188,7 @@ export function readManualRecord(configDir: string = openclawConfigDir()): Manua
     if (raw.version !== RECORD_VERSION || typeof raw.file !== 'string') return null
     const written = raw.written as Record<string, unknown> | null | undefined
     const last = raw.last as Record<string, unknown> | null | undefined
+    const gateway = raw.gateway as Record<string, unknown> | null | undefined
     return {
       version: RECORD_VERSION,
       file: raw.file,
@@ -199,6 +206,7 @@ export function readManualRecord(configDir: string = openclawConfigDir()): Manua
               error: typeof last.error === 'string' ? last.error : null,
             }
           : null,
+      gateway: gateway && typeof gateway.started_at === 'string' && typeof gateway.pid === 'number' ? { started_at: gateway.started_at, pid: gateway.pid } : null,
     }
   } catch {
     return null
@@ -206,7 +214,23 @@ export function readManualRecord(configDir: string = openclawConfigDir()): Manua
 }
 
 function writeManualRecord(record: ManualRecord, configDir: string): void {
-  writeFileAtomicSync(manualRecordPath(configDir), `${JSON.stringify(record, null, 2)}\n`, 0o600)
+  // The gateway's start is kept across every writer (a CLI `doctor --fix` writes the record too).
+  const gateway = record.gateway !== undefined ? record.gateway : (readManualRecord(configDir)?.gateway ?? null)
+  writeFileAtomicSync(manualRecordPath(configDir), `${JSON.stringify({ ...record, gateway }, null, 2)}\n`, 0o600)
+}
+
+/** The gateway that runs the keeper says when it started. Never throws. */
+function noteGatewayStart(configDir: string, file: string): void {
+  const previous = readManualRecord(configDir)
+  const startedAt = new Date(Date.now() - Math.round(process.uptime() * 1000)).toISOString()
+  try {
+    writeManualRecord(
+      { version: RECORD_VERSION, file, written: previous?.file === file ? previous.written : null, last: previous?.file === file ? previous.last : null, gateway: { started_at: startedAt, pid: process.pid } },
+      configDir,
+    )
+  } catch {
+    // a diagnostic only
+  }
 }
 
 function removeManualRecord(configDir: string): boolean {
@@ -595,6 +619,7 @@ export class ManualKeeper {
   private notOurs: { readonly reason: string; readonly wins: boolean } | null = null
   private floor: ManualOutcome | null = null
   private stopped = false
+  private recheck: ReturnType<typeof setInterval> | null = null
 
   constructor(options: ManualKeeperOptions) {
     this.options = options
@@ -614,6 +639,7 @@ export class ManualKeeper {
   async start(): Promise<ManualOutcome | null> {
     if (this.stopped || this.sync !== null) return this.latest
     const cache = this.options.cache
+    noteGatewayStart(this.configDir, this.file)
     const bundled = bundledManual()
     if (this.writable()) {
       const served = cache.current()?.manual ?? null
@@ -644,7 +670,14 @@ export class ManualKeeper {
       return texts
     }
     const gated: Pick<integration.TextsCache, 'current' | 'onChange' | 'apiBase'> = {
-      current: () => usableNow(cache.current(), cache.source),
+      current: () => {
+        // The kit's retry (agentchatme 1.6.1+) re-syncs against the texts in hand, which the cache fetches
+        // again only daily after a success. A copy still stale may be stale against an announcement the
+        // server has since replaced (a new manual released between the texts fetch and the download): fetch
+        // the texts again too. A changed copy starts a sync of its own; the same copy changes nothing.
+        if (this.sync?.result?.upToDate === false) void cache.refresh().catch(() => undefined)
+        return usableNow(cache.current(), cache.source)
+      },
       onChange: (listener) =>
         cache.onChange((texts, source) => {
           if (usableNow(texts, source) !== null) listener(texts, source)
@@ -673,7 +706,29 @@ export class ManualKeeper {
 
   stop(): void {
     this.stopped = true
+    this.stopRecheck()
     this.sync?.stop()
+  }
+
+  /**
+   * Someone else's file gets no sync result, so the kit schedules no retry
+   * and a texts fetch that changes nothing starts no sync: look again on a
+   * timer, and sync once the file is free.
+   */
+  private startRecheck(): void {
+    if (this.recheck !== null || this.stopped) return
+    this.recheck = setInterval(() => {
+      if (this.stopped || inspectManagedManual(this.configDir).owner.kind === 'not-ours') return
+      this.stopRecheck()
+      void this.sync?.sync().catch(() => undefined)
+    }, NOT_OURS_RECHECK_MS)
+    ;(this.recheck as { unref?: () => void }).unref?.()
+  }
+
+  private stopRecheck(): void {
+    if (this.recheck === null) return
+    clearInterval(this.recheck)
+    this.recheck = null
   }
 
   /** The ownership guard, with one log line per new reason. */
@@ -684,6 +739,7 @@ export class ManualKeeper {
       this.notOurs = null
       return true
     }
+    this.startRecheck()
     if (owner.reason !== this.notOurs?.reason) {
       this.notOurs = { reason: owner.reason, wins: owner.wins }
       noteLast(this.configDir, this.file, { state: 'not-ours', manual: null, served: this.options.cache.current()?.manual.version ?? null, error: owner.reason })
@@ -856,13 +912,20 @@ export interface CheckManualParams {
   readonly remedy?: (forEnabled: string) => string
   readonly configDir?: string
   readonly home?: string
+  /** Test seam: whether OpenClaw loads `~/.agents/skills` here (default `loadsPersonalSkills()`). */
+  readonly personalSkills?: boolean
 }
 
-/** The managed copy against the announcement, the size OpenClaw loads, and the skills that would win over it. */
-export function checkManual(params: CheckManualParams): { primary: ManualCheck; shadows: ManualShadow[] } {
+/**
+ * The managed copy against the announcement, the size OpenClaw loads, the
+ * skills that would win over it, and — with `skills.load.watch: false` —
+ * whether OpenClaw still has the copy the gateway started with.
+ */
+export function checkManual(params: CheckManualParams): { primary: ManualCheck; shadows: ManualShadow[]; watch: string | null } {
   const configDir = params.configDir ?? openclawConfigDir()
   const remedy = params.remedy ?? ((forEnabled: string) => forEnabled)
-  const fix = (now: string) => remedy(`run ${openclawCommand('doctor --fix')} to ${now}`)
+  // A gateway restart syncs the manual at its start: lighter than `doctor --fix`, whose maintenance stops the gateway for minutes.
+  const fix = (now: string) => remedy(`\`${openclawCommand('gateway restart')}\` ${now}`)
   const found = inspectManagedManual(configDir)
   const bundled = bundledManual()
   const cap = skillFileCap(params.cfg)
@@ -872,38 +935,37 @@ export function checkManual(params: CheckManualParams): { primary: ManualCheck; 
   const record = readManualRecord(configDir)
   const lastError = latestError(params.latest ?? null, record, served)
   const check = (state: ManualCheckState, ok: boolean, notice: boolean, repair: boolean, detail: string): ManualCheck => ({ state, ok, notice, repair, detail })
-  const shadows = findManualShadows(params.cfg, params.agentIds, params.home, configDir)
+  const home = params.home ?? os.homedir()
+  const shadows = findManualShadows(params.cfg, params.agentIds, home, configDir, params.personalSkills ?? loadsPersonalSkills(undefined, home))
+  const watch = watchOffNote(params.cfg, found, record)
+  const result = (primary: ManualCheck) => ({ primary, shadows, watch })
 
   if (found.owner.kind === 'not-ours') {
-    return {
-      primary: check('not-ours', true, true, false, notOursLine(found.owner.reason, found.owner.wins)),
-      shadows,
-    }
+    return result(check('not-ours', true, true, false, notOursLine(found.owner.reason, found.owner.wins)))
   }
   if (found.owner.kind === 'absent') {
-    if (bundled === null) return { primary: check('missing', false, false, true, `no manual: ${found.path} is missing and the plugin's own copy cannot be read — ${fix('place it')}`), shadows }
+    if (bundled === null) return result(check('missing', false, false, true, `no manual: ${found.path} is missing and the plugin's own copy cannot be read — ${fix('places the served one')}`))
     const freshness =
       served === null
         ? ''
         : bundled.version === served.version && (announcedSha(served) === null || announcedSha(served) === bundled.sha256)
           ? `, the served version`
           : `; served ${served.version}`
-    return {
-      primary: check(
+    return result(
+      check(
         'bundled-only',
         true,
         true,
         true,
-        `only the copy bundled with the plugin (${bundled.version ?? 'unversioned'}${freshness}) — the copy that keeps itself current (${found.path}) is not placed${lastError ? ` (${lastError})` : ''}; the gateway places it when it starts — ${fix('place it now')}`,
+        `only the copy bundled with the plugin (${bundled.version ?? 'unversioned'}${freshness}) — the copy that keeps itself current (${found.path}) is not placed${lastError ? ` (${lastError})` : ''}; the gateway places it when it starts — ${fix('places it now')}`,
       ),
-      shadows,
-    }
+    )
   }
   const size = found.size
   if (size > cap) {
     const fallbackLoads = bundled !== null && bundled.bytes.byteLength <= cap
-    return {
-      primary: check(
+    return result(
+      check(
         'over-cap',
         false,
         false,
@@ -912,8 +974,7 @@ export function checkManual(params: CheckManualParams): { primary: ManualCheck; 
           (fallbackLoads ? ` and the agent reads the copy bundled with the plugin (${bundled?.version ?? 'unversioned'}) instead` : ' — the agent has no manual') +
           ` — raise skills.limits.maxSkillFileBytes (the manual is ${size} bytes)`,
       ),
-      shadows,
-    }
+    )
   }
   const have = found.version ?? 'an unversioned file'
   if (served === null) {
@@ -921,24 +982,49 @@ export function checkManual(params: CheckManualParams): { primary: ManualCheck; 
       superseded !== null
         ? `the cached announcement, ${superseded.version}, is older than the copy bundled with this plugin (${bundled?.version ?? '?'}); AgentChat not reached since the update`
         : 'no served version in hand — AgentChat not reached yet'
-    return { primary: check('unchecked', true, true, false, `unchecked (have ${have}; ${why}) — ${found.path}`), shadows }
+    return result(check('unchecked', true, true, false, `unchecked (have ${have}; ${why}) — ${found.path}`))
   }
   const hash = announcedSha(served)
   if (found.version === served.version && (hash === null || hash === found.sha256)) {
-    return { primary: check('current', true, false, false, `current (${found.version}) — ${found.path}`), shadows }
+    return result(check('current', true, false, false, `current (${found.version}) — ${found.path}`))
   }
   const tampered = found.version === served.version
   const why = lastError ? `; last sync: ${lastError}` : ''
-  return {
-    primary: check(
+  return result(
+    check(
       'stale',
       true,
       true,
       true,
-      `${tampered ? `stale (have ${have} but not the served text: its sha256 differs` : `stale (have ${have}, served ${served.version}`}${why}) — ${found.path}; the gateway tries again when the texts change — ${fix('try now')}`,
+      `${tampered ? `stale (have ${have} but not the served text: its sha256 differs` : `stale (have ${have}, served ${served.version}`}${why}) — ${found.path}; the gateway tries again on its own (after 5 minutes, backing off to an hour) — ${fix('tries now')}`,
     ),
-    shadows,
+  )
+}
+
+/**
+ * With `skills.load.watch: false` OpenClaw keeps the skills it found when
+ * the gateway started (it rescans only at a restart): a managed copy written
+ * since is not what the agent reads yet. Known from the record's gateway
+ * start (written by the keeper) and the file's mtime; when no gateway start
+ * is recorded, said as a condition. Null with the watch on, or no copy.
+ */
+function watchOffNote(cfg: unknown, found: ManagedManual, record: ManualRecord | null): string | null {
+  const watch = (cfg as { skills?: { load?: { watch?: unknown } } } | undefined)?.skills?.load?.watch
+  if (watch !== false || found.owner.kind === 'absent') return null
+  let mtime: Date
+  try {
+    mtime = fs.statSync(found.path).mtime
+  } catch {
+    return null
   }
+  const started = record?.gateway?.started_at ? new Date(record.gateway.started_at) : null
+  if (started !== null && !Number.isNaN(started.getTime()) && mtime.getTime() <= started.getTime()) return null
+  return (
+    `skills watch is off (skills.load.watch: false): OpenClaw reads the new manual after a gateway restart — ` +
+    (started !== null
+      ? `${found.path} was written at ${mtime.toISOString()}, after the gateway started (${started.toISOString()}); run \`${openclawCommand('gateway restart')}\``
+      : `if ${found.path} (written at ${mtime.toISOString()}) changed since the gateway started, run \`${openclawCommand('gateway restart')}\``)
+  )
 }
 
 /** One line for a skill that wins over the managed copy. */
@@ -953,7 +1039,7 @@ function notOursLine(reason: string, wins: boolean): string {
   return (
     `${reason}; this plugin leaves it alone and does not keep it current — ` +
     (wins ? 'the agent reads it instead of the served manual' : 'the agent reads the copy bundled with the plugin, which does not update') +
-    `. To use the served manual: remove it, then run ${openclawCommand('doctor --fix')}`
+    `. To use the served manual: remove it; the gateway places the served one within 10 minutes, \`${openclawCommand('gateway restart')}\` at once`
   )
 }
 
@@ -962,24 +1048,83 @@ function latestError(latest: ManualOutcome | null, record: ManualRecord | null, 
   if (latest?.kind === 'synced') return latest.result.upToDate === true ? null : latest.result.error
   if (latest?.kind === 'failed') return latest.error
   if (latest?.kind === 'floor' && latest.error !== null) return latest.error
+  if (latest?.kind === 'not-ours') return null
   const last = record?.last
   if (!last || last.error === null) return null
+  // Someone else's file was the reason; the caller only asks once the file is writable again.
+  if (last.state === 'not-ours') return null
   if (served !== null && last.served !== null && last.served !== served.version) return null
   return last.error
 }
 
 /**
+ * Whether OpenClaw loads the personal `~/.agents/skills` folder. From
+ * 2026.8.1 only for the default state dir: `if (isDefaultStateDir())` in
+ * OpenClaw `src/skills/loading/workspace-skill-sources.ts:148` (2026.11.6;
+ * added in `src/skills/loading/workspace.ts` by commit 0f91859, first in
+ * v2026.8.1). Before that, always (2026.6.10 `workspace.ts:1195-1203`).
+ * OpenClaw's `isDefaultStateDir` is not in its plugin SDK, so its rule is
+ * mirrored (`src/config/paths.ts:63-77`): without `OPENCLAW_STATE_DIR`, the
+ * default profile; with it, the override resolves to `~/.openclaw`. An
+ * unknown OpenClaw version (no plugin runtime in this process) gets the
+ * current rule.
+ */
+export function loadsPersonalSkills(openclawVersion: string | undefined = hostOpenClawVersion(), home: string = os.homedir()): boolean {
+  if (openclawVersion !== undefined && isOpenClawRelease(openclawVersion) && !openclawAtLeast(openclawVersion, '2026.8.1')) return true
+  const override = readOpenClawStateDirFromEnv()
+  if (override === undefined) return readOpenClawProfileFromEnv() === undefined
+  return realpathOr(expandUserPath(override)) === realpathOr(path.join(home, '.openclaw'))
+}
+
+function hostOpenClawVersion(): string | undefined {
+  try {
+    const version = (getPluginRuntime() as { version?: unknown } | null)?.version
+    return typeof version === 'string' ? version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+const OPENCLAW_RELEASE = /^(\d+)\.(\d+)\.(\d+)(-.+)?$/
+
+function isOpenClawRelease(value: string): boolean {
+  return OPENCLAW_RELEASE.test(value.trim())
+}
+
+/** `a >= b` for OpenClaw's `YYYY.M.N` (a prerelease is below its release). */
+function openclawAtLeast(a: string, b: string): boolean {
+  const pa = OPENCLAW_RELEASE.exec(a.trim())
+  const pb = OPENCLAW_RELEASE.exec(b.trim())
+  if (!pa || !pb) return false
+  for (let i = 1; i <= 3; i++) {
+    const d = Number(pa[i]) - Number(pb[i])
+    if (d !== 0) return d > 0
+  }
+  return pa[4] === undefined || pb[4] !== undefined
+}
+
+function realpathOr(dir: string): string {
+  try {
+    return fs.realpathSync.native(path.resolve(dir))
+  } catch {
+    return path.resolve(dir)
+  }
+}
+
+/**
  * `agentchat` skills OpenClaw loads ahead of the managed copy: in each
  * agent's `<workspace>/skills` and `<workspace>/.agents/skills`, and in
- * `~/.agents/skills`. OpenClaw merges by the front-matter name (the folder
- * name when there is none), so every child folder is read, not only
- * `agentchat/`. Bounded; local reads only.
+ * `~/.agents/skills` where OpenClaw loads it (`loadsPersonalSkills`).
+ * OpenClaw merges by the front-matter name (the folder name when there is
+ * none), so every child folder is read, not only `agentchat/`. Bounded;
+ * local reads only.
  */
 export function findManualShadows(
   cfg: unknown,
   agentIds: readonly (string | undefined)[],
   home: string = os.homedir(),
   configDir: string = openclawConfigDir(),
+  personal: boolean = loadsPersonalSkills(undefined, home),
 ): ManualShadow[] {
   const roots: Array<{ dir: string; where: ManualShadow['where'] }> = []
   // A workspace whose skills folder is the managed one (a workspace at the config dir) loads the managed copy itself.
@@ -990,7 +1135,7 @@ export function findManualShadows(
     seen.add(resolved)
     roots.push({ dir: resolved, where })
   }
-  add(path.join(home, '.agents', 'skills'), 'personal ~/.agents/skills')
+  if (personal) add(path.join(home, '.agents', 'skills'), 'personal ~/.agents/skills')
   for (const agentId of agentIds.length > 0 ? agentIds : [undefined]) {
     let workspace: string
     try {
