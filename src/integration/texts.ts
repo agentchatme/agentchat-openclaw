@@ -156,6 +156,11 @@ export function identityLineOf(copy: ServedTextsCopy): string | null {
   return copy.texts ? spellToolsForOpenClaw(copy.texts.identity_line) : null
 }
 
+/** The served `identity_line_template` in a copy, spelled for OpenClaw (an unmarked identity block is recognised by it); null without texts. */
+export function identityTemplateOf(copy: ServedTextsCopy): string | null {
+  return copy.texts && typeof copy.texts.identity_line_template === 'string' ? spellToolsForOpenClaw(copy.texts.identity_line_template) : null
+}
+
 /** The identity line for the key's own agent, as served (`loadServedTexts`); `null` when no copy is in hand. Never throws. */
 export async function loadIdentityLine(params: LoadTextsParams): Promise<string | null> {
   return identityLineOf(await loadServedTexts(params))
@@ -165,6 +170,12 @@ export async function loadIdentityLine(params: LoadTextsParams): Promise<string 
 export function cachedIdentityLine(accountId: string, stateDir?: string): string | null {
   const texts = cachedServedTexts(accountId, stateDir)
   return texts ? spellToolsForOpenClaw(texts.identity_line) : null
+}
+
+/** The cached `identity_line_template`, spelled for OpenClaw, without touching the network (status, doctor). */
+export function cachedIdentityTemplate(accountId: string, stateDir?: string): string | null {
+  const texts = cachedServedTexts(accountId, stateDir)
+  return texts && typeof texts.identity_line_template === 'string' ? spellToolsForOpenClaw(texts.identity_line_template) : null
 }
 
 /** The texts the kit's file holds for this account (server-verbatim), without touching the network; null when none. */

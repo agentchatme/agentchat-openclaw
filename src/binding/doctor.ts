@@ -59,7 +59,7 @@ import { resolveAgentchatApiKey, type ConfiguredKey } from '../channel-key.js'
 import { tightenApiKeyFile, writeApiKeyFile } from '../credentials/key-file.js'
 import { DEFAULT_API_BASE, clientIdentityText, withHostedMcpEntry } from '../integration/mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, readLlmAgentOverrideOptIn, withLlmAgentOverrideOptIn } from '../integration/model.js'
-import { cachedIdentityLine, identityLineOf, loadServedTexts, type ServedTextsCopy } from '../integration/texts.js'
+import { cachedIdentityLine, identityLineOf, identityTemplateOf, loadServedTexts, type ServedTextsCopy } from '../integration/texts.js'
 import { placeManual } from '../integration/manual.js'
 import { resolveBoundAgentId, resolveOpenClawDefaultAgentId } from '../openclaw-layout.js'
 import { createSdkClient } from './sdk-client.js'
@@ -232,8 +232,10 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
       if (apiKey && handle && placeIdentityLines) {
         const served = await loadServedTexts({ client: createSdkClient({ apiKey, apiBase }), accountId })
         manualFrom ??= served
-        const restored = restoreIdentityLine(next, accountId, handle, identityLineOf(served))
+        const restored = await restoreIdentityLine(next, accountId, handle, identityLineOf(served), identityTemplateOf(served))
         if (restored.outcome === 'placed') changes.push(`placed the identity line for @${handle.replace(/^@/, '')} in ${restored.path}`)
+        else if (restored.outcome === 'updated') changes.push(`brought the identity line for @${handle.replace(/^@/, '')} in ${restored.path} to the served text`)
+        else if (restored.outcome === 'left') warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] identity line for @${handle.replace(/^@/, '')} left as it is: ${restored.detail ?? ''}`)
         else if (restored.outcome === 'failed') warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] could not place the identity line for @${handle.replace(/^@/, '')}: ${restored.detail ?? 'unknown error'}`)
         else if (restored.outcome === 'skipped') warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] identity line for @${handle.replace(/^@/, '')} not placed: ${restored.detail ?? 'the served text is not available'}`)
       }

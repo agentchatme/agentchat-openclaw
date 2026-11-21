@@ -13,7 +13,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 
-import { writeAgentsAnchor, removeAgentsAnchor, resolveWorkspaceDir, hasAgentsAnchorFor, readAgentsAnchor } from '../../src/binding/agents-anchor.js'
+import { writeAgentsAnchor, removeAgentsAnchor, resolveWorkspaceDir, inspectAgentsAnchor, readAgentsAnchor } from '../../src/binding/agents-anchor.js'
 import { IDENTITY_LINE, identityLineFor } from '../helpers/texts.js'
 
 function cfgFor(workspaceDir: string): { agents: { defaults: { workspace: string } } } {
@@ -32,19 +32,19 @@ describe('agents-anchor', () => {
   })
 
   describe('resolveWorkspaceDir', () => {
-    it('uses agents.defaults.workspace when set', () => {
+    it('uses agents.defaults.workspace when set', async () => {
       expect(resolveWorkspaceDir(cfgFor('/some/explicit/path'))).toBe(path.resolve('/some/explicit/path'))
     })
 
-    it('falls back to <state dir>/workspace when config is undefined (OPENCLAW_STATE_DIR is set by the test setup)', () => {
+    it('falls back to <state dir>/workspace when config is undefined (OPENCLAW_STATE_DIR is set by the test setup)', async () => {
       expect(resolveWorkspaceDir(undefined)).toBe(path.join(path.resolve(process.env.OPENCLAW_STATE_DIR!), 'workspace'))
     })
 
-    it('falls back to the state-dir default when workspace is empty/whitespace', () => {
+    it('falls back to the state-dir default when workspace is empty/whitespace', async () => {
       expect(resolveWorkspaceDir(cfgFor('   '))).toBe(path.join(path.resolve(process.env.OPENCLAW_STATE_DIR!), 'workspace'))
     })
 
-    it('honors OPENCLAW_PROFILE (~/.openclaw-<profile>/workspace) when no state dir is set', () => {
+    it('honors OPENCLAW_PROFILE (~/.openclaw-<profile>/workspace) when no state dir is set', async () => {
       const stateDir = process.env['OPENCLAW_STATE_DIR']
       const original = process.env['OPENCLAW_PROFILE']
       try {
@@ -60,7 +60,7 @@ describe('agents-anchor', () => {
       }
     })
 
-    it('explicit cfg override beats the environment', () => {
+    it('explicit cfg override beats the environment', async () => {
       const original = process.env['OPENCLAW_PROFILE']
       try {
         process.env['OPENCLAW_PROFILE'] = 'staging'
@@ -71,7 +71,7 @@ describe('agents-anchor', () => {
       }
     })
 
-    it('uses the per-agent workspace for the agent the account wakes', () => {
+    it('uses the per-agent workspace for the agent the account wakes', async () => {
       const cfg = {
         agents: { defaults: { workspace: '/default/ws' }, entries: { main: {}, ops: { workspace: '/ops/ws' } } },
       }
@@ -81,10 +81,10 @@ describe('agents-anchor', () => {
   })
 
   describe('writeAgentsAnchor', () => {
-    it('creates the workspace dir when it does not exist (first-run install) and writes the text it was given, fenced with the kit handle line', () => {
+    it('creates the workspace dir when it does not exist (first-run install) and writes the text it was given, fenced with the kit handle line', async () => {
       const workspace = path.join(tmpDir, 'workspace-fresh')
       expect(fs.existsSync(workspace)).toBe(false)
-      writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
+      await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
       const file = path.join(workspace, 'AGENTS.md')
       expect(fs.existsSync(file)).toBe(true)
       const content = fs.readFileSync(file, 'utf-8')
@@ -92,22 +92,22 @@ describe('agents-anchor', () => {
       expect(readAgentsAnchor({ cfg: cfgFor(workspace) })).toEqual({ present: true, text: IDENTITY_LINE, path: file })
     })
 
-    it('refuses a text that does not name the handle (nothing written), an empty handle or an empty text', () => {
+    it('refuses a text that does not name the handle (nothing written), an empty handle or an empty text', async () => {
       const workspace = path.join(tmpDir, 'workspace')
-      expect(() => writeAgentsAnchor({ cfg: cfgFor(workspace), handle: '', text: IDENTITY_LINE })).toThrow(/handle is empty/u)
-      expect(() => writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: '   ' })).toThrow(/identity line is empty/u)
-      expect(() => writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'carol', text: IDENTITY_LINE })).toThrow(/no served identity text names @carol/u)
+      await expect(writeAgentsAnchor({ cfg: cfgFor(workspace), handle: '', text: IDENTITY_LINE })).rejects.toThrow(/handle is empty/u)
+      await expect(writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: '   ' })).rejects.toThrow(/identity line is empty/u)
+      await expect(writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'carol', text: IDENTITY_LINE })).rejects.toThrow(/no served identity text names @carol/u)
       expect(fs.existsSync(path.join(workspace, 'AGENTS.md'))).toBe(false)
     })
 
-    it('preserves pre-existing AGENTS.md content (does not clobber)', () => {
+    it('preserves pre-existing AGENTS.md content (does not clobber)', async () => {
       const workspace = path.join(tmpDir, 'workspace')
       fs.mkdirSync(workspace, { recursive: true })
       const file = path.join(workspace, 'AGENTS.md')
       const userContent = '# My agent\n\nUser-written instructions here.\nDo not lose this.\n'
       fs.writeFileSync(file, userContent, 'utf-8')
 
-      writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
+      await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
 
       const content = fs.readFileSync(file, 'utf-8')
       expect(content).toContain('# My agent')
@@ -117,59 +117,60 @@ describe('agents-anchor', () => {
       expect(content).toContain('@alice')
     })
 
-    it('is idempotent — re-running with the same text does not duplicate', () => {
+    it('is idempotent — re-running with the same text does not duplicate', async () => {
       const workspace = path.join(tmpDir, 'workspace')
-      for (let i = 0; i < 3; i++) writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
+      for (let i = 0; i < 3; i++) await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
       const content = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf-8')
       expect(content.split('<!-- agentchat:start -->').length).toBe(2)
       expect(content.split('<!-- agentchat:end -->').length).toBe(2)
     })
 
-    it('upserts on handle or text change — replaces the old block, a single block remains', () => {
+    it('upserts on handle or text change — replaces the old block, a single block remains', async () => {
       const workspace = path.join(tmpDir, 'workspace')
-      writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
-      writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'bob', text: identityLineFor('bob') })
+      await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
+      await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'bob', text: identityLineFor('bob') })
       const content = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf-8')
       expect(content).toContain('@bob')
       expect(content).not.toContain('@alice')
       expect(content.split('<!-- agentchat:start -->').length).toBe(2)
     })
 
-    it('does not accumulate blank lines on repeated runs (no drift)', () => {
+    it('does not accumulate blank lines on repeated runs (no drift)', async () => {
       const workspace = path.join(tmpDir, 'workspace')
       fs.mkdirSync(workspace, { recursive: true })
       const file = path.join(workspace, 'AGENTS.md')
       fs.writeFileSync(file, '# Header\n\nBody\n', 'utf-8')
       const lengths: number[] = []
       for (let i = 0; i < 5; i++) {
-        writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
+        await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
         lengths.push(fs.readFileSync(file, 'utf-8').length)
       }
       for (const len of lengths.slice(1)) expect(len).toBe(lengths[0])
     })
   })
 
-  describe('hasAgentsAnchorFor', () => {
-    it('with the served text: exact match; without it: any of our blocks naming the handle', () => {
+  describe('inspectAgentsAnchor (status, doctor: strict, local reads)', () => {
+    it('with the served text: the kit decision; without it: whose block it is, by its handle line', async () => {
       const workspace = path.join(tmpDir, 'workspace')
-      writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
-      expect(hasAgentsAnchorFor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE }).present).toBe(true)
-      expect(hasAgentsAnchorFor({ cfg: cfgFor(workspace), handle: 'alice', text: `${IDENTITY_LINE}\nnewer` }).present).toBe(false)
-      expect(hasAgentsAnchorFor({ cfg: cfgFor(workspace), handle: 'alice' }).present).toBe(true)
-      expect(hasAgentsAnchorFor({ cfg: cfgFor(workspace), handle: '@alice', text: null }).present).toBe(true)
-      expect(hasAgentsAnchorFor({ cfg: cfgFor(workspace), handle: 'bob' }).present).toBe(false)
-      expect(hasAgentsAnchorFor({ cfg: cfgFor(path.join(tmpDir, 'nowhere')), handle: 'alice' }).present).toBe(false)
+      await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
+      expect(inspectAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', identityLine: IDENTITY_LINE }).outcome).toBe('unchanged')
+      expect(inspectAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', identityLine: `${IDENTITY_LINE}\nnewer` }).outcome).toBe('updated')
+      expect(inspectAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice' }).outcome).toBe('unverified')
+      expect(inspectAgentsAnchor({ cfg: cfgFor(workspace), handle: '@alice', identityLine: null }).outcome).toBe('unverified')
+      expect(inspectAgentsAnchor({ cfg: cfgFor(workspace), handle: 'bob' })).toMatchObject({ outcome: 'other_agent', claimed: 'alice' })
+      expect(inspectAgentsAnchor({ cfg: cfgFor(workspace), handle: 'bob', identityLine: identityLineFor('bob') })).toMatchObject({ outcome: 'other_agent', claimed: 'alice' })
+      expect(inspectAgentsAnchor({ cfg: cfgFor(path.join(tmpDir, 'nowhere')), handle: 'alice' }).outcome).toBe('absent')
     })
   })
 
   describe('removeAgentsAnchor', () => {
-    it('strips the anchor block, leaves user content intact', () => {
+    it('strips the anchor block, leaves user content intact', async () => {
       const workspace = path.join(tmpDir, 'workspace')
       fs.mkdirSync(workspace, { recursive: true })
       const file = path.join(workspace, 'AGENTS.md')
       fs.writeFileSync(file, '# Header\n\nUser body.\n', 'utf-8')
-      writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
-      expect(removeAgentsAnchor({ cfg: cfgFor(workspace) }).removed).toBe(true)
+      await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
+      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace) })).removed).toBe(true)
       const after = fs.readFileSync(file, 'utf-8')
       expect(after).toContain('# Header')
       expect(after).toContain('User body.')
@@ -177,22 +178,22 @@ describe('agents-anchor', () => {
       expect(after).not.toContain('@alice')
     })
 
-    it('is a no-op when the anchor was never written, or AGENTS.md does not exist', () => {
+    it('is a no-op when the anchor was never written, or AGENTS.md does not exist', async () => {
       const workspace = path.join(tmpDir, 'workspace')
       fs.mkdirSync(workspace, { recursive: true })
       fs.writeFileSync(path.join(workspace, 'AGENTS.md'), '# Header\n', 'utf-8')
-      expect(removeAgentsAnchor({ cfg: cfgFor(workspace) }).removed).toBe(false)
+      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace) })).removed).toBe(false)
       expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf-8')).toBe('# Header\n')
       const empty = path.join(tmpDir, 'workspace-empty')
       fs.mkdirSync(empty, { recursive: true })
-      expect(removeAgentsAnchor({ cfg: cfgFor(empty) }).removed).toBe(false)
+      expect((await removeAgentsAnchor({ cfg: cfgFor(empty) })).removed).toBe(false)
       expect(fs.existsSync(path.join(empty, 'AGENTS.md'))).toBe(false)
     })
 
-    it('handles a workspace where the file holds ONLY our anchor (clean delete)', () => {
+    it('handles a workspace where the file holds ONLY our anchor (clean delete)', async () => {
       const workspace = path.join(tmpDir, 'workspace')
-      writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
-      expect(removeAgentsAnchor({ cfg: cfgFor(workspace) }).removed).toBe(true)
+      await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
+      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace) })).removed).toBe(true)
       const after = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf-8')
       expect(after).not.toContain('agentchat:start')
       expect(after).not.toContain('@alice')
@@ -200,13 +201,13 @@ describe('agents-anchor', () => {
   })
 
   describe('legacy marker migration', () => {
-    it('strips a legacy `agentchat-skill:` block when writing the unified block', () => {
+    it('strips a legacy `agentchat-skill:` block when writing the unified block', async () => {
       const workspace = path.join(tmpDir, 'workspace')
       fs.mkdirSync(workspace, { recursive: true })
       const file = path.join(workspace, 'AGENTS.md')
       const legacyBlock = ['# User content', '', '<!-- agentchat-skill:start -->', '## On AgentChat (legacy block)', 'You are **@alice**...', '<!-- agentchat-skill:end -->', '', '## Other user content'].join('\n')
       fs.writeFileSync(file, legacyBlock + '\n', 'utf-8')
-      writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
+      await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
       const content = fs.readFileSync(file, 'utf-8')
       expect(content).not.toContain('<!-- agentchat-skill:start -->')
       expect(content).not.toContain('legacy block')
@@ -216,13 +217,13 @@ describe('agents-anchor', () => {
       expect(content).toContain('## Other user content')
     })
 
-    it('removeAgentsAnchor strips both legacy and unified blocks', () => {
+    it('removeAgentsAnchor strips both legacy and unified blocks', async () => {
       const workspace = path.join(tmpDir, 'workspace')
       fs.mkdirSync(workspace, { recursive: true })
       const file = path.join(workspace, 'AGENTS.md')
       const mixed = ['# Header', '', '<!-- agentchat-skill:start -->', 'Legacy block.', '<!-- agentchat-skill:end -->', '', '<!-- agentchat:start -->', 'Unified block.', '<!-- agentchat:end -->', '', '## Tail'].join('\n')
       fs.writeFileSync(file, mixed + '\n', 'utf-8')
-      expect(removeAgentsAnchor({ cfg: cfgFor(workspace) }).removed).toBe(true)
+      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace) })).removed).toBe(true)
       const content = fs.readFileSync(file, 'utf-8')
       expect(content).not.toContain('agentchat-skill:start')
       expect(content).not.toContain('agentchat:start')

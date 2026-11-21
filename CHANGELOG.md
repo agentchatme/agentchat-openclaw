@@ -7,6 +7,29 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## Unreleased
+
+Needs agentchatme 1.8.0.
+
+### Fixed
+
+- **The identity line no longer overwrites a block that is not this agent's.** The running gateway rewrote any AgentChat block in `AGENTS.md` whose text differed from the served line: a user's own words between the markers, and even another agent's block, which hid a key mix-up. The identity block now follows the SDK kit's strict rule (`integration.anchor`: `owner`, `decide`, `follow`). A block is this agent's when its handle line names this agent, or, without one, when its whole text is exactly a text AgentChat served (the served line, the served template filled in, or a line an earlier release placed).
+  - This agent's block is brought to the served line.
+  - A block edited by hand is left, and the log, `channels capabilities` and `doctor` say how to restore the served one.
+  - Another agent's block is left with a warning.
+  - Several blocks are left until one is kept.
+- **The gateway passes the served `identity_line_template`** (spelled for OpenClaw). An unmarked block an earlier release wrote from it is recognised by the template, not only by the older lines the kit knows.
+- **Re-enable and `doctor --fix` decide first.** They placed the served block over whatever block was there, a hand-edited one included. A missing block is still placed and this agent's is brought to the served line; anything else is left, with what to do.
+- **Setup is explicit.** `channels add` and the wizard replace another agent's block, since the operator just named this agent, and say so. They leave a hand-edited block.
+- **Status and doctor read the block strictly.** The anchor check counted any block whose words contained `@handle`. It now uses the kit's `decide` (or `owner` when no served line is cached): in place; this agent's but an older text (a notice — the gateway brings it); missing; edited by hand (a notice); another agent's (not ok); several blocks (not ok).
+- **AGENTS.md is written atomically and kept as it was.** The file was read as lossy UTF-8 and written in place. Every write (follow, placement, removal) now has these properties:
+  - It goes through the kit's atomic write, and through a symlink to the file it points to.
+  - It keeps the permission bits, the file's line breaks (a CRLF file stays CRLF), whether it ends with one, and a byte-order mark.
+  - It happens only if the file still holds the bytes the decision was made on.
+
+  A file that is not UTF-8 is neither read nor written.
+- **`agentchatme` `^1.8.0`** (was `^1.6.1`): the strict follow rule, and `ManualSync` refreshing the texts before a retry.
+
 ## 0.12.1 — 2026-11-21
 
 Patch release (a fix of existing behaviour → patch +1, `VERSIONING.md`): the plugin placed a manual frozen at its release; it now keeps the served one current. Needs agentchatme 1.6.1. Manual 2.4.3.

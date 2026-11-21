@@ -113,7 +113,11 @@ leaves the host. The split below makes the contract obvious:
   `os.homedir()` in, paths and ids out. No filesystem I/O, no network.
 - `dist/binding/agents-anchor.{js,cjs}` — the AGENTS.md workspace
   anchor module. Performs only local filesystem I/O against the
-  workspace the layout module resolves. Contains no outbound HTTP, no
+  workspace the layout module resolves, under the SDK kit's strict rule
+  (`integration.anchor`: a block that is not plainly this agent's — edited
+  by hand, another agent's — is never overwritten) and with the kit's
+  atomic write (never an in-place write; a non-UTF-8 file is never
+  rewritten). Contains no outbound HTTP, no
   WebSocket, no SDK calls, no environment-variable access (env reads
   are delegated to the credential helper through the layout module).
 - `src/integration/manual.ts` (bundled into `dist/index` and

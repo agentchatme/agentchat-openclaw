@@ -80,7 +80,7 @@ describe('the refusal for a foreign AGENTCHAT_API_KEY in a non-default profile (
 })
 
 describe('every printed command carries the profile (a sweep over what setup, status, doctor and remove print)', () => {
-  it('no line names a bare `openclaw …` command under the oc2 profile', () => {
+  it('no line names a bare `openclaw …` command under the oc2 profile', async () => {
     process.env.OPENCLAW_PROFILE = 'oc2'
     const stored = writeApiKeyFile('default', KEY)
     const keyFileCfg = { channels: { agentchat: { apiKeyFile: stored.path, agentHandle: 'alice' } } }
@@ -94,7 +94,7 @@ describe('every printed command carries the profile (a sweep over what setup, st
       (resolveConfiguredApiKey({ apiKey: OTHER, apiKeyFile: stored.path }) as { reason: string }).reason,
       describeKeyCopies(['/x/openclaw.json.bak'])!,
       keyCopiesAfterRunLine(),
-      ...removeIntegrationFiles(keyFileCfg, 'default', { clearKey: true }),
+      ...(await removeIntegrationFiles(keyFileCfg, 'default', { clearKey: true })),
       ...keyAtRestWarnings(plainCfg, 'default'),
       ...checkPlacement({ cfg: {}, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.test', accountId: 'default', env: {} }).map((check) => check.detail),
       ...checkPlacement({ cfg: {}, handle: undefined, apiKey: undefined, apiBase: 'https://api.agentchat.test', accountId: 'default', env: {} }).map((check) => check.detail),

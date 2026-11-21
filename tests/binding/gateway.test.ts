@@ -220,7 +220,7 @@ describe('gateway.startAccount', () => {
     try {
       const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
       const bundled = 'I am @alice on AgentChat (api.agentchat.me). On any AgentChat wake I call agentchat_inbox first and decide per card.'
-      writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: bundled })
+      await writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: bundled })
       const { ctx, log } = ctxFor(cfg)
       await agentchatGatewayAdapter.startAccount!(ctx as never)
       const content = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')
@@ -263,7 +263,7 @@ describe('gateway.startAccount', () => {
     expect(order).toEqual(['cleanup', 'resolved'])
   })
 
-  it("statusStateFor maps the SDK's states onto OpenClaw's vocabulary", () => {
+  it("statusStateFor maps the SDK's states onto OpenClaw's vocabulary", async () => {
     expect(statusStateFor('ready')).toBe('linked')
     expect(statusStateFor('blocked')).toBe('not-linked')
     expect(statusStateFor('stopped')).toBe('configured')

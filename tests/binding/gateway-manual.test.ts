@@ -111,7 +111,7 @@ describe('the manual and the identity line on every gateway path', () => {
   it('AGENTCHAT_WAKE=off: no integration, but the manual is placed (logged) and a placed identity line is refreshed', async () => {
     process.env.AGENTCHAT_WAKE = 'off'
     const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
-    writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: OLD_LINE })
+    await writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: OLD_LINE })
     const run = start(cfg)
     await vi.waitFor(() => expect(placed()).toBe(true), WAIT)
     expect(registerIntegration).not.toHaveBeenCalled()
@@ -130,7 +130,7 @@ describe('the manual and the identity line on every gateway path', () => {
 
   it('a second account configured: the integration refuses to start; the manual is still placed, the identity line is left alone', async () => {
     const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { accounts: { a: { apiKey: KEY, agentHandle: 'alice' }, b: { apiKey: KEY, agentHandle: 'bob' } } } } }
-    writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: OLD_LINE })
+    await writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: OLD_LINE })
     const run = start(cfg, 'a')
     await vi.waitFor(() => expect(placed()).toBe(true), WAIT)
     expect(registerIntegration).not.toHaveBeenCalled()
@@ -143,7 +143,7 @@ describe('the manual and the identity line on every gateway path', () => {
   it("a key mismatch: refused; the manual is still placed, the identity line is left alone", async () => {
     process.env.AGENTCHAT_API_KEY = ['ac', 'o'.repeat(24)].join('_')
     const cfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice' } } }
-    writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: OLD_LINE })
+    await writeAgentsAnchor({ cfg: cfg as never, handle: 'alice', text: OLD_LINE })
     const run = start(cfg)
     await vi.waitFor(() => expect(placed()).toBe(true), WAIT)
     expect(registerIntegration).not.toHaveBeenCalled()

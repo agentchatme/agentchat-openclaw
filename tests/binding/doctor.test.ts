@@ -85,7 +85,7 @@ describe('doctor adapter', () => {
 
   it('is quiet once everything is placed and the key is in the environment', async () => {
     await placeServedManual()
-    const placed = placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const placed = await placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
     const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
     expect(warnings).toEqual([])
   })
@@ -93,7 +93,7 @@ describe('doctor adapter', () => {
   it('an install whose key is in plain text in openclaw.json (an earlier release) is told so, and doctor --fix moves it to an owner-only key file (T6-F09)', async () => {
     removeAccountKeyFiles('default')
     await placeServedManual()
-    const placed = placeIntegration({ cfg: cfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const placed = await placeIntegration({ cfg: cfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
     // A security warning: doctor shows it under Security, and its read-only runs too (they never call the preview hook).
     expect(await securityWarnings(placed.cfg)).toEqual([
       "[agentchat:default] key: the API key is in plain text in openclaw.json (channels.agentchat.apiKey), a file the agent's own file tools can read — openclaw doctor --fix moves it to an owner-only key file and leaves only its path (channels.agentchat.apiKeyFile)",
@@ -120,7 +120,7 @@ describe('doctor adapter', () => {
     await placeServedManual()
     const withCopy = keyFileCfg()
     ;(withCopy.channels.agentchat as Record<string, unknown>).apiKey = KEY
-    const placed = placeIntegration({ cfg: withCopy, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const placed = await placeIntegration({ cfg: withCopy, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
     expect(await securityWarnings(placed.cfg)).toEqual(['[agentchat:default] key: the key file is in use, and the same key is still in plain text in openclaw.json (channels.agentchat.apiKey) — openclaw doctor --fix removes it'])
     expect(await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })).toEqual([])
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: {} })
@@ -135,7 +135,7 @@ describe('doctor adapter', () => {
     fs.writeFileSync(`${configPath}.last-good`, JSON.stringify({ channels: { agentchat: { apiKey: KEY } } }))
     try {
       await placeServedManual()
-      const placed = placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+      const placed = await placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
       const warnings = await securityWarnings(placed.cfg)
       expect(warnings).toHaveLength(1)
       expect(warnings[0]).toContain(`[agentchat:default] key: OpenClaw's own copies of openclaw.json still hold this key in plain text: ${configPath}.bak, ${configPath}.last-good`)
@@ -204,7 +204,7 @@ describe('doctor adapter', () => {
 
   it("the manual: a higher-tier agentchat skill and someone else's managed file are preview warnings; doctor --fix leaves both files alone and says so", async () => {
     await placeServedManual()
-    const placed = placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const placed = await placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
     const shadow = path.join(workspace, '.agents', 'skills', 'agentchat', 'SKILL.md')
     fs.mkdirSync(path.dirname(shadow), { recursive: true })
     fs.writeFileSync(shadow, '---\nname: agentchat\ndescription: old\n---\n')
@@ -261,7 +261,7 @@ describe('doctor adapter', () => {
   })
 
   it('repairConfig leaves an existing identity line byte-identical and reports no change for it', async () => {
-    writeAgentsAnchor({ cfg: cfg() as never, handle: 'alice', text: IDENTITY_LINE })
+    await writeAgentsAnchor({ cfg: cfg() as never, handle: 'alice', text: IDENTITY_LINE })
     const block = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8').trim()
     const odd = `# me\r\n\n\n\n${block}\n\n\n# tail without a final newline` // spacing a rewrite would normalise
     fs.writeFileSync(path.join(workspace, 'AGENTS.md'), odd)
@@ -272,16 +272,19 @@ describe('doctor adapter', () => {
     expect(fs.statSync(path.join(workspace, 'AGENTS.md')).mtimeMs).toBe(before)
   })
 
-  it('repairConfig replaces an identity line written for another handle, or with older text, with the served one', async () => {
-    writeAgentsAnchor({ cfg: cfg() as never, handle: 'bob', text: IDENTITY_LINE.split('@alice').join('@bob') })
+  it("repairConfig leaves another agent's identity block (a key mix-up must show, not be papered over) and brings this agent's older text to the served one", async () => {
+    await writeAgentsAnchor({ cfg: cfg() as never, handle: 'bob', text: IDENTITY_LINE.split('@alice').join('@bob') })
+    const before = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: cfg() as never, doctorFixCommand: 'fix', env: {} })
-    expect(fixed.changes.some((c) => c.startsWith('placed the identity line for @alice'))).toBe(true)
-    const content = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')
-    expect(content).toContain(IDENTITY_LINE)
-    expect(content).not.toContain('@bob')
-    writeAgentsAnchor({ cfg: cfg() as never, handle: 'alice', text: 'I am @alice on AgentChat (older wording).' })
+    expect(fixed.changes.some((c) => c.includes('identity line'))).toBe(false)
+    expect(fixed.warnings).toContainEqual(expect.stringMatching(/^\[agentchat:default\] identity line for @alice left as it is: the AgentChat block in .*AGENTS\.md is @bob's, not @alice's; left as it is — if this agent is @alice, delete that block/))
+    expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toBe(before)
+    // and the preview says so too
+    const preview = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: cfg() as never, doctorFixCommand: 'fix', env: {} })
+    expect(preview).toContainEqual(expect.stringMatching(/^\[agentchat:default\] anchor: the AgentChat block in .* is @bob's, not @alice's/))
+    await writeAgentsAnchor({ cfg: cfg() as never, handle: 'alice', text: 'I am @alice on AgentChat (older wording).' })
     const again = await agentchatDoctorAdapter.repairConfig!({ cfg: cfg() as never, doctorFixCommand: 'fix', env: {} })
-    expect(again.changes.some((c) => c.startsWith('placed the identity line for @alice'))).toBe(true)
+    expect(again.changes).toContainEqual(expect.stringMatching(/^brought the identity line for @alice in .*AGENTS\.md to the served text$/))
     expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain(IDENTITY_LINE)
   })
 

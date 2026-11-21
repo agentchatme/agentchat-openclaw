@@ -93,7 +93,7 @@ import {
 import { readAgentchatApiKey, resolveAgentchatApiKey } from './channel-key.js'
 import { openclawCommand } from './cli-command.js'
 import { DEFAULT_API_BASE } from './integration/mcp.js'
-import { identityLineOf, loadServedTexts } from './integration/texts.js'
+import { identityLineOf, identityTemplateOf, loadServedTexts } from './integration/texts.js'
 import { placeManual } from './integration/manual.js'
 import { createSdkClient } from './binding/sdk-client.js'
 
@@ -704,7 +704,7 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
     const keyFile = readAgentchatConfigField(keyCfg, accountId, 'apiKeyFile')
     const served = await loadServedTexts({ client: createSdkClient({ apiKey, apiBase: resolvedBase }), accountId })
     const manual = await placeManual({ texts: served.texts, source: served.source, apiBase: served.apiBase, cfg: keyCfg })
-    const placed = placeIntegration({ cfg: keyCfg, handle, apiKey, apiBase: resolvedBase, identityLine: identityLineOf(served), accountId, manual })
+    const placed = await placeIntegration({ cfg: keyCfg, handle, apiKey, apiBase: resolvedBase, identityLine: identityLineOf(served), identityTemplate: identityTemplateOf(served), accountId, manual })
     const failed = placed.steps.filter((s) => s.status === 'failed')
     const skipped = placed.steps.filter((s) => s.status === 'skipped' && s.name === 'anchor')
     await prompter.note(
