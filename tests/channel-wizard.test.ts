@@ -43,7 +43,10 @@ vi.mock('../src/integration/texts.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/integration/texts.js')>()
   return {
     ...actual,
-    loadIdentityLine: vi.fn(async () => 'I am @alice on AgentChat (api.agentchat.me). On any AgentChat wake I call agentchat__agentchat_inbox first.'),
+    loadServedTexts: vi.fn(async () => {
+      const { servedCopy } = await import('./helpers/texts.js')
+      return servedCopy('I am @alice on AgentChat (api.agentchat.me). On any AgentChat wake I call agentchat__agentchat_inbox first.')
+    }),
   }
 })
 
@@ -54,6 +57,7 @@ import {
 } from '../src/channel-account.js'
 import { PACKAGE_VERSION } from '../src/version.js'
 import { testKey } from './helpers/keys.js'
+import { managedManualPath } from '../src/integration/manual.js'
 import { readAgentchatApiKey } from '../src/channel-key.js'
 import { apiKeyFilePathFor } from '../src/credentials/key-file.js'
 
@@ -843,6 +847,8 @@ describe('agentchatSetupWizard.finalize', () => {
     // Placement: the key landed in the (test-redirected) OpenClaw state-dir .env.
     const dotenv = fs.readFileSync(path.join(process.env.OPENCLAW_STATE_DIR!, '.env'), 'utf8')
     expect(dotenv).toContain(`AGENTCHAT_API_KEY=${KEY_PASTED}`)
+    // Placement: the served manual in OpenClaw's managed skills dir (the announced one is the bundled copy: no download).
+    expect(fs.readFileSync(managedManualPath())).toEqual(fs.readFileSync(path.join(__dirname, '..', 'skills', 'agentchat', 'SKILL.md')))
     expect(s.progress).toContain('Checking the API key with AgentChat…')
     expect(s.remaining()).toBe(0)
   })

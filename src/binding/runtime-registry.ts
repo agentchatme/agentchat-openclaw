@@ -34,11 +34,14 @@ export interface BuiltIntegration {
   readonly texts?: integration.TextsSource | null
   /** Stopped after the loop (the texts refresh timer). */
   readonly textsCache?: integration.TextsCache | null
+  /** The account's claim on the process-wide manual keeper (`integration/manual.ts`), released with the texts cache. */
+  readonly manual?: { release(): void } | null
   readonly handlers: SocketHandlers
 }
 
 interface LiveEntry extends IntegrationEntry {
   readonly textsCache: integration.TextsCache | null
+  readonly manual: { release(): void } | null
 }
 
 const registry = new Map<string, LiveEntry>()
@@ -105,6 +108,7 @@ export function registerIntegration(params: RegisterIntegrationParams): Promise<
       loop: built.loop,
       texts: built.texts ?? null,
       textsCache: built.textsCache ?? null,
+      manual: built.manual ?? null,
       metrics: params.socketOptions?.metrics ?? null,
       config: params.config,
       logger: params.logger,
@@ -149,6 +153,8 @@ async function stopEntry(entry: LiveEntry): Promise<void> {
     }
   }
   entry.socket.stopped()
+  // The manual follows the texts: its keeper stops with the cache it reads (another running account takes it over).
+  entry.manual?.release()
   entry.textsCache?.stop()
 }
 

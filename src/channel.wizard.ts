@@ -93,7 +93,8 @@ import {
 import { readAgentchatApiKey, resolveAgentchatApiKey } from './channel-key.js'
 import { openclawCommand } from './cli-command.js'
 import { DEFAULT_API_BASE } from './integration/mcp.js'
-import { loadIdentityLine } from './integration/texts.js'
+import { identityLineOf, loadServedTexts } from './integration/texts.js'
+import { placeManual } from './integration/manual.js'
 import { createSdkClient } from './binding/sdk-client.js'
 
 type AccountKind = integration.AccountKind
@@ -679,7 +680,8 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
 
     // Place the integration: the key in OpenClaw's state-dir `.env` (the
     // hosted tools' bearer header is a template on it), the served identity
-    // line in AGENTS.md (loaded every turn), the manual (bundled), and the
+    // line in AGENTS.md (loaded every turn), the served manual (kept current in
+    // OpenClaw's managed skills dir; the bundled copy is the floor), and the
     // hosted MCP server in `mcp.servers.agentchat`. Best-effort by intent: a
     // read-only workspace must NOT bounce the wizard — the key and config are
     // saved; the report says what to repair.
@@ -700,8 +702,9 @@ export const agentchatSetupWizard: ChannelSetupWizard = {
       }
     }
     const keyFile = readAgentchatConfigField(keyCfg, accountId, 'apiKeyFile')
-    const identityLine = await loadIdentityLine({ client: createSdkClient({ apiKey, apiBase: resolvedBase }), accountId })
-    const placed = placeIntegration({ cfg: keyCfg, handle, apiKey, apiBase: resolvedBase, identityLine, accountId })
+    const served = await loadServedTexts({ client: createSdkClient({ apiKey, apiBase: resolvedBase }), accountId })
+    const manual = await placeManual({ texts: served.texts, source: served.source, apiBase: served.apiBase, cfg: keyCfg })
+    const placed = placeIntegration({ cfg: keyCfg, handle, apiKey, apiBase: resolvedBase, identityLine: identityLineOf(served), accountId, manual })
     const failed = placed.steps.filter((s) => s.status === 'failed')
     const skipped = placed.steps.filter((s) => s.status === 'skipped' && s.name === 'anchor')
     await prompter.note(

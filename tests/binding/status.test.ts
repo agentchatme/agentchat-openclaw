@@ -22,7 +22,9 @@ import { registerIntegration, resetRegistryForTest } from '../../src/binding/run
 import { createInMemoryMetrics } from '../../src/metrics.js'
 import { noteCouldNotProcess, resetCouldNotProcessForTest } from '../../src/integration/could-not-process.js'
 import type { IntegrationSocket, SocketState } from '../../src/integration/socket.js'
-import { IDENTITY_LINE } from '../helpers/texts.js'
+import { BUNDLED_MANUAL_VERSION, IDENTITY_LINE, SERVED_TEXTS } from '../helpers/texts.js'
+import { placeServedManual, writeTextsCache } from '../helpers/manual.js'
+import { managedManualPath, manualRecordPath } from '../../src/integration/manual.js'
 import { testKey } from '../helpers/keys.js'
 
 const KEY = testKey('s'.repeat(24))
@@ -111,6 +113,30 @@ describe('status adapter — the doctor-style probe', () => {
     expect(probe.placement?.every((c) => c.ok)).toBe(true)
   })
 
+  it('the manual: current is a muted line; stale (version, announced version, last error) and a higher-tier agentchat skill are warn lines', async () => {
+    await placeServedManual()
+    process.env.AGENTCHAT_API_KEY = KEY
+    const placed = placeIntegration({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const probeOf = () => agentchatStatusAdapter.probeAccount!({ account: account(placed.cfg) as never, timeoutMs: 2000, cfg: placed.cfg as never } as never)
+    const manualLines = (probe: Awaited<ReturnType<typeof probeOf>>) => agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never).filter((l) => l.text.startsWith('manual:'))
+    expect(manualLines(await probeOf())).toEqual([{ text: `manual: current (${BUNDLED_MANUAL_VERSION}) — ${managedManualPath()}`, tone: 'muted' }])
+    // The server moved on and the gateway could not fetch it: the cached announcement says so, the record has the error.
+    writeTextsCache('default', undefined, { ...SERVED_TEXTS, manual: { url: 'https://agentchat.me/skill.md', version: '9.9.9' } })
+    const record = JSON.parse(fs.readFileSync(manualRecordPath(), 'utf8'))
+    fs.writeFileSync(manualRecordPath(), JSON.stringify({ ...record, last: { at: 'x', state: 'kept', manual: BUNDLED_MANUAL_VERSION, served: '9.9.9', error: 'no answer from https://agentchat.me/skill.md within 10000 ms' } }))
+    fs.mkdirSync(path.join(workspace, 'skills', 'agentchat'), { recursive: true })
+    fs.writeFileSync(path.join(workspace, 'skills', 'agentchat', 'SKILL.md'), '---\nname: agentchat\ndescription: an old copy\n---\n')
+    const probe = await probeOf()
+    expect(probe.ok).toBe(true) // the agent works: warnings, not failures
+    expect(manualLines(probe)).toEqual([
+      {
+        text: `manual: stale (have ${BUNDLED_MANUAL_VERSION}, served 9.9.9; last sync: no answer from https://agentchat.me/skill.md within 10000 ms) — ${managedManualPath()}; the gateway tries again when the texts change — run openclaw doctor --fix to try now`,
+        tone: 'warn',
+      },
+      { text: expect.stringMatching(/^manual: .*skills\/agentchat\/SKILL\.md is an agentchat skill in the workspace skills folder, which OpenClaw loads ahead of the managed copy/), tone: 'warn' },
+    ])
+  })
+
   it('an unreachable hosted MCP server is an error line', async () => {
     vi.mocked(probeHostedMcp).mockResolvedValueOnce({ ok: false, status: 401, error: 'the key does not authenticate against the hosted MCP server' })
     const cfg = { agents: { defaults: { workspace } } }
@@ -135,7 +161,7 @@ describe('status adapter — the doctor-style probe', () => {
       config: account({}).config as never,
       logger: silent,
       createSocket: () => stubSocket('ready'),
-      build: () => ({ loop: loopWith({ wakes: 3, cycles: 2, turns: 1 }), texts: { source: 'cache' } as never, handlers: {} }),
+      build: () => ({ loop: loopWith({ wakes: 3, cycles: 2, turns: 1 }), texts: { source: 'cache', current: () => null } as never, handlers: {} }),
     })
     const cfg = { agents: { defaults: { workspace } } }
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account(cfg) as never, timeoutMs: 2000, cfg: cfg as never } as never)
@@ -163,7 +189,7 @@ describe('status adapter — the doctor-style probe', () => {
       createSocket: () => stubSocket('ready'),
       build: () => ({
         loop: loopWith({ wakes: 1, cycles: 4, turns: 1, recent: [1, 2, 3].map(() => ({ outcome: 'tools_unavailable', failure: 'mcp.servers.agentchat is not in the gateway config' })), running: [{ kind: 'reply', conversationId: 'conv_slow', anchor: 'msg_1', startedAt: started, waitTimedOutAt: null, overdue: true }] }),
-        texts: { source: 'server' } as never,
+        texts: { source: 'server', current: () => null } as never,
         handlers: {},
       }),
     })
@@ -202,7 +228,7 @@ describe('status adapter — the doctor-style probe', () => {
         config: account({}).config as never,
         logger: silent,
         createSocket: () => stubSocket('ready'),
-        build: () => ({ loop: loopWith({ wakes: 3, cycles: 2, turns: 1, processingFailures: counts }), texts: { source: 'server' } as never, handlers: {} }),
+        build: () => ({ loop: loopWith({ wakes: 3, cycles: 2, turns: 1, processingFailures: counts }), texts: { source: 'server', current: () => null } as never, handlers: {} }),
       })
       const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
       const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
@@ -229,7 +255,7 @@ describe('status adapter — the doctor-style probe', () => {
       config: account({}).config as never,
       logger: silent,
       createSocket: () => stubSocket('ready'),
-      build: () => ({ loop: loopWith({ wakes: 1, cycles: 1, turns: 0, processingFailures: counts }), texts: { source: 'server' } as never, handlers: {} }),
+      build: () => ({ loop: loopWith({ wakes: 1, cycles: 1, turns: 0, processingFailures: counts }), texts: { source: 'server', current: () => null } as never, handlers: {} }),
     })
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
     const lines = agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never)
@@ -253,7 +279,7 @@ describe('status adapter — the doctor-style probe', () => {
       logger: silent,
       createSocket: () => stubSocket('ready'),
       socketOptions: { metrics },
-      build: () => ({ loop: loopWith({ wakes: 3, cycles: 1, turns: 0 }), texts: { source: 'server' } as never, handlers: {} }),
+      build: () => ({ loop: loopWith({ wakes: 3, cycles: 1, turns: 0 }), texts: { source: 'server', current: () => null } as never, handlers: {} }),
     })
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
     expect(probe.integration?.socket).toEqual({ state: 'ready', wakes: { connect: 1, message: 2 }, disconnects: { '4000/client': 1 }, errors: { transport: 1 } })
@@ -270,7 +296,7 @@ describe('status adapter — the doctor-style probe', () => {
       config: account({}).config as never,
       logger: silent,
       createSocket: () => stubSocket('blocked'),
-      build: () => ({ loop: null, texts: { source: 'none' } as never, handlers: {} }),
+      build: () => ({ loop: null, texts: { source: 'none', current: () => null } as never, handlers: {} }),
     })
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account({}) as never, timeoutMs: 2000, cfg: {} as never } as never)
     expect(probe.integration).toEqual({ mode: 'on', state: 'blocked', texts: 'missing' })

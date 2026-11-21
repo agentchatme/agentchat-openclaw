@@ -44,6 +44,7 @@ import {
   applyAgentchatAccountPatch,
   isAgentchatAccountEnabled,
   isApiKeyPresent,
+  listConfiguredAccountIds,
   readAccountRaw,
   readAgentchatConfigField,
   readChannelSection,
@@ -69,6 +70,7 @@ import {
 import {
   placeIntegration,
   formatPlacement,
+  manualStep,
   applyIntegrationConfig,
   stripIntegrationConfig,
   removeIntegrationFiles,
@@ -83,7 +85,8 @@ import { namesApiKey, readAgentchatApiKey } from './channel-key.js'
 import { apiKeyFilePathFor, readTokenFile } from './credentials/key-file.js'
 import { setPluginRuntime } from './integration/runtime-holder.js'
 import { DEFAULT_API_BASE } from './integration/mcp.js'
-import { loadIdentityLine } from './integration/texts.js'
+import { identityLineOf, loadServedTexts, type ServedTextsCopy } from './integration/texts.js'
+import { placeManual, removeManagedManual } from './integration/manual.js'
 import { createSdkClient } from './binding/sdk-client.js'
 
 export {
@@ -456,8 +459,9 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
       }
     }
     try {
-      const identityLine = await loadIdentityLine({ client: createSdkClient({ apiKey, apiBase }), accountId })
-      const placed = placeIntegration({ cfg, handle, apiKey, apiBase, identityLine, accountId })
+      const served = await loadServedTexts({ client: createSdkClient({ apiKey, apiBase }), accountId })
+      const manual = await placeManual({ texts: served.texts, source: served.source, apiBase: served.apiBase, cfg })
+      const placed = placeIntegration({ cfg, handle, apiKey, apiBase, identityLine: identityLineOf(served), accountId, manual })
       if (keyFile) say(runtime, 'log', `[agentchat:${accountId}] ✓ key file: ${keyFile} (owner-only); openclaw.json holds only its path`)
       for (const line of formatPlacement(placed.steps.filter((s) => s.name !== 'mcp'))) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
       say(runtime, 'log', `[agentchat:${accountId}] ✓ config: agentHandle and mcp.servers.agentchat written with the account (restart the gateway — \`${openclawCommand('gateway restart')}\` — so the hosted tools resolve \${AGENTCHAT_API_KEY}: OpenClaw reads .env only at start)`)
@@ -571,9 +575,12 @@ async function refuseRejectedKey(prevCfg: Cfg, nextCfg: Cfg, accountId: string, 
  * run by OpenClaw after the config adapters and before the write.
  * Best-effort; reports through the CLI runtime it is given.
  *
- * enabled → disabled: the identity line goes (the key stays — a pause).
- * disabled → enabled: the identity line for the configured `agentHandle`
- * comes back, the mirror of disable. OpenClaw 2026.10.9 does not load a
+ * enabled → disabled: the identity line goes (the key stays — a pause);
+ * with no other AgentChat account enabled, the managed manual this plugin
+ * kept current goes too (only when its bytes are the ones it wrote).
+ * disabled → enabled: the manual and the identity line for the configured
+ * `agentHandle` come back, the mirror of disable. A delete removes the same,
+ * and the key's `.env` line. OpenClaw 2026.10.9 does not load a
  * disabled channel's plugin, so a re-enable through
  * `openclaw config set channels.agentchat.enabled true` never reaches this
  * hook; `openclaw doctor --fix` places a missing identity line for that path.
@@ -589,24 +596,28 @@ export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResol
         runtime,
         'error',
         isEnabled
-          ? `[agentchat:${accountId}] the re-enabled config does not pass the channel schema — not placing the identity line`
-          : `[agentchat:${accountId}] the disabled config does not pass the channel schema — leaving the identity line and the key in place`,
+          ? `[agentchat:${accountId}] the re-enabled config does not pass the channel schema — not placing the manual or the identity line`
+          : `[agentchat:${accountId}] the disabled config does not pass the channel schema — leaving the identity line, the manual and the key in place`,
       )
       return
     }
     if (!isEnabled) {
       for (const line of removeIntegrationFiles(nextCfg, accountId, { clearKey: false })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
+      if (otherEnabledAccounts(nextCfg, accountId).length === 0) for (const line of removeManagedManual()) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
       return
     }
+    const apiKey = readAgentchatApiKey(nextCfg, accountId)
+    const apiBase = readAgentchatConfigField(nextCfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
+    const served: ServedTextsCopy = apiKey ? await loadServedTexts({ client: createSdkClient({ apiKey, apiBase }), accountId }) : { texts: null, source: 'none', apiBase: null }
+    // The manual first: it is the same for every account, and needs no handle.
+    const manual = manualStep(await placeManual({ texts: served.texts, source: served.source, apiBase: served.apiBase, cfg: nextCfg }))
+    say(runtime, manual.status === 'failed' ? 'error' : 'log', `[agentchat:${accountId}] ${formatPlacement([manual])[0]}`)
     const handle = handleOf(readAgentchatConfigField(nextCfg, accountId, 'agentHandle'))
     if (!handle) {
       say(runtime, 'log', `[agentchat:${accountId}] agentHandle not in config — run \`${openclawCommand('doctor --fix')}\` to learn it from the key and place the identity line`)
       return
     }
-    const apiKey = readAgentchatApiKey(nextCfg, accountId)
-    const apiBase = readAgentchatConfigField(nextCfg, accountId, 'apiBase') ?? DEFAULT_API_BASE
-    const identityLine = apiKey ? await loadIdentityLine({ client: createSdkClient({ apiKey, apiBase }), accountId }) : null
-    const restored = restoreIdentityLine(nextCfg, accountId, handle, identityLine)
+    const restored = restoreIdentityLine(nextCfg, accountId, handle, identityLineOf(served))
     if (restored.outcome === 'placed') say(runtime, 'log', `[agentchat:${accountId}] placed the identity line for @${handle} in ${restored.path}`)
     else if (restored.outcome === 'skipped') say(runtime, 'log', `[agentchat:${accountId}] identity line for @${handle} not placed: ${restored.detail ?? 'the served text is not available'}`)
     else if (restored.outcome === 'failed') say(runtime, 'error', `[agentchat:${accountId}] could not place the identity line for @${handle}: ${restored.detail ?? 'unknown error'} — run \`${openclawCommand('doctor --fix')}\` after fixing the path`)
@@ -614,7 +625,17 @@ export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResol
 
   async onAccountRemoved({ prevCfg, accountId, runtime }) {
     for (const line of removeIntegrationFiles(prevCfg, accountId, { clearKey: true })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
+    if (otherEnabledAccounts(prevCfg, accountId).length === 0) for (const line of removeManagedManual()) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
   },
+}
+
+/**
+ * The enabled AgentChat accounts in `cfg` besides `accountId`. The managed
+ * manual is account-free: it goes when the last enabled account goes (a
+ * disable or a delete), and stays while another one needs it.
+ */
+function otherEnabledAccounts(cfg: Cfg | undefined, accountId: string): string[] {
+  return listConfiguredAccountIds(cfg).filter((id) => id !== accountId && isAgentchatAccountEnabled(cfg, id))
 }
 
 export const agentchatPlugin: ChannelPlugin<AgentchatResolvedAccount, AgentchatProbeResult> = {

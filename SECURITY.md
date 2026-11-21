@@ -116,6 +116,18 @@ leaves the host. The split below makes the contract obvious:
   workspace the layout module resolves. Contains no outbound HTTP, no
   WebSocket, no SDK calls, no environment-variable access (env reads
   are delegated to the credential helper through the layout module).
+- `src/integration/manual.ts` (bundled into `dist/index` and
+  `dist/setup-entry`) — the served manual in OpenClaw's managed skills
+  dir. Its one download is the SDK kit's (`integration.ManualSync` /
+  `syncManual`) of the address the served texts announce: HTTPS only, on
+  `agentchat.me` or the API's own host, every redirect hop checked, no
+  credentials sent, the size capped, the version and the announced
+  sha256 checked before anything is written. It writes only
+  `<config dir>/skills/agentchat/SKILL.md` (atomically, and never into a
+  symlinked file or folder, a ClawHub install or another skill — those are
+  left alone) and its record, `<config dir>/agentchat/manual.json`. The
+  text is a skill for the model to read; nothing interprets it beyond its
+  front matter.
 - `dist/index.{js,cjs}` and `dist/setup-entry.{js,cjs}` — runtime
   and setup logic. No direct environment-variable access; both
   helpers are consumed via runtime `import` / `require` that

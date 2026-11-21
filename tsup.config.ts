@@ -38,6 +38,9 @@ export default defineConfig({
     __PLUGIN_VERSION__: JSON.stringify(pkg.version),
   },
   treeshake: true,
+  // `import.meta.url` in the CJS build: the manual module finds the bundled
+  // skill from its own location (`src/integration/manual.ts`).
+  shims: true,
   splitting: false,
   minify: false,
   external: [

@@ -9,7 +9,9 @@
  *      `initialize`), because that is where every AgentChat tool lives;
  *   3. placement: the key in the gateway environment, the identity line in
  *      AGENTS.md (checked against the last served copy when one is cached),
- *      the manual, the `mcp.servers.agentchat` entry.
+ *      the manual (the managed copy against the announced version, its size,
+ *      a higher-precedence agentchat skill that would win over it), the
+ *      `mcp.servers.agentchat` entry.
  *
  * Plus the socket's live state when the integration is running, and what
  * the kit reported to AgentChat as could not process (its counts, and the
@@ -101,6 +103,9 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
         : `hosted MCP server not reachable with this key: ${mcpProbe.error ?? 'unknown error'}`,
     }
 
+    const live = getIntegration(account.accountId)
+    // The announcement the running integration holds (else the cached file's); the managed copy is checked against it.
+    const liveTexts = live?.texts?.current() ?? null
     const placement = checkPlacement({
       cfg: cfg as object | undefined,
       handle: config.agentHandle ?? me.handle,
@@ -110,10 +115,10 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
       agentId: resolvePlacementAgentId(cfg as object | undefined, account.accountId),
       accountId: account.accountId,
       keySource: resolveAgentchatApiKey(cfg as never, account.accountId),
+      ...(liveTexts ? { served: liveTexts.manual, servedSource: live?.texts?.source ?? 'cache' } : {}),
     })
     const enabled = account.enabled && isAgentchatAccountEnabled(cfg as never, account.accountId)
 
-    const live = getIntegration(account.accountId)
     const health = live?.socket.getHealth()
     const loopStatus = live?.loop?.loop.status()
     const counters = loopStatus

@@ -1,5 +1,7 @@
 /**
- * The bundled manual is `https://agentchat.me/skill.md`, verbatim. These
+ * The bundled manual is `https://agentchat.me/skill.md`, verbatim — the floor
+ * the self-updating copy in OpenClaw's managed skills dir starts from (and
+ * the sync's fallback). These
  * tests pin the parts the integration relies on: the frontmatter OpenClaw reads,
  * the anchor-line section the identity placement is kept in lockstep with,
  * the gate verbs the turn prompt names, and that the skill ships.
@@ -24,20 +26,20 @@ function extractFrontmatter(md: string): string {
 describe('bundled agentchat manual', () => {
   const text = readFileSync(skillPath, 'utf8')
 
-  it('is manual 2.4.0 byte for byte: the sha256 AgentChat serves and pins (MANUAL_SHA256)', () => {
+  it('is manual 2.4.2 byte for byte: the sha256 AgentChat serves and pins (MANUAL_SHA256)', () => {
     // The bundled copy is re-fetched at release time; bump this and the version below with it.
-    expect(createHash('sha256').update(readFileSync(skillPath)).digest('hex')).toBe('7439b4eba86ec1bc06b42000ed45c8278e43832057c085deff7669c5963e7221')
+    expect(createHash('sha256').update(readFileSync(skillPath)).digest('hex')).toBe('d8c5d38982314b5f136d633c5c3f467c399782c0556ca0f54ff8ded0b874120a')
   })
 
-  it('starts with the published frontmatter: name, version 2.4.0, description, homepage', () => {
+  it('starts with the published frontmatter: name, version 2.4.2, description, homepage', () => {
     const fm = extractFrontmatter(text)
     expect(fm).toMatch(/^name:\s*agentchat\s*$/m)
-    expect(fm).toMatch(/^version:\s*2\.4\.0\s*$/m)
+    expect(fm).toMatch(/^version:\s*2\.4\.2\s*$/m)
     expect(fm).toMatch(/^description:\s+.{30,}/m)
     expect(fm).toMatch(/^homepage:\s*https:\/\/agentchat\.me\s*$/m)
   })
 
-  it('carries the sections the integration points the agent at (manual 2.4.0 wording)', () => {
+  it('carries the sections the integration points the agent at (manual 2.4.2 wording)', () => {
     expect(text).toMatch(/^## Be reachable: identity, wake, live conversations/m)
     expect(text).toMatch(/^### 1\. The identity line/m)
     expect(text).toMatch(/^### 2\. Being woken/m)
@@ -58,6 +60,13 @@ describe('bundled agentchat manual', () => {
     // this integration follows (reply recorded when the turn completes).
     expect(text).toContain('`dismiss` and `defer` right away, `reply` only after your answer is sent')
     expect(text).not.toMatch(/the send is (your |the )?verdict|record the verdict first/i)
+  })
+
+  it('2.4.2: the key goes only to api.agentchat.me — a person who wants to see the conversations gets a claim link, never the key', () => {
+    expect(text).toContain('**Send the key to exactly one place: `api.agentchat.me`**')
+    expect(text).toContain('To let a person see your conversations, give them a claim link instead')
+    expect(text).not.toMatch(/\*\*Your human owner\*\* — once/)
+    expect(text).not.toMatch(/paste your API key/)
   })
 
   it('tells OpenClaw users to prefer this integration', () => {

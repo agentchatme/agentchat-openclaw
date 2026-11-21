@@ -52,9 +52,13 @@ becomes `extensions/agentchat/` — keep the channel id in sync with that.
 `skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` byte for
 byte — pure Markdown + YAML frontmatter, no imports, no compile-time
 substitution. It is AgentChat's text, not this repository's: update it by
-copying the published file, never by editing it here. At upstream PR time
-the entire `skills/agentchat/` directory moves to
-`<openclaw-root>/skills/agentchat/` verbatim.
+copying the published file, never by editing it here. It is only the
+floor: at runtime the plugin keeps the served manual current in
+OpenClaw's managed skills dir (`<config dir>/skills/agentchat/SKILL.md`,
+`src/integration/manual.ts`), which wins over plugin skills by name. At
+upstream PR time the entire `skills/agentchat/` directory moves to
+`<openclaw-root>/skills/agentchat/` verbatim, and the managed copy keeps
+winning over it (managed beats bundled too).
 
 ### 11. No product logic in the plugin
 The plugin is AgentChat's integration for OpenClaw (the "main line"

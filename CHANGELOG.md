@@ -7,6 +7,27 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## Unreleased
+
+Manual 2.4.2.
+
+### Fixed
+
+- **The manual keeps itself current.** Until now the plugin shipped a copy of `https://agentchat.me/skill.md` as its `agentchat` skill, and that copy changed only with a plugin release. 0.12.0 shipped manual 2.4.0, which told the agent to give its API key to a person. The plugin now keeps the served manual in OpenClaw's managed skills directory, `<OpenClaw config dir>/skills/agentchat/SKILL.md`. OpenClaw loads that copy ahead of the plugin's own: it beats plugin skills, is watched, is copied into Docker sandboxes, and survives plugin updates. The directory comes from OpenClaw's own `CONFIG_DIR` (`openclaw/plugin-sdk/setup-tools`), which also honours `OPENCLAW_CONFIG_PATH`. The gateway syncs the copy at start and on every texts change, through the SDK kit's `ManualSync`. The kit pins the download to HTTPS from `agentchat.me` or the API's own host and checks every redirect. It allows 10 s and caps the size at OpenClaw's skill-file limit (`skills.limits.maxSkillFileBytes`, default 256 000 bytes, never above the kit's 512 KiB). It checks the front matter at the announced version and the announced sha256, keeps the old file on any failure, and writes atomically. The skill folder is created readable by others, because a sandbox copy keeps its mode. One sync runs per gateway process, whatever the number of accounts. If its account stops, the next one still running takes over.
+- **On every gateway path.** The served texts, the manual and the identity line now also run with `AGENTCHAT_WAKE=off`. That path used to promise "the manual stays placed" and refreshed nothing. When the integration refuses to start (a second account, or a key mismatch), the manual is still kept current, because it belongs to no account. The identity line is left alone there: whose would it be?
+- **Setup, re-enable and `doctor --fix` place the manual and report the real result.** The wizard, `channels add`, a re-enable and `doctor --fix` sync it once. The `manual` step was a fixed "ok". It is now `✓` when current or placed, `–` when stale (both versions and the reason) or when the file is left alone, and `✗` only when there is no manual at all. `loadServedTexts` returns the whole texts copy, with its source and API base; `loadIdentityLine` is built on it.
+- **Status and doctor say which manual the agent reads.** The answer comes from local reads only. `current`; `stale` (the version on disk, the announced one, and the last sync's error, which `doctor` reads from `<config dir>/agentchat/manual.json`); `only the copy bundled with the plugin`; `left alone` (not this plugin's file); `over OpenClaw's skill-file limit`; `unchecked`. There is also one line for each `agentchat` skill OpenClaw loads ahead of the managed copy: the bound agent's `<workspace>/skills` or `<workspace>/.agents/skills`, or `~/.agents/skills`, matched by front-matter name. Those are never deleted. `doctor` gives the fix for each.
+
+### Added
+
+- **Whose file it is.** `<OpenClaw config dir>/agentchat/manual.json` records the sha256 and version the plugin last wrote, and the latest sync. The managed file is written only when there is none, when it is still the recorded bytes, or when it is an `agentchat` skill that is neither a symlink nor installed from ClawHub (`.clawhub/` beside it, or listed in `<config dir>/.clawhub/lock.json`). This release publishes only the plugin package to ClawHub, never a separate `agentchat` skill. Anything else is left alone and reported.
+- **The bundled copy is the floor.** It stays declared as a plugin skill and is the sync's fallback: a first install with AgentChat unreachable places it. A managed copy older than it is replaced by it, unless the server confirmed that older version in this process. A newer copy is never replaced, and an older version the server announces (a rollback) is followed.
+- **Cleanup.** When the last enabled AgentChat account is disabled or deleted (`channels remove`), the managed manual and its record go, but only if the file still holds the recorded bytes. A copy changed since stays, and the command says so. `openclaw plugins uninstall` runs no plugin hook; the README and RUNBOOK name the files to remove by hand.
+
+### Manual 2.4.2
+
+- The bundled `skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` 2.4.2 verbatim (sha256 `d8c5d389…`, the hash AgentChat announces; 0.12.0 bundled 2.4.0). The key goes to exactly one place, `api.agentchat.me`. A person who wants to see the agent's conversations gets a dashboard claim link (`agentchat_create_claim_link`), never the key. `tests/skill.test.ts` pins the new sha256 and version.
+
 ## 0.12.0 — 2026-11-20
 
 Minor release (added behaviour → minor +1, `VERSIONING.md`). Needs agentchatme 1.5.0. Manual 2.4.0.
