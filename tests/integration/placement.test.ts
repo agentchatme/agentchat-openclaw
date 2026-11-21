@@ -17,7 +17,8 @@ import {
   resolveOpenClawStateDir,
 } from '../../src/integration/placement.js'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
-import { IDENTITY_LINE, identityLineFor } from '../helpers/texts.js'
+import { BUNDLED_MANUAL_VERSION, IDENTITY_LINE, SERVED_TEXTS, identityLineFor } from '../helpers/texts.js'
+import { placeManual } from '../../src/integration/manual.js'
 import { testKey } from '../helpers/keys.js'
 
 const KEY = testKey('q'.repeat(24))
@@ -90,9 +91,11 @@ describe('placeIntegration + checkPlacement', () => {
   const cfgFor = () => ({ agents: { defaults: { workspace } } })
   const base = () => ({ handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir })
 
-  it('places key, the served identity line, manual and tools, and returns the config with mcp.servers.agentchat', () => {
-    const result = placeIntegration({ cfg: cfgFor(), ...base() })
-    expect(result.steps.map((s) => `${s.name}:${s.status}`)).toEqual(['key:changed', 'anchor:ok', 'manual:ok', 'mcp:changed'])
+  const syncManual = () => placeManual({ texts: SERVED_TEXTS, source: 'server', apiBase: 'https://api.agentchat.me', configDir: stateDir })
+
+  it('places key, the served identity line, manual and tools, and returns the config with mcp.servers.agentchat', async () => {
+    const result = placeIntegration({ cfg: cfgFor(), ...base(), manual: await syncManual() })
+    expect(result.steps.map((s) => `${s.name}:${s.status}`)).toEqual(['key:changed', 'anchor:ok', 'manual:changed', 'mcp:changed'])
     expect(result.mcp).toBe('added')
     expect((result.cfg as unknown as { mcp: { servers: { agentchat: { headers: { Authorization: string } } } } }).mcp.servers.agentchat.headers.Authorization).toBe('Bearer ${AGENTCHAT_API_KEY}')
     const agents = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')
@@ -102,12 +105,13 @@ describe('placeIntegration + checkPlacement', () => {
     const lines = formatPlacement(result.steps)
     expect(lines[0]).toMatch(/^✓ key: AGENTCHAT_API_KEY in .*\.env \(a gateway started before this needs a restart to resolve \$\{AGENTCHAT_API_KEY\}\)/)
     expect(lines[1]).toMatch(/^✓ anchor: identity line for @alice in /)
+    expect(lines[2]).toBe(`✓ manual: ${BUNDLED_MANUAL_VERSION} placed from the bundled copy (the served version) → ${path.join(stateDir, 'skills', 'agentchat', 'SKILL.md')}`)
     expect(lines[3]).toMatch(/^✓ mcp: hosted tools registered as mcp\.servers\.agentchat/)
   })
 
-  it('second run: everything ok, nothing changed', () => {
-    const first = placeIntegration({ cfg: cfgFor(), ...base() })
-    const second = placeIntegration({ cfg: first.cfg, ...base() })
+  it('second run: everything ok, nothing changed', async () => {
+    const first = placeIntegration({ cfg: cfgFor(), ...base(), manual: await syncManual() })
+    const second = placeIntegration({ cfg: first.cfg, ...base(), manual: await syncManual() })
     expect(second.steps.map((s) => s.status)).toEqual(['ok', 'ok', 'ok', 'ok'])
     expect(second.mcp).toBe('present')
   })

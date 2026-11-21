@@ -4,7 +4,8 @@
  * Every text an agent sees is written once on the server and served as data
  * (`GET /v1/texts?runtime=openclaw`): the wake instruction, the invite
  * prompt, the gate-call preamble and answer format, the reply-turn and
- * conversation-run templates, the identity line, where the manual is. The
+ * conversation-run templates, the identity line, where the manual is (the
+ * manual itself is kept current by `./manual.ts`). The
  * kit's cache fetches them at channel start and daily, keeps the last good
  * copy in `<state dir>/agentchat/<accountId>/texts.json`
  * (an offline start is not mute), and backs off after a failure. The server
@@ -123,26 +124,51 @@ export interface LoadTextsParams {
   readonly stateDir?: string | undefined
 }
 
+/** One copy of the served texts, server-verbatim, with where it came from. */
+export interface ServedTextsCopy {
+  readonly texts: Texts | null
+  /** `server` (fetched now), `cache` (the file the kit keeps), `none`. */
+  readonly source: 'server' | 'cache' | 'none'
+  /** The API base they were fetched from — where a manual download may go. */
+  readonly apiBase: string | null
+}
+
 /**
- * The identity line for the key's own agent, as served — for the
- * placement paths that run outside the gateway (wizard, `channels add`,
- * `doctor --fix`, re-enable). One fetch through the kit's cache (the server,
- * else the file it keeps); `null` when neither has a copy. Never throws.
+ * The served texts, for the placement paths that run outside the gateway
+ * (wizard, `channels add`, `doctor --fix`, re-enable): the identity line and
+ * the manual's announcement. One fetch through the kit's cache (the server,
+ * else the file it keeps); `texts: null` when neither has a copy. Never throws.
  */
-export async function loadIdentityLine(params: LoadTextsParams): Promise<string | null> {
+export async function loadServedTexts(params: LoadTextsParams): Promise<ServedTextsCopy> {
   const cache = createTextsCache(params)
   try {
     const texts = await cache.start()
-    return texts ? spellToolsForOpenClaw(texts.identity_line) : null
+    return { texts, source: texts ? cache.source : 'none', apiBase: cache.apiBase }
   } catch {
-    return null
+    return { texts: null, source: 'none', apiBase: cache.apiBase }
   } finally {
     cache.stop()
   }
 }
 
+/** The served identity line in a copy, spelled for OpenClaw; null without texts. */
+export function identityLineOf(copy: ServedTextsCopy): string | null {
+  return copy.texts ? spellToolsForOpenClaw(copy.texts.identity_line) : null
+}
+
+/** The identity line for the key's own agent, as served (`loadServedTexts`); `null` when no copy is in hand. Never throws. */
+export async function loadIdentityLine(params: LoadTextsParams): Promise<string | null> {
+  return identityLineOf(await loadServedTexts(params))
+}
+
 /** The cached identity line, without touching the network (status, doctor preview). Reads the kit's file. */
 export function cachedIdentityLine(accountId: string, stateDir?: string): string | null {
+  const texts = cachedServedTexts(accountId, stateDir)
+  return texts ? spellToolsForOpenClaw(texts.identity_line) : null
+}
+
+/** The texts the kit's file holds for this account (server-verbatim), without touching the network; null when none. */
+export function cachedServedTexts(accountId: string, stateDir?: string): Texts | null {
   let raw: string
   try {
     raw = fs.readFileSync(textsCachePath(accountId, stateDir), 'utf8')
@@ -152,7 +178,7 @@ export function cachedIdentityLine(accountId: string, stateDir?: string): string
   try {
     const entry = JSON.parse(raw) as { runtime?: unknown; texts?: unknown }
     if (entry.runtime !== TEXTS_RUNTIME || !isTexts(entry.texts)) return null
-    return spellToolsForOpenClaw(entry.texts.identity_line)
+    return entry.texts
   } catch {
     return null
   }

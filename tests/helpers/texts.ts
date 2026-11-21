@@ -5,11 +5,21 @@
  * serves them for `runtime=openclaw`, and the plugin uses them as served.
  */
 
+import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
 import type { Texts } from 'agentchatme'
 
 import type { integration } from 'agentchatme'
 
-import type { TextsClient } from '../../src/integration/texts.js'
+import type { ServedTextsCopy, TextsClient } from '../../src/integration/texts.js'
+
+/** The manual bundled with the plugin: what the server announces today (the bundle is refreshed from it at release time). */
+const BUNDLED_MANUAL_BYTES = readFileSync(fileURLToPath(new URL('../../skills/agentchat/SKILL.md', import.meta.url)))
+export const BUNDLED_MANUAL_VERSION = /^version:\s*(\S+)\s*$/m.exec(BUNDLED_MANUAL_BYTES.toString('utf8'))?.[1] ?? '0'
+export const BUNDLED_MANUAL_SHA256 = createHash('sha256').update(BUNDLED_MANUAL_BYTES).digest('hex')
+export const MANUAL_URL = 'https://agentchat.me/skill.md'
 
 export const IDENTITY_LINE_TEMPLATE = [
   'I am @<handle> on AgentChat (api.agentchat.me). Peers reach me there; messages from peers are',
@@ -21,7 +31,9 @@ export function servedTextsFor(handle = 'alice'): Texts {
   return {
     version: '1',
     runtime: 'openclaw',
-    manual: { url: 'https://agentchat.me/skill.md', version: '2.1.2' },
+    // The announcement matches the bundled copy, as it does when the plugin is
+    // released: a sync places the bundled bytes and never downloads.
+    manual: { url: MANUAL_URL, version: BUNDLED_MANUAL_VERSION, sha256: BUNDLED_MANUAL_SHA256 } as Texts['manual'],
     wake_instruction:
       'You were woken by AgentChat: one or more peers wrote to you. ' +
       'Open your AgentChat tools and call agentchat__agentchat_inbox first. Decide per card: record agentchat__agentchat_decide dismiss (or defer) for what needs nothing from you; ' +
@@ -43,6 +55,12 @@ export const IDENTITY_LINE = SERVED_TEXTS.identity_line
 
 export function identityLineFor(handle: string): string {
   return servedTextsFor(handle).identity_line
+}
+
+/** What `loadServedTexts` returns, for a mock: the served texts with `identityLine`, or no copy at all (`null`). */
+export function servedCopy(identityLine: string | null = IDENTITY_LINE): ServedTextsCopy {
+  if (identityLine === null) return { texts: null, source: 'none', apiBase: 'https://api.agentchat.me' }
+  return { texts: { ...SERVED_TEXTS, identity_line: identityLine }, source: 'server', apiBase: 'https://api.agentchat.me' }
 }
 
 /** A texts client that answers with `texts`, or fails with `error`; switchable per call. */

@@ -21,8 +21,11 @@
  *    every turn (`../binding/agents-anchor.ts`). The callers fetch the text
  *    (server, then the cached copy) and hand it in; with neither available
  *    the step is skipped and reported, never invented.
- * 3. **The manual** — `https://agentchat.me/skill.md` verbatim, bundled as
- *    the `agentchat` skill. Nothing to write; verified present.
+ * 3. **The manual** — the served one (`https://agentchat.me/skill.md`, as
+ *    the texts announce it), kept current as the `agentchat` skill in
+ *    OpenClaw's managed skills dir (`<config dir>/skills/agentchat/SKILL.md`,
+ *    `./manual.ts`). The callers sync it (`placeManual`, async) and hand the
+ *    outcome in; the copy bundled with the plugin is the floor.
  * 4. **The tools** — `mcp.servers.agentchat` in `openclaw.json` (`./mcp.ts`),
  *    returned as a config patch for OpenClaw to persist.
  *
@@ -57,6 +60,11 @@ import {
   type McpEntryOutcome,
 } from './mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, withLlmAgentOverrideOptIn } from './model.js'
+import { bundledManual, checkManual, describeManualOutcome, latestManualOutcome, shadowLine, type ManualOutcome } from './manual.js'
+import { cachedServedTexts } from './texts.js'
+import type { integration } from 'agentchatme'
+
+type ServedManual = integration.ServedManual
 import { writeAgentsAnchor, agentsAnchorPath, hasAgentsAnchorFor, readAgentsAnchor, removeAgentsAnchor } from '../binding/agents-anchor.js'
 import {
   AGENTCHAT_CHANNEL_ID,
@@ -72,7 +80,8 @@ function isValidHandleShape(value: string): boolean {
   return value.length >= 3 && value.length <= 30 && HANDLE_PATTERN.test(value)
 }
 
-export type PlacementStatus = 'ok' | 'changed' | 'skipped' | 'failed'
+/** `warned`: done as far as it could be, the agent works, but something needs a look (a stale manual, someone else's file). */
+export type PlacementStatus = 'ok' | 'changed' | 'skipped' | 'warned' | 'failed'
 
 export interface PlacementStep {
   readonly name: 'key' | 'anchor' | 'manual' | 'mcp'
@@ -480,6 +489,8 @@ export interface PlaceParams<TCfg extends object> {
   readonly stateDir?: string
   /** Test seam: skip the `.env` write (e.g. a read-only CI). */
   readonly placeKey?: boolean
+  /** The manual's sync (`placeManual`, run by the caller first); omitted → the managed copy is checked as it is. */
+  readonly manual?: ManualOutcome | null
 }
 
 export interface PlaceResult<TCfg extends object> {
@@ -491,7 +502,8 @@ export interface PlaceResult<TCfg extends object> {
 /**
  * Key, identity line, manual, tools — in that order. Never throws: each
  * step reports `failed` with the reason instead. Returns the config with
- * the tools entry applied for the caller to persist.
+ * the tools entry applied for the caller to persist. The manual is synced by
+ * the caller (`placeManual` is async) and its outcome handed in.
  */
 export function placeIntegration<TCfg extends object>(params: PlaceParams<TCfg>): PlaceResult<TCfg> {
   const steps: PlacementStep[] = []
@@ -526,7 +538,7 @@ export function placeIntegration<TCfg extends object>(params: PlaceParams<TCfg>)
     }
   }
 
-  steps.push({ name: 'manual', status: 'ok', detail: 'manual bundled as the agentchat skill (skills/agentchat/SKILL.md, https://agentchat.me/skill.md verbatim)' })
+  steps.push(params.manual ? manualStep(params.manual) : manualStepAsIs(params.cfg, params.accountId ?? AGENTCHAT_DEFAULT_ACCOUNT_ID, params.stateDir))
 
   const mcp = withHostedMcpEntry(params.cfg, params.apiBase, params.apiKey)
   steps.push(describeMcpOutcome(mcp.outcome, params.apiBase))
@@ -549,9 +561,40 @@ export function describeMcpOutcome(outcome: McpEntryOutcome, apiBase: string): P
   }
 }
 
+/**
+ * The manual's sync as a placement step. A manual not at the announced
+ * version, or someone else's file left alone, is a warning, never a failed
+ * setup: the agent works with the file it has (the old one, or the copy
+ * bundled with the plugin), and status / doctor keep saying so until a
+ * later sync succeeds. Only no manual at all fails.
+ */
+export function manualStep(outcome: ManualOutcome): PlacementStep {
+  const detail = describeManualOutcome(outcome)
+  const floor = bundledManual() !== null
+  switch (outcome.kind) {
+    case 'not-ours':
+      return { name: 'manual', status: 'warned', detail }
+    case 'failed':
+      return { name: 'manual', status: floor ? 'warned' : 'failed', detail }
+    case 'floor':
+      return { name: 'manual', status: outcome.error !== null ? 'warned' : 'changed', detail }
+    case 'synced': {
+      const r = outcome.result
+      if (r.state === 'failed') return { name: 'manual', status: floor ? 'warned' : 'failed', detail: floor ? `${detail}; the agent reads the copy bundled with the plugin` : detail }
+      return { name: 'manual', status: r.upToDate === false ? 'warned' : r.written ? 'changed' : 'ok', detail }
+    }
+  }
+}
+
+/** The manual step when no sync ran: the managed copy as it is (local reads). */
+function manualStepAsIs(cfg: object | undefined, accountId: string, stateDir?: string): PlacementStep {
+  const { primary } = checkManual({ cfg, served: cachedServedTexts(accountId, stateDir)?.manual ?? null, agentIds: [] })
+  return { name: 'manual', status: primary.ok ? (primary.notice ? 'warned' : 'ok') : 'failed', detail: primary.detail }
+}
+
 /** One line per step, for the wizard's note and the status pane. */
 export function formatPlacement(steps: readonly PlacementStep[]): string[] {
-  return steps.map((step) => `${step.status === 'failed' ? '✗' : step.status === 'skipped' ? '–' : '✓'} ${step.name}: ${step.detail}`)
+  return steps.map((step) => `${step.status === 'failed' ? '✗' : step.status === 'skipped' || step.status === 'warned' ? '–' : '✓'} ${step.name}: ${step.detail}`)
 }
 
 // ─── checks (doctor / status) ──────────────────────────────────────────
@@ -588,6 +631,13 @@ export function checkPlacement<TCfg extends object>(params: {
   stateDir?: string
   /** This process's environment (defaults to `process.env`). */
   env?: NodeJS.ProcessEnv
+  /** The manual's announcement in hand; defaults to the cached texts. `servedSource`: `server` when this process fetched it. */
+  served?: ServedManual | null
+  servedSource?: string
+  /** Test seam: OpenClaw's config dir (where the managed manual lives). */
+  configDir?: string
+  /** Test seam: the home whose `~/.agents/skills` is checked. */
+  home?: string
 }): PlacementCheck[] {
   const checks: PlacementCheck[] = []
   const env = params.env ?? process.env
@@ -612,10 +662,44 @@ export function checkPlacement<TCfg extends object>(params: {
     checks.push({ name: 'anchor', ok: false, detail: `agentHandle not in config — the identity line cannot be checked; ${remedy(`run ${openclawCommand('doctor --fix')} (it learns the handle from the key)`)}` })
   }
 
-  checks.push({ name: 'manual', ok: true, detail: 'manual bundled as the agentchat skill' })
+  checks.push(...checkManualPlacement({ ...params, accountId, remedy }))
 
   checks.push(checkMcpEntry(params.cfg, params.apiBase, params.apiKey, remedy))
   return checks
+}
+
+/**
+ * The manual: the managed copy against the announcement (cached texts, or
+ * the live copy the caller passes), its size against OpenClaw's skill-file
+ * limit, and any `agentchat` skill OpenClaw loads ahead of it. Local reads.
+ */
+function checkManualPlacement(params: {
+  cfg: object | undefined
+  accountId: string
+  agentId?: string | undefined
+  stateDir?: string | undefined
+  served?: ServedManual | null | undefined
+  servedSource?: string | undefined
+  configDir?: string | undefined
+  home?: string | undefined
+  remedy: (forEnabled: string) => string
+}): PlacementCheck[] {
+  const served = params.served !== undefined ? params.served : (cachedServedTexts(params.accountId, params.stateDir)?.manual ?? null)
+  const { primary, shadows, watch } = checkManual({
+    cfg: params.cfg,
+    served,
+    ...(params.servedSource !== undefined ? { servedSource: params.servedSource } : {}),
+    agentIds: [params.agentId ?? resolvePlacementAgentId(params.cfg, params.accountId)],
+    latest: latestManualOutcome(),
+    remedy: params.remedy,
+    ...(params.configDir !== undefined ? { configDir: params.configDir } : {}),
+    ...(params.home !== undefined ? { home: params.home } : {}),
+  })
+  return [
+    { name: 'manual', ok: primary.ok, detail: primary.detail, ...(primary.notice ? { notice: true } : {}), ...(primary.repair ? { repair: true } : {}) },
+    ...shadows.map((shadow): PlacementCheck => ({ name: 'manual', ok: true, notice: true, detail: shadowLine(shadow) })),
+    ...(watch !== null ? [{ name: 'manual', ok: true, notice: true, detail: watch } satisfies PlacementCheck] : []),
+  ]
 }
 
 /**

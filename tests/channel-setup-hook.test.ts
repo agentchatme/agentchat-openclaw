@@ -29,7 +29,8 @@ vi.mock('../src/setup-client.js', async (importOriginal) => {
 })
 vi.mock('../src/integration/texts.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/integration/texts.js')>()
-  return { ...actual, loadIdentityLine: vi.fn(async () => IDENTITY_LINE) }
+  const { servedCopy } = await import('./helpers/texts.js')
+  return { ...actual, loadServedTexts: vi.fn(async () => servedCopy(IDENTITY_LINE)) }
 })
 
 import { WizardCancelledError } from 'openclaw/plugin-sdk/setup'
@@ -41,6 +42,8 @@ import { agentchatChannelConfigSchema } from '../src/config-schema.js'
 import { writeAgentsAnchor } from '../src/binding/agents-anchor.js'
 import { getPluginRuntime, setPluginRuntime, isUsablePluginRuntime, resetPluginRuntimeForTest } from '../src/integration/runtime-holder.js'
 import { testKey } from './helpers/keys.js'
+import { placeServedManual, placedFromBundleLine } from './helpers/manual.js'
+import { managedManualPath, manualRecordPath } from '../src/integration/manual.js'
 import { apiKeyFilePathFor, removeAccountKeyFiles, resetTokenFileReadsForTest } from '../src/credentials/key-file.js'
 
 const KEY = testKey('n'.repeat(24))
@@ -318,6 +321,39 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
       expect(lines.some((l) => l.level === 'log' && l.line.includes('removed the identity line'))).toBe(true)
     })
 
+    it('disabling the last AgentChat account removes the manual this plugin kept current; re-enabling places it again', async () => {
+      await placeServedManual()
+      expect(fs.existsSync(managedManualPath())).toBe(true)
+      const prevCfg = substituted()
+      const nextCfg = agentchatPlugin.config.setAccountEnabled!({ cfg: prevCfg as never, accountId: 'default', enabled: false })
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg, accountId: 'default', runtime })
+      expect(fs.existsSync(managedManualPath())).toBe(false)
+      expect(fs.existsSync(manualRecordPath())).toBe(false)
+      expect(lines).toContainEqual({ level: 'log', line: `[agentchat:default] removed the AgentChat manual this plugin kept current (${managedManualPath()})` })
+      lines.length = 0
+      const reenabled = agentchatPlugin.config.setAccountEnabled!({ cfg: nextCfg, accountId: 'default', enabled: true })
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: nextCfg, nextCfg: reenabled, accountId: 'default', runtime })
+      expect(fs.existsSync(managedManualPath())).toBe(true)
+      expect(lines[0]).toEqual({ level: 'log', line: `[agentchat:default] ${placedFromBundleLine()}` })
+    })
+
+    it('disabling one account while another stays enabled keeps the manual (it is account-free)', async () => {
+      await placeServedManual()
+      const two = { agents: { defaults: { workspace } }, channels: { agentchat: { accounts: { a: { apiKey: KEY, agentHandle: 'alice' }, b: { apiKey: KEY, agentHandle: 'bob' } } } } }
+      const nextCfg = agentchatPlugin.config.setAccountEnabled!({ cfg: two as never, accountId: 'a', enabled: false })
+      await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: two as never, nextCfg, accountId: 'a', runtime })
+      expect(fs.existsSync(managedManualPath())).toBe(true)
+      expect(lines.some((l) => l.line.includes('manual'))).toBe(false)
+    })
+
+    it('deleting the last account removes only our own copy: a copy edited since stays, and says so', async () => {
+      await placeServedManual()
+      fs.appendFileSync(managedManualPath(), '\nmy notes\n')
+      await agentchatLifecycleAdapter.onAccountRemoved!({ prevCfg: substituted() as never, accountId: 'default', runtime })
+      expect(fs.readFileSync(managedManualPath(), 'utf8')).toContain('my notes')
+      expect(lines).toContainEqual({ level: 'log', line: `[agentchat:default] left ${managedManualPath()} in place: it is not the copy this plugin wrote (changed since, or someone else's)` })
+    })
+
     it('onAccountConfigChanged leaves the files alone when the patch would not pass the schema (OpenClaw will refuse the write)', async () => {
       fs.writeFileSync(anchorFile(), ANCHOR)
       const prevCfg = substituted()
@@ -347,7 +383,11 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
       const content = fs.readFileSync(anchorFile(), 'utf8')
       expect(content.startsWith('# me\n\n<!-- agentchat:start -->\n')).toBe(true)
       expect(content).toContain(IDENTITY_LINE)
-      expect(lines).toEqual([{ level: 'log', line: `[agentchat:default] placed the identity line for @alice in ${anchorFile()}` }])
+      // The manual first (account-free, needs no handle), then the identity line.
+      expect(lines).toEqual([
+        { level: 'log', line: `[agentchat:default] ${placedFromBundleLine()}` },
+        { level: 'log', line: `[agentchat:default] placed the identity line for @alice in ${anchorFile()}` },
+      ])
     })
 
     it('disable then re-enable through the hooks restores AGENTS.md byte for byte', async () => {
@@ -370,7 +410,7 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
       fs.writeFileSync(anchorFile(), odd)
       await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: substituted() as never, accountId: 'default', runtime })
       expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(odd)
-      expect(lines).toEqual([])
+      expect(lines).toEqual([{ level: 'log', line: `[agentchat:default] ${placedFromBundleLine()}` }])
     })
 
     it('onAccountConfigChanged on re-enable touches no file when the patch would not pass the schema', async () => {
@@ -379,7 +419,8 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
       const nextCfg = { ...prevCfg, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice', enabled: true, bogus: 'not in the schema' } } }
       await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: nextCfg as never, accountId: 'default', runtime })
       expect(fs.readFileSync(anchorFile(), 'utf8')).toBe('# me\n')
-      expect(lines).toEqual([{ level: 'error', line: '[agentchat:default] the re-enabled config does not pass the channel schema — not placing the identity line' }])
+      expect(lines).toEqual([{ level: 'error', line: '[agentchat:default] the re-enabled config does not pass the channel schema — not placing the manual or the identity line' }])
+      expect(fs.existsSync(managedManualPath())).toBe(false)
     })
 
     it('onAccountConfigChanged on re-enable without agentHandle writes nothing and points at doctor --fix', async () => {
@@ -387,8 +428,9 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
       const nextCfg = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, enabled: true } } }
       await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: nextCfg as never, accountId: 'default', runtime })
       expect(fs.existsSync(anchorFile())).toBe(false)
-      expect(lines).toHaveLength(1)
-      expect(lines[0]!.line).toMatch(/agentHandle not in config — run `openclaw doctor --fix`/)
+      expect(lines).toHaveLength(2)
+      expect(lines[0]!.line).toBe(`[agentchat:default] ${placedFromBundleLine()}`)
+      expect(lines[1]!.line).toMatch(/agentHandle not in config — run `openclaw doctor --fix`/)
     })
 
     it('a new key AgentChat turns away (channels add --token on an OpenClaw without the prepare hook) ends the command before the write', async () => {

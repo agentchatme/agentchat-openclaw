@@ -22,7 +22,8 @@ vi.mock('../../src/setup-client.js', async (importOriginal) => {
 
 vi.mock('../../src/integration/texts.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../src/integration/texts.js')>()
-  return { ...actual, loadIdentityLine: vi.fn(async () => IDENTITY_LINE) }
+  const { servedCopy } = await import('../helpers/texts.js')
+  return { ...actual, loadServedTexts: vi.fn(async () => servedCopy(IDENTITY_LINE)) }
 })
 
 import { agentchatDoctorAdapter } from '../../src/binding/doctor.js'
@@ -31,7 +32,11 @@ import { registerIntegration, resetRegistryForTest } from '../../src/binding/run
 import { noteCouldNotProcess, resetCouldNotProcessForTest } from '../../src/integration/could-not-process.js'
 import { accountTurns, resetRunningTurnsForTest } from '../../src/integration/running.js'
 import { placeIntegration, resetKeyMovedForTest } from '../../src/integration/placement.js'
-import { loadIdentityLine } from '../../src/integration/texts.js'
+import { loadServedTexts } from '../../src/integration/texts.js'
+import { servedCopy } from '../helpers/texts.js'
+import { placeServedManual, placedFromBundleLine, writeTextsCache } from '../helpers/manual.js'
+import { managedManualPath, manualRecordPath } from '../../src/integration/manual.js'
+import { createHash } from 'node:crypto'
 import { writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
 import { testKey } from '../helpers/keys.js'
 import { readAgentchatApiKey } from '../../src/channel-key.js'
@@ -44,7 +49,7 @@ describe('doctor adapter', () => {
   let workspace: string
   beforeEach(() => {
     workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'agentchat-doctor-'))
-    vi.mocked(loadIdentityLine).mockReset().mockResolvedValue(IDENTITY_LINE)
+    vi.mocked(loadServedTexts).mockReset().mockResolvedValue(servedCopy(IDENTITY_LINE))
     resetKeyMovedForTest()
   })
   afterEach(() => {
@@ -62,8 +67,13 @@ describe('doctor adapter', () => {
     expect(warnings.some((w) => w.includes('[agentchat:default] key:'))).toBe(true)
     expect(warnings.some((w) => w.includes('[agentchat:default] anchor:'))).toBe(true)
     expect(warnings.some((w) => w.includes('[agentchat:default] mcp:') && w.includes('(openclaw doctor --fix adds it)'))).toBe(true)
-    expect(warnings.some((w) => w.includes('manual'))).toBe(false)
-    expect(loadIdentityLine).not.toHaveBeenCalled()
+    // Only the plugin's own copy: it works, it does not update; doctor --fix places the one that does.
+    expect(warnings.filter((w) => w.includes('manual:'))).toEqual([
+      expect.stringMatching(
+        /^\[agentchat:default\] manual: only the copy bundled with the plugin \(\d+\.\d+\.\d+\) — the copy that keeps itself current \(.*skills\/agentchat\/SKILL\.md\) is not placed; the gateway places it when it starts — `openclaw gateway restart` places it now$/,
+      ),
+    ])
+    expect(loadServedTexts).not.toHaveBeenCalled()
   })
 
   /** An install from this release on: the config names the key file, never the key. */
@@ -74,6 +84,7 @@ describe('doctor adapter', () => {
   }
 
   it('is quiet once everything is placed and the key is in the environment', async () => {
+    await placeServedManual()
     const placed = placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
     const warnings = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
     expect(warnings).toEqual([])
@@ -81,6 +92,7 @@ describe('doctor adapter', () => {
 
   it('an install whose key is in plain text in openclaw.json (an earlier release) is told so, and doctor --fix moves it to an owner-only key file (T6-F09)', async () => {
     removeAccountKeyFiles('default')
+    await placeServedManual()
     const placed = placeIntegration({ cfg: cfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
     // A security warning: doctor shows it under Security, and its read-only runs too (they never call the preview hook).
     expect(await securityWarnings(placed.cfg)).toEqual([
@@ -105,6 +117,7 @@ describe('doctor adapter', () => {
   })
 
   it('the same key left in plain text next to the key file is flagged, and doctor --fix removes it (the file stays in use)', async () => {
+    await placeServedManual()
     const withCopy = keyFileCfg()
     ;(withCopy.channels.agentchat as Record<string, unknown>).apiKey = KEY
     const placed = placeIntegration({ cfg: withCopy, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
@@ -121,6 +134,7 @@ describe('doctor adapter', () => {
     fs.writeFileSync(`${configPath}.bak`, JSON.stringify({ channels: { agentchat: { apiKey: KEY } } }))
     fs.writeFileSync(`${configPath}.last-good`, JSON.stringify({ channels: { agentchat: { apiKey: KEY } } }))
     try {
+      await placeServedManual()
       const placed = placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
       const warnings = await securityWarnings(placed.cfg)
       expect(warnings).toHaveLength(1)
@@ -169,6 +183,7 @@ describe('doctor adapter', () => {
     expect(first.changes).toEqual([
       `placed the account's key as AGENTCHAT_API_KEY in ${path.join(process.env.OPENCLAW_STATE_DIR!, '.env')} for the hosted tools (restart the gateway: OpenClaw reads it only at start)`,
       `placed the identity line for @alice in ${path.join(workspace, 'AGENTS.md')}`,
+      `manual: ${placedFromBundleLine().replace(/^✓ manual: /, '')}`,
       'added mcp.servers.agentchat → https://api.agentchat.me/mcp (bearer template on AGENTCHAT_API_KEY)',
     ])
     expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toContain(IDENTITY_LINE)
@@ -179,12 +194,41 @@ describe('doctor adapter', () => {
   })
 
   it('repairConfig without the served text (AgentChat unreachable, nothing cached) writes no identity line and warns', async () => {
-    vi.mocked(loadIdentityLine).mockResolvedValueOnce(null)
+    vi.mocked(loadServedTexts).mockResolvedValueOnce(servedCopy(null))
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: cfg() as never, doctorFixCommand: 'fix', env: {} })
     expect(fixed.changes.some((c) => c.includes('identity line'))).toBe(false)
     expect(fixed.changes.some((c) => c.startsWith('added mcp.servers.agentchat'))).toBe(true)
     expect(fixed.warnings?.find((w) => w.includes('identity line'))).toMatch(/identity line for @alice not placed: the served identity line is not available/)
     expect(fs.existsSync(path.join(workspace, 'AGENTS.md'))).toBe(false)
+  })
+
+  it("the manual: a higher-tier agentchat skill and someone else's managed file are preview warnings; doctor --fix leaves both files alone and says so", async () => {
+    await placeServedManual()
+    const placed = placeIntegration({ cfg: keyFileCfg(), handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const shadow = path.join(workspace, '.agents', 'skills', 'agentchat', 'SKILL.md')
+    fs.mkdirSync(path.dirname(shadow), { recursive: true })
+    fs.writeFileSync(shadow, '---\nname: agentchat\ndescription: old\n---\n')
+    const preview = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: { AGENTCHAT_API_KEY: KEY } })
+    expect(preview).toEqual([expect.stringMatching(new RegExp(`^\\[agentchat:default\\] manual: ${shadow.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} is an agentchat skill in the workspace \\.agents/skills folder`))])
+    // ClawHub took over the managed copy.
+    fs.mkdirSync(path.join(path.dirname(managedManualPath()), '.clawhub'))
+    const before = fs.readFileSync(managedManualPath())
+    const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: placed.cfg as never, doctorFixCommand: 'fix', env: {} })
+    expect(fixed.warnings).toContainEqual(expect.stringMatching(/^\[agentchat\] manual: .*skills\/agentchat was installed from ClawHub \(\.clawhub\/ beside it\), so `openclaw skills update` manages it; this plugin leaves it alone/))
+    expect(fs.readFileSync(managedManualPath())).toEqual(before)
+    expect(fs.existsSync(shadow)).toBe(true)
+  })
+
+  it('doctor --fix brings a stale managed copy to the served manual', async () => {
+    await placeServedManual()
+    fs.writeFileSync(managedManualPath(), fs.readFileSync(managedManualPath(), 'utf8').replace(/^version: .*$/m, 'version: 2.0.0'))
+    // an old copy of ours, as an earlier release's sync left it
+    const record = JSON.parse(fs.readFileSync(manualRecordPath(), 'utf8'))
+    fs.writeFileSync(manualRecordPath(), JSON.stringify({ ...record, written: { ...record.written, sha256: createHash('sha256').update(fs.readFileSync(managedManualPath())).digest('hex') } }))
+    const preview = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: cfg() as never, doctorFixCommand: 'fix', env: {} })
+    expect(preview.find((w) => w.includes('manual:'))).toMatch(/manual: stale \(have 2\.0\.0, served \d+\.\d+\.\d+\)/)
+    const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: cfg() as never, doctorFixCommand: 'fix', env: {} })
+    expect(fixed.changes).toContainEqual(expect.stringMatching(/^manual: \d+\.\d+\.\d+ placed from the bundled copy \(the served version\) → .* \(was 2\.0\.0\)$/))
   })
 
   it('warns when more than one account is configured — the integration will not start', async () => {
@@ -203,10 +247,12 @@ describe('doctor adapter', () => {
   it('repairConfig (doctor --fix) places a missing identity line for the configured handle after a re-enable, keeping the rest of AGENTS.md', async () => {
     // after `channels remove` (identity line + our MCP entry gone) and `config set channels.agentchat.enabled true`
     fs.writeFileSync(path.join(workspace, 'AGENTS.md'), '# my agent\n\nhouse rules\n')
+    writeTextsCache() // what the fetch leaves behind (the fetch itself is stubbed here)
     const reenabled = { agents: { defaults: { workspace } }, channels: { agentchat: { apiKey: KEY, agentHandle: 'alice', enabled: true } } }
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: reenabled as never, doctorFixCommand: 'fix', env: {} })
     expect(fixed.changes).toContain(`placed the identity line for @alice in ${path.join(workspace, 'AGENTS.md')}`)
     expect(fixed.changes.some((c) => c.startsWith('added mcp.servers.agentchat'))).toBe(true)
+    expect(fixed.changes).toContain(`manual: ${placedFromBundleLine().replace(/^✓ manual: /, '')}`)
     const content = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')
     expect(content.startsWith('# my agent\n\nhouse rules\n\n<!-- agentchat:start -->\n')).toBe(true)
     expect(content).toContain(IDENTITY_LINE)

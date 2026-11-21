@@ -28,7 +28,10 @@ export { createIntegrationLoop } from './integration/loop.js'
 export type { IntegrationLoop, IntegrationLoopOptions } from './integration/loop.js'
 export { createLoopTurnStarter, turnEndOf } from './integration/turns.js'
 export { accountTurns, trackerFor, MAX_HUNG_TURNS } from './integration/running.js'
-export { OpenClawTexts, createTextsCache, loadIdentityLine, spellTextsForOpenClaw } from './integration/texts.js'
+export { OpenClawTexts, createTextsCache, loadIdentityLine, loadServedTexts, spellTextsForOpenClaw } from './integration/texts.js'
+export type { ServedTextsCopy } from './integration/texts.js'
+export { managedManualPath, placeManual, checkManual, removeManagedManual } from './integration/manual.js'
+export type { ManualOutcome, ManualCheck, ManualShadow } from './integration/manual.js'
 export {
   mcpToolName,
   spellToolsForOpenClaw,

@@ -16,6 +16,12 @@
  * works) skips all of it: no socket, no wakes, no turns. The hosted tools
  * and the manual stay placed, so the agent can still use AgentChat when
  * something else wakes it.
+ *
+ * The served texts run on every path that gets as far as a parsed account —
+ * wake off, and the refusals (a second account, a key mismatch) too: the
+ * manual is account-free and kept current from them (`../integration/
+ * manual.ts`, one keeper per process). The identity line is refreshed only
+ * when it is unambiguous whose it is: never on a refusal.
  */
 
 import type { Texts } from 'agentchatme'
@@ -40,6 +46,7 @@ import { openclawCommand } from '../cli-command.js'
 import { registerIntegration, unregisterIntegration, getIntegration } from './runtime-registry.js'
 import { createIntegrationLoop } from '../integration/loop.js'
 import { OpenClawTexts, createTextsCache, spellTextsForOpenClaw } from '../integration/texts.js'
+import { ManualKeeper, keepManualCurrent, type ManualClaim } from '../integration/manual.js'
 import { OVERDUE_SLACK_MS, TURN_OVERDUE_MS, accountTurns, hungTurnsReason, isOverdue, overdueTurnLine, restartHoldLines } from '../integration/running.js'
 import { createAfterTurnRecorder } from '../integration/after-turn.js'
 import { TurnStore } from '../integration/turn-store.js'
@@ -68,6 +75,7 @@ import type { SocketState } from '../integration/socket.js'
 import { createInMemoryMetrics } from '../metrics.js'
 import { resolveOpenClawDefaultAgentId } from '../openclaw-layout.js'
 import { getClient } from './sdk-client.js'
+import type { integration } from 'agentchatme'
 
 function adaptLog(log: ChannelGatewayContext['log']): Logger | undefined {
   if (!log) return undefined
@@ -183,6 +191,91 @@ export function resetHostedMcpUpdateWarningsForTest(): void {
   mcpUpdateWarned.clear()
 }
 
+/** What runs for an account whatever its path: the texts cache, the identity line refresh, the manual. */
+export interface ServedTexts {
+  readonly cache: integration.TextsCache
+  readonly texts: OpenClawTexts
+  /** The manual's keeper claim (the keeper is process-wide; released with the account). */
+  readonly manual: ManualClaim
+  stop(): void
+}
+
+/**
+ * The served texts for an account: the kit's cache (the file copy at once,
+ * one fetch, then daily, backing off after a failure), the identity line
+ * refreshed from every copy that changes (`handle` given: only when it is
+ * unambiguous whose line it is), and the manual kept current from them.
+ * Unreachable with nothing cached → the account starts anyway.
+ */
+export async function startServedTexts(params: {
+  ctx: Pick<ChannelGatewayContext, 'accountId' | 'cfg' | 'log'>
+  client: Parameters<typeof createTextsCache>[0]['client']
+  logger: Logger
+  handle: string | undefined
+}): Promise<ServedTexts> {
+  const { ctx, client, logger, handle } = params
+  // Upgrade cleanup: the invite ledger and an old-shape texts cache.
+  for (const file of removeOldStateFiles(ctx.accountId)) logger.info({ file }, 'removed a file an earlier release kept (no longer used)')
+  const cache = createTextsCache({ client, accountId: ctx.accountId, logger })
+  const texts = new OpenClawTexts(cache)
+  const first = await cache.start()
+  if (first) logger.info({ version: first.version, manual: first.manual?.version, source: cache.source }, 'served texts in hand')
+  else logger.warn({ err: cache.lastError }, 'served texts not available yet (AgentChat unreachable, nothing cached) — nothing is gated until the first copy arrives')
+  if (handle) {
+    // The served identity line replaces a placed one that differs (an
+    // install upgraded from a release that bundled the line gets the
+    // served one on its first start): once from the copy in hand, then on
+    // every copy that changes. An absent line is the wizard's / doctor's
+    // to place.
+    const refresh = (copy: Texts) => {
+      const refreshed = refreshIdentityLine(ctx.cfg, ctx.accountId, handle, spellTextsForOpenClaw(copy).identity_line)
+      if (refreshed.outcome === 'updated') ctx.log?.info?.(`[agentchat:${ctx.accountId}] identity line refreshed from the served texts in ${refreshed.path}`)
+      else if (refreshed.outcome === 'failed') ctx.log?.warn?.(`[agentchat:${ctx.accountId}] identity line could not be refreshed in ${refreshed.path}: ${refreshed.detail ?? 'unknown error'}`)
+    }
+    if (first) refresh(first)
+    cache.onChange((copy) => refresh(copy))
+  }
+  // The manual: one keeper per process on this account's texts (the next
+  // account still running takes over when this one stops).
+  const manual = keepManualCurrent(
+    ctx.accountId,
+    () =>
+      new ManualKeeper({
+        cache,
+        cfg: readLiveConfig(ctx.cfg).cfg,
+        log: {
+          info: (line) => ctx.log?.info?.(line),
+          warn: (line) => ctx.log?.warn?.(line),
+          debug: (line) => ctx.log?.debug?.(line),
+        },
+      }),
+  )
+  let stopped = false
+  return {
+    cache,
+    texts,
+    manual,
+    stop() {
+      if (stopped) return
+      stopped = true
+      manual.release()
+      cache.stop()
+    },
+  }
+}
+
+/** The served texts of an account that runs no integration (wake off, refused): stopped on abort or `stopAccount`. */
+const passiveTexts = new Map<string, ServedTexts>()
+
+async function holdPassive(ctx: Pick<ChannelGatewayContext, 'accountId' | 'abortSignal'>, served: ServedTexts): Promise<void> {
+  passiveTexts.get(ctx.accountId)?.stop()
+  passiveTexts.set(ctx.accountId, served)
+  await waitUntilAbort(ctx.abortSignal, () => {
+    served.stop()
+    if (passiveTexts.get(ctx.accountId) === served) passiveTexts.delete(ctx.accountId)
+  })
+}
+
 export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAccount> = {
   async startAccount(ctx) {
     const account = ctx.account
@@ -208,13 +301,27 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     void updateHostedMcpEntry(ctx, config.apiBase, config.apiKey)
 
     const wakeMode = readWakeModeFromEnv()
+    // One account per gateway in this release (see `multiAccountRefusal`):
+    // a second account's turn would call the hosted tools as the first.
+    const refusal = multiAccountRefusal(ctx.cfg)
+    // The hosted tools' bearer is `${AGENTCHAT_API_KEY}` from this
+    // process's environment; the socket and the gate use the account's key.
+    // Two different keys: every turn would act as another agent (or, after
+    // a key change, on the old key, without tools) while health stays
+    // green. Refused, in plain words; a restart from a clean shell fixes it.
+    const envKey = readApiKeyVariable()
+    const keyMismatch = refusal === null && toolsUseOtherKey(ctx.cfg, config.apiBase, config.apiKey, envKey) ? gatewayKeyMismatch(config.apiKey, envKey) : null
+    const client = getClient({ accountId: ctx.accountId, config })
+    // The identity line is this account's only when nothing is refused.
+    const identityHandle = refusal === null && keyMismatch === null ? config.agentHandle : undefined
+
     if (wakeMode.mode === 'off') {
       ctx.log?.info?.(
-        `[agentchat:${ctx.accountId}] ${wakeMode.variable}=off — no socket, no wakes, no turns; the hosted tools and the manual stay placed` +
+        `[agentchat:${ctx.accountId}] ${wakeMode.variable}=off — no socket, no wakes, no turns; the hosted tools stay placed, and the manual and the identity line are kept current` +
           (wakeMode.variable === LEGACY_WAKE_MODE_ENV ? ` (${LEGACY_WAKE_MODE_ENV} is the old spelling; ${WAKE_MODE_ENV} is the new one)` : ''),
       )
       ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, linked: true, statusState: 'disabled' }, 'stopped'))
-      await waitUntilAbort(ctx.abortSignal, () => undefined)
+      await holdPassive(ctx, await startServedTexts({ ctx, client, logger, handle: identityHandle }))
       return
     }
     if (readLegacyReplyGateFailOpenFromEnv()) {
@@ -223,28 +330,18 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       )
     }
 
-    // One account per gateway in this release (see `multiAccountRefusal`):
-    // a second account's turn would call the hosted tools as the first.
-    const refusal = multiAccountRefusal(ctx.cfg)
     if (refusal) {
       ctx.log?.error?.(`[agentchat:${ctx.accountId}] integration not started — ${refusal}`)
       // `lastError` is what `openclaw channels status` prints for a blocked account: `error:…` on its line, and from 2026.11 under Warnings too.
       ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastError: refusal, lastDisconnect: { at: Date.now(), error: refusal } }, 'blocked'))
-      await waitUntilAbort(ctx.abortSignal, () => undefined)
+      // The manual is account-free: kept current even here (one keeper per process). No identity line: whose would it be?
+      await holdPassive(ctx, await startServedTexts({ ctx, client, logger, handle: undefined }))
       return
     }
-
-    // The hosted tools' bearer is `${AGENTCHAT_API_KEY}` from this
-    // process's environment; the socket and the gate use the account's key.
-    // Two different keys: every turn would act as another agent (or, after
-    // a key change, on the old key, without tools) while health stays
-    // green. Refused, in plain words; a restart from a clean shell fixes it.
-    const envKey = readApiKeyVariable()
-    const keyMismatch = toolsUseOtherKey(ctx.cfg, config.apiBase, config.apiKey, envKey) ? gatewayKeyMismatch(config.apiKey, envKey) : null
     if (keyMismatch) {
       ctx.log?.error?.(`[agentchat:${ctx.accountId}] integration not started — ${keyMismatch}`)
       ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'not-linked', lastError: gatewayKeyMismatchStatus(), lastDisconnect: { at: Date.now(), error: keyMismatch } }, 'blocked'))
-      await waitUntilAbort(ctx.abortSignal, () => undefined)
+      await holdPassive(ctx, await startServedTexts({ ctx, client, logger, handle: undefined }))
       return
     }
     if (config.apiKeySource === 'config' || config.apiKeyPlainTextCopy) {
@@ -266,7 +363,6 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
         `[agentchat:${ctx.accountId}] this account is routed to agent "${agentIdOverride}", not OpenClaw's default — the gate call will be refused (LLM_COMPLETION_NOT_AUTHORIZED) until ${LLM_AGENT_OVERRIDE_PATH} is true; \`${openclawCommand('doctor --fix')}\` writes it`,
       )
     }
-    const client = getClient({ accountId: ctx.accountId, config })
     const gateDeadlineMs = readReplyGateTimeoutMsFromEnv() ?? DEFAULT_GATE_TIMEOUT_MS
     /** Which 30-minute mark each long run was last reported at. */
     const overdueWarned = new Map<string, number>()
@@ -320,164 +416,151 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
     turns.adopt()
     for (const line of restartHoldLines(turns)) ctx.log?.warn?.(`[agentchat:${ctx.accountId}] ${line}`)
 
-    // The served texts: the kit's cache — the file copy at once, one fetch,
-    // then daily (backing off after a failure). Unreachable with nothing
-    // cached → the integration starts anyway; nothing is gated until the
-    // first copy arrives.
-    // Upgrade cleanup: the invite ledger and an old-shape texts cache.
-    for (const file of removeOldStateFiles(ctx.accountId)) logger.info({ file }, 'removed a file an earlier release kept (no longer used)')
-    const textsCache = createTextsCache({ client, accountId: ctx.accountId, logger })
-    const texts = new OpenClawTexts(textsCache)
-    const first = await textsCache.start()
-    if (first) logger.info({ version: first.version, manual: first.manual?.version, source: textsCache.source }, 'served texts in hand')
-    else logger.warn({ err: textsCache.lastError }, 'served texts not available yet (AgentChat unreachable, nothing cached) — nothing is gated until the first copy arrives')
-    const handle = config.agentHandle
-    if (handle) {
-      // The served identity line replaces a placed one that differs (an
-      // install upgraded from a release that bundled the line gets the
-      // served one on its first start): once from the copy in hand, then on
-      // every copy that changes. An absent line is the wizard's / doctor's
-      // to place.
-      const refresh = (copy: Texts) => {
-        const refreshed = refreshIdentityLine(ctx.cfg, ctx.accountId, handle, spellTextsForOpenClaw(copy).identity_line)
-        if (refreshed.outcome === 'updated') ctx.log?.info?.(`[agentchat:${ctx.accountId}] identity line refreshed from the served texts in ${refreshed.path}`)
-        else if (refreshed.outcome === 'failed') ctx.log?.warn?.(`[agentchat:${ctx.accountId}] identity line could not be refreshed in ${refreshed.path}: ${refreshed.detail ?? 'unknown error'}`)
-      }
-      if (first) refresh(first)
-      textsCache.onChange((copy) => refresh(copy))
-    }
+    // The served texts, the identity line and the manual (`startServedTexts`);
+    // the registry stops them with the loop. Unreachable with nothing cached →
+    // the integration starts anyway; nothing is gated until the first copy
+    // arrives.
+    const served = await startServedTexts({ ctx, client, logger, handle: identityHandle })
+    const { texts, cache: textsCache } = served
 
     // One recorder per account for the socket's counters. OpenClaw offers a plugin no Prometheus registry (see
     // `metrics.ts`), so the counters live here and the status probe reads
     // them: `openclaw channels capabilities --channel agentchat`.
     const metrics = createInMemoryMetrics()
 
-    await registerIntegration({
-      accountId: ctx.accountId,
-      config,
-      logger,
-      socketOptions: { client, metrics },
-      build: (socket) => {
-        const loop = createIntegrationLoop({
-          accountId: ctx.accountId,
-          agentId,
-          client,
-          texts,
-          socket: socket.realtime,
-          handle: config.agentHandle,
-          // The gate call's deadline is the kit's (AGENTCHAT_REPLY_GATE_TIMEOUT_MS,
-          // default 20 s): past it the kit aborts the call and counts it timed
-          // out — a slow model is a timeout, never the conversation's failure.
-          // The call's own abort comes later, as a backstop.
-          callModel: createRuntimeModelCall({ agentIdOverride, timeoutMs: gateDeadlineMs + GATE_ABORT_BACKSTOP_MS }),
-          gateCallTimeoutMs: gateDeadlineMs,
-          // Could not process: before a failed gate call or turn is reported as
-          // its conversation's, the kit may ask whether the model answers now —
-          // one minimal call on the gate's path (same agent, no tools, no peer
-          // content, 45 s), never a login check.
-          checkRuntime: createRuntimeCheck({ agentIdOverride }),
-          // A turn holds its conversation until OpenClaw confirms its run
-          // ended; a wait that elapses is asked again (`integration/run.ts`).
-          startRun: createRuntimeTurnStarter({
-            onStillRunning,
-            onWaitError: ({ runId, sessionKey, error, attempt, retryInMs }) =>
-              logger[attempt === 1 ? 'warn' : 'debug']({ runId, sessionKey, error, attempt, retryInMs }, 'waiting for the turn to end failed — asking OpenClaw again'),
-          }),
-          // Gating waits until a turn can have the hosted tools (the MCP
-          // entry in the LIVE config — OpenClaw hot-applies `mcp.*` — and
-          // its key in this process): a connect wake on a cold gateway
-          // otherwise spends a gate call and runs a turn that cannot look.
-          readiness: () => {
-            const live = readLiveConfig(ctx.cfg)
-            // Too many hung turns: stop gating (each would only add a turn
-            // that waits behind them); status and doctor say why.
-            const hung = hungTurnsReason(turns, live.cfg)
-            if (hung) return { ready: false, reason: hung }
-            return turnReadiness({ cfg: live.cfg, apiBase: config.apiBase, apiKey: config.apiKey, live: live.live })
-          },
-          // The account's runs outlive this loop: a config change restarts
-          // the account while its runs go on in OpenClaw, so every loop for
-          // the account shares the same turns (and the kit tracker in them).
-          turns,
-          logger,
-          metrics,
-          gateEnabled: readReplyGateEnabledFromEnv(),
-        })
-        // True from the first rejected key until a HELLO is accepted again
-        // (or the account stops). The SDK retries a rejected key with a fresh
-        // HELLO every 10–15 min and reports each rejection as `blocked`; a
-        // network failure in between takes it through `backoff`. For the
-        // operator that is one situation, so it is one error line and one
-        // steady `blocked` status at the first `blocked`, cleared at the next
-        // accepted HELLO; every signal in between is a debug line, never a
-        // health flap.
-        let blocked = false
-        return {
-          loop,
-          texts,
-          textsCache,
-          handlers: {
-            onConnected: (at) => {
-              if (blocked) {
-                blocked = false
-                ctx.log?.info?.(`[agentchat:${ctx.accountId}] key accepted again — blocked cleared`)
-              }
-              ctx.log?.info?.(`[agentchat:${ctx.accountId}] connected at ${new Date(at).toISOString()} (agent ${agentId})`)
-              ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: true, linked: true, statusState: 'linked', lastConnectedAt: at, lastError: null }, 'ready'))
+    // A registration that throws (the socket or the loop could not start) must not leave the texts cache and the manual claim running.
+    try {
+      await registerIntegration({
+        accountId: ctx.accountId,
+        config,
+        logger,
+        socketOptions: { client, metrics },
+        build: (socket) => {
+          const loop = createIntegrationLoop({
+            accountId: ctx.accountId,
+            agentId,
+            client,
+            texts,
+            socket: socket.realtime,
+            handle: config.agentHandle,
+            // The gate call's deadline is the kit's (AGENTCHAT_REPLY_GATE_TIMEOUT_MS,
+            // default 20 s): past it the kit aborts the call and counts it timed
+            // out — a slow model is a timeout, never the conversation's failure.
+            // The call's own abort comes later, as a backstop.
+            callModel: createRuntimeModelCall({ agentIdOverride, timeoutMs: gateDeadlineMs + GATE_ABORT_BACKSTOP_MS }),
+            gateCallTimeoutMs: gateDeadlineMs,
+            // Could not process: before a failed gate call or turn is reported as
+            // its conversation's, the kit may ask whether the model answers now —
+            // one minimal call on the gate's path (same agent, no tools, no peer
+            // content, 45 s), never a login check.
+            checkRuntime: createRuntimeCheck({ agentIdOverride }),
+            // A turn holds its conversation until OpenClaw confirms its run
+            // ended; a wait that elapses is asked again (`integration/run.ts`).
+            startRun: createRuntimeTurnStarter({
+              onStillRunning,
+              onWaitError: ({ runId, sessionKey, error, attempt, retryInMs }) =>
+                logger[attempt === 1 ? 'warn' : 'debug']({ runId, sessionKey, error, attempt, retryInMs }, 'waiting for the turn to end failed — asking OpenClaw again'),
+            }),
+            // Gating waits until a turn can have the hosted tools (the MCP
+            // entry in the LIVE config — OpenClaw hot-applies `mcp.*` — and
+            // its key in this process): a connect wake on a cold gateway
+            // otherwise spends a gate call and runs a turn that cannot look.
+            readiness: () => {
+              const live = readLiveConfig(ctx.cfg)
+              // Too many hung turns: stop gating (each would only add a turn
+              // that waits behind them); status and doctor say why.
+              const hung = hungTurnsReason(turns, live.cfg)
+              if (hung) return { ready: false, reason: hung }
+              return turnReadiness({ cfg: live.cfg, apiBase: config.apiBase, apiKey: config.apiKey, live: live.live })
             },
-            onBlocked: (info) => {
-              const close = `close ${info.code}${info.reason ? ` ${info.reason}` : ''}`
-              const next = info.retryInMs === null ? 'no retry scheduled' : `next HELLO in about ${Math.max(1, Math.round(info.retryInMs / 60_000))} min`
-              if (blocked) {
-                ctx.log?.debug?.(`[agentchat:${ctx.accountId}] still blocked (${close}; ${next})`)
-                return
-              }
-              blocked = true
-              ctx.log?.error?.(
-                `[agentchat:${ctx.accountId}] key rejected (${close}) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted (${next}); store a new key with ${openclawCommand('channels add --channel agentchat')} (Recover by email code, or --token-file <path>), then restart the gateway (${openclawCommand('gateway restart')}) so the hosted tools use it too`,
-              )
-              ctx.setStatus(
-                withLifecycle(
-                  {
-                    ...ctx.getStatus(),
-                    running: false,
-                    connected: false,
-                    statusState: 'not-linked',
-                    lastError: `the server refused the API key (${close}); store a new key with ${openclawCommand('channels add --channel agentchat')}, then restart the gateway (${openclawCommand('gateway restart')})`,
-                    lastDisconnect: { at: Date.now(), error: `key rejected: ${close}` },
-                  },
-                  'blocked',
-                ),
-              )
-            },
-            onError: (err) => {
-              // While blocked the one error line already said it.
-              ctx.log?.[blocked ? 'debug' : 'warn']?.(`[agentchat:${ctx.accountId}] socket error: ${err.message}`)
-            },
-            onStateChanged: (next, prev) => {
-              // The status follows the SDK's state. `ready` is reported by
-              // onConnected (it has the time); `connecting` keeps whatever
-              // came before (`starting` on the first attempt, `recovering`
-              // after a backoff, `blocked` during a blocked retry).
-              switch (next) {
-                case 'backoff':
-                  if (blocked) {
-                    ctx.log?.debug?.(`[agentchat:${ctx.accountId}] socket in backoff while blocked (from ${prev})`)
+            // The account's runs outlive this loop: a config change restarts
+            // the account while its runs go on in OpenClaw, so every loop for
+            // the account shares the same turns (and the kit tracker in them).
+            turns,
+            logger,
+            metrics,
+            gateEnabled: readReplyGateEnabledFromEnv(),
+          })
+          // True from the first rejected key until a HELLO is accepted again
+          // (or the account stops). The SDK retries a rejected key with a fresh
+          // HELLO every 10–15 min and reports each rejection as `blocked`; a
+          // network failure in between takes it through `backoff`. For the
+          // operator that is one situation, so it is one error line and one
+          // steady `blocked` status at the first `blocked`, cleared at the next
+          // accepted HELLO; every signal in between is a debug line, never a
+          // health flap.
+          let blocked = false
+          return {
+            loop,
+            texts,
+            textsCache,
+            manual: served.manual,
+            handlers: {
+              onConnected: (at) => {
+                if (blocked) {
+                  blocked = false
+                  ctx.log?.info?.(`[agentchat:${ctx.accountId}] key accepted again — blocked cleared`)
+                }
+                ctx.log?.info?.(`[agentchat:${ctx.accountId}] connected at ${new Date(at).toISOString()} (agent ${agentId})`)
+                ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: true, linked: true, statusState: 'linked', lastConnectedAt: at, lastError: null }, 'ready'))
+              },
+              onBlocked: (info) => {
+                const close = `close ${info.code}${info.reason ? ` ${info.reason}` : ''}`
+                const next = info.retryInMs === null ? 'no retry scheduled' : `next HELLO in about ${Math.max(1, Math.round(info.retryInMs / 60_000))} min`
+                if (blocked) {
+                  ctx.log?.debug?.(`[agentchat:${ctx.accountId}] still blocked (${close}; ${next})`)
+                  return
+                }
+                blocked = true
+                ctx.log?.error?.(
+                  `[agentchat:${ctx.accountId}] key rejected (${close}) — the server refused the key; the SDK retries a fresh HELLO every 10–15 min until it is accepted (${next}); store a new key with ${openclawCommand('channels add --channel agentchat')} (Recover by email code, or --token-file <path>), then restart the gateway (${openclawCommand('gateway restart')}) so the hosted tools use it too`,
+                )
+                ctx.setStatus(
+                  withLifecycle(
+                    {
+                      ...ctx.getStatus(),
+                      running: false,
+                      connected: false,
+                      statusState: 'not-linked',
+                      lastError: `the server refused the API key (${close}); store a new key with ${openclawCommand('channels add --channel agentchat')}, then restart the gateway (${openclawCommand('gateway restart')})`,
+                      lastDisconnect: { at: Date.now(), error: `key rejected: ${close}` },
+                    },
+                    'blocked',
+                  ),
+                )
+              },
+              onError: (err) => {
+                // While blocked the one error line already said it.
+                ctx.log?.[blocked ? 'debug' : 'warn']?.(`[agentchat:${ctx.accountId}] socket error: ${err.message}`)
+              },
+              onStateChanged: (next, prev) => {
+                // The status follows the SDK's state. `ready` is reported by
+                // onConnected (it has the time); `connecting` keeps whatever
+                // came before (`starting` on the first attempt, `recovering`
+                // after a backoff, `blocked` during a blocked retry).
+                switch (next) {
+                  case 'backoff':
+                    if (blocked) {
+                      ctx.log?.debug?.(`[agentchat:${ctx.accountId}] socket in backoff while blocked (from ${prev})`)
+                      return
+                    }
+                    ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: false, statusState: 'unstable' }, 'recovering'))
                     return
-                  }
-                  ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: true, connected: false, statusState: 'unstable' }, 'recovering'))
-                  return
-                case 'stopped':
-                  ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'configured' }, 'stopped'))
-                  return
-                default:
-                  return
-              }
+                  case 'stopped':
+                    ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false, statusState: 'configured' }, 'stopped'))
+                    return
+                  default:
+                    return
+                }
+              },
             },
-          },
-        }
-      },
-    })
+          }
+        },
+      })
+    } catch (err) {
+      served.stop()
+      throw err
+    }
 
     // Keep the channel task pending until OpenClaw aborts it. A resolved
     // promise would read as "channel exited" and trigger auto-restart.
@@ -487,11 +570,18 @@ export const agentchatGatewayAdapter: ChannelGatewayAdapter<AgentchatResolvedAcc
       } catch (err) {
         ctx.log?.error?.(`[agentchat:${ctx.accountId}] unregister failed on abort: ${err instanceof Error ? err.message : String(err)}`)
       }
+      // Idempotent: the registry stopped them with the loop (also when it never got that far).
+      served.stop()
     })
   },
 
   async stopAccount(ctx) {
     await unregisterIntegration(ctx.accountId)
+    const passive = passiveTexts.get(ctx.accountId)
+    if (passive) {
+      passive.stop()
+      passiveTexts.delete(ctx.accountId)
+    }
     ctx.setStatus(withLifecycle({ ...ctx.getStatus(), running: false, connected: false }, 'stopped'))
   },
 }

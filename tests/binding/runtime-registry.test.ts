@@ -77,13 +77,14 @@ const stubTextsCache = () => {
 function register(accountId: string, failStart = false) {
   const loop = stubLoop(failStart)
   const textsCache = stubTextsCache()
+  const manual = { released: 0, release() { this.released += 1 } }
   return registerIntegration({
     accountId,
     config: makeConfig(),
     logger: makeLogger(),
     createSocket: () => new StubSocket() as unknown as IntegrationSocket,
-    build: () => ({ loop: loop as unknown as IntegrationLoop, textsCache: textsCache as never, handlers: {} }),
-  }).then((entry) => ({ entry, loop, textsCache }))
+    build: () => ({ loop: loop as unknown as IntegrationLoop, textsCache: textsCache as never, manual, handlers: {} }),
+  }).then((entry) => ({ entry, loop, textsCache, manual }))
 }
 
 describe('runtime-registry', () => {
@@ -100,13 +101,14 @@ describe('runtime-registry', () => {
     expect(listActiveAccounts()).toEqual(['acct-1'])
   })
 
-  it('stops the loop, reports the socket stopped, and stops the texts timer on unregister', async () => {
-    const { entry, loop, textsCache } = await register('acct-1')
+  it('stops the loop, reports the socket stopped, and stops the texts timer and its manual keeper claim on unregister', async () => {
+    const { entry, loop, textsCache, manual } = await register('acct-1')
     await unregisterIntegration('acct-1')
     expect(getIntegration('acct-1')).toBeUndefined()
     expect(loop.stopped).toBe(1)
     expect((entry.socket as unknown as StubSocket).stoppedCount).toBe(1)
     expect(textsCache.stopped).toBe(1)
+    expect(manual.released).toBe(1)
   })
 
   it('unregister of a missing account is a no-op', async () => {

@@ -12,7 +12,9 @@
  * `agentHandle`, writes the llm opt-in for a non-default bound agent, and
  * places a missing identity line for the configured handle — fetching the
  * served text first (server, then the cached copy). An identity line
- * already holding that text is never rewritten.
+ * already holding that text is never rewritten. It also brings the manual
+ * in OpenClaw's managed skills dir to the served one (`placeManual`; a file
+ * there that is not this plugin's is left alone and reported).
  *
  * A disabled account gets one warning naming the re-enable route and no
  * repair: its identity line and tools entry are absent by design.
@@ -46,6 +48,7 @@ import {
   checkPlacement,
   dotEnvPath,
   keyCopiesAfterRunLine,
+  manualStep,
   noteKeyMovedOutOfConfig,
   placeApiKeyInDotEnv,
   readApiKeyFromDotEnv,
@@ -56,7 +59,8 @@ import { resolveAgentchatApiKey, type ConfiguredKey } from '../channel-key.js'
 import { tightenApiKeyFile, writeApiKeyFile } from '../credentials/key-file.js'
 import { DEFAULT_API_BASE, clientIdentityText, withHostedMcpEntry } from '../integration/mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, readLlmAgentOverrideOptIn, withLlmAgentOverrideOptIn } from '../integration/model.js'
-import { cachedIdentityLine, loadIdentityLine } from '../integration/texts.js'
+import { cachedIdentityLine, identityLineOf, loadServedTexts, type ServedTextsCopy } from '../integration/texts.js'
+import { placeManual } from '../integration/manual.js'
 import { resolveBoundAgentId, resolveOpenClawDefaultAgentId } from '../openclaw-layout.js'
 import { createSdkClient } from './sdk-client.js'
 
@@ -119,6 +123,8 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
     const warnings: string[] = []
     const refusal = multiAccountRefusal(cfg)
     if (refusal) warnings.push(`[${AGENTCHAT_CHANNEL_ID}] integration will not start — ${refusal}`)
+    // The manual is account-free: its lines once, with the first enabled account.
+    let manualReported = false
     for (const accountId of listConfiguredAccountIds(cfg)) {
       if (!isAgentchatAccountEnabled(cfg, accountId)) {
         warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${agentchatReenableHint(cfg, accountId)}`)
@@ -134,9 +140,11 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
         // Where the key sits on disk is a security warning (`security.collectWarnings` → `keyAtRestWarnings`): doctor shows it
         // under Security, and its read-only runs (--lint) too, which never call this hook.
         if (check.atRest) continue
+        if (check.name === 'manual' && manualReported) continue
         const fix = check.name === 'mcp' && check.repair && !check.ok ? ` (${doctorFixCommand} adds it)` : ''
         warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] ${check.name}: ${check.detail}${fix}`)
       }
+      manualReported = true
       const bound = resolveBoundAgentId(cfg, AGENTCHAT_CHANNEL_ID, accountId)
       const ambient = resolveOpenClawDefaultAgentId(cfg)
       if (bound && bound !== (ambient ?? bound) && !readLlmAgentOverrideOptIn(cfg)) {
@@ -177,6 +185,9 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
     // One identity line per workspace: with several accounts configured the
     // integration refuses to start and the line would flip between handles.
     const placeIdentityLines = multiAccountRefusal(cfg) === null
+    // The manual is account-free: synced once, from the first enabled account's texts.
+    let manualFrom: ServedTextsCopy | null = null
+    let manualKey: { apiKey: string; apiBase: string; accountId: string } | null = null
     for (const accountId of listConfiguredAccountIds(cfg)) {
       // Disabled: the identity line and the tools entry are absent by design.
       if (!isAgentchatAccountEnabled(cfg, accountId)) continue
@@ -216,14 +227,24 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
       }
       // The identity line for the configured handle (including one learnt
       // just above), with the served text. Present → untouched, byte for byte.
+      if (apiKey && manualKey === null) manualKey = { apiKey, apiBase, accountId }
       const handle = readAgentchatConfigField(next, accountId, 'agentHandle')
       if (apiKey && handle && placeIdentityLines) {
-        const identityLine = await loadIdentityLine({ client: createSdkClient({ apiKey, apiBase }), accountId })
-        const restored = restoreIdentityLine(next, accountId, handle, identityLine)
+        const served = await loadServedTexts({ client: createSdkClient({ apiKey, apiBase }), accountId })
+        manualFrom ??= served
+        const restored = restoreIdentityLine(next, accountId, handle, identityLineOf(served))
         if (restored.outcome === 'placed') changes.push(`placed the identity line for @${handle.replace(/^@/, '')} in ${restored.path}`)
         else if (restored.outcome === 'failed') warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] could not place the identity line for @${handle.replace(/^@/, '')}: ${restored.detail ?? 'unknown error'}`)
         else if (restored.outcome === 'skipped') warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] identity line for @${handle.replace(/^@/, '')} not placed: ${restored.detail ?? 'the served text is not available'}`)
       }
+    }
+    // The manual: the served one into OpenClaw's managed skills dir (someone
+    // else's file there is left alone and reported).
+    if (manualKey !== null) {
+      const served = manualFrom ?? (await loadServedTexts({ client: createSdkClient({ apiKey: manualKey.apiKey, apiBase: manualKey.apiBase }), accountId: manualKey.accountId }))
+      const step = manualStep(await placeManual({ texts: served.texts, source: served.source, apiBase: served.apiBase, cfg: next }))
+      if (step.status === 'changed') changes.push(`manual: ${step.detail}`)
+      else if (step.status === 'warned' || step.status === 'failed') warnings.push(`[${AGENTCHAT_CHANNEL_ID}] manual: ${step.detail}`)
     }
     // One hosted server entry per API base; every configured account on the
     // default base shares the single `agentchat` entry.

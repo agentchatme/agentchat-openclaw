@@ -34,7 +34,8 @@ vi.mock('../src/setup-client.js', async (importOriginal) => {
 })
 vi.mock('../src/integration/texts.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/integration/texts.js')>()
-  return { ...actual, loadIdentityLine: vi.fn(async () => IDENTITY_LINE) }
+  const { servedCopy } = await import('./helpers/texts.js')
+  return { ...actual, loadServedTexts: vi.fn(async () => servedCopy(IDENTITY_LINE)) }
 })
 
 import { WizardCancelledError } from 'openclaw/plugin-sdk/setup'

@@ -9,12 +9,16 @@
  *      `initialize`), because that is where every AgentChat tool lives;
  *   3. placement: the key in the gateway environment, the identity line in
  *      AGENTS.md (checked against the last served copy when one is cached),
- *      the manual, the `mcp.servers.agentchat` entry.
+ *      the manual (the managed copy against the announced version, its size,
+ *      a higher-precedence agentchat skill that would win over it), the
+ *      `mcp.servers.agentchat` entry.
  *
  * Plus the socket's live state when the integration is running, and what
  * the kit reported to AgentChat as could not process (its counts, and the
  * conversations the server paused for this agent).
  */
+
+import { AgentChatError, ConnectionError } from 'agentchatme'
 
 import { resolveAgentchatApiKey } from '../channel-key.js'
 import type { ChannelStatusAdapter, ChannelCapabilitiesDisplayLine } from './openclaw-types.js'
@@ -64,6 +68,21 @@ export type AgentchatProbeResult = {
   readonly disabled?: string
 }
 
+/**
+ * What a failed `getMe` says. A transport failure (no answer: DNS, a refused
+ * or reset connection, TLS, the probe's own deadline) is "AgentChat not
+ * reachable"; an answer that refuses the key keeps its own words.
+ */
+export function describeProbeFailure(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err)
+  if (err instanceof AgentChatError) return message
+  const name = err instanceof Error ? err.name : ''
+  if (err instanceof ConnectionError || name === 'AbortError' || name === 'TimeoutError' || /fetch failed|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|socket hang up|network|aborted|timed? ?out/i.test(message)) {
+    return `AgentChat not reachable (${message}) — the local checks below are from this machine's files`
+  }
+  return message
+}
+
 const PROBE_MIN_MS = 1_000
 const PROBE_MAX_MS = 10_000
 
@@ -84,36 +103,46 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
     const client = getClient({ accountId: account.accountId, config })
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), clampedTimeout)
-    let me: Awaited<ReturnType<typeof client.getMe>>
+    // AgentChat's answer, when there is one. Without it the local checks
+    // (placement: the key, the identity line, the manual, the tools entry)
+    // still run and print: offline they are what the operator needs to see.
+    let me: Awaited<ReturnType<typeof client.getMe>> | null = null
+    let unreachable: string | null = null
     try {
       me = await client.getMe({ signal: controller.signal })
     } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+      unreachable = describeProbeFailure(err)
     } finally {
       clearTimeout(timer)
     }
 
-    const mcpProbe = await probeHostedMcp({ apiKey: config.apiKey, apiBase: config.apiBase, timeoutMs: clampedTimeout })
-    const mcp = {
-      ok: mcpProbe.ok,
-      detail: mcpProbe.ok
-        ? `hosted MCP server reachable with this key${mcpProbe.serverName ? ` (${mcpProbe.serverName}${mcpProbe.serverVersion ? ` ${mcpProbe.serverVersion}` : ''})` : ''}`
-        : `hosted MCP server not reachable with this key: ${mcpProbe.error ?? 'unknown error'}`,
+    let mcp: AgentchatProbeResult['mcp']
+    if (me !== null) {
+      const mcpProbe = await probeHostedMcp({ apiKey: config.apiKey, apiBase: config.apiBase, timeoutMs: clampedTimeout })
+      mcp = {
+        ok: mcpProbe.ok,
+        detail: mcpProbe.ok
+          ? `hosted MCP server reachable with this key${mcpProbe.serverName ? ` (${mcpProbe.serverName}${mcpProbe.serverVersion ? ` ${mcpProbe.serverVersion}` : ''})` : ''}`
+          : `hosted MCP server not reachable with this key: ${mcpProbe.error ?? 'unknown error'}`,
+      }
     }
 
+    const live = getIntegration(account.accountId)
+    // The announcement the running integration holds (else the cached file's); the managed copy is checked against it.
+    const liveTexts = live?.texts?.current() ?? null
     const placement = checkPlacement({
       cfg: cfg as object | undefined,
-      handle: config.agentHandle ?? me.handle,
+      handle: config.agentHandle ?? me?.handle,
       apiKey: config.apiKey,
       apiBase: config.apiBase,
       identityLine: cachedIdentityLine(account.accountId),
       agentId: resolvePlacementAgentId(cfg as object | undefined, account.accountId),
       accountId: account.accountId,
       keySource: resolveAgentchatApiKey(cfg as never, account.accountId),
+      ...(liveTexts ? { served: liveTexts.manual, servedSource: live?.texts?.source ?? 'cache' } : {}),
     })
     const enabled = account.enabled && isAgentchatAccountEnabled(cfg as never, account.accountId)
 
-    const live = getIntegration(account.accountId)
     const health = live?.socket.getHealth()
     const loopStatus = live?.loop?.loop.status()
     const counters = loopStatus
@@ -143,12 +172,22 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
     }
     const refusal = multiAccountRefusal(cfg as never)
 
+    if (me === null) {
+      return {
+        ok: false,
+        error: unreachable ?? 'AgentChat did not answer',
+        placement,
+        integration,
+        ...(refusal ? { refusal } : {}),
+        ...(enabled ? {} : { disabled: agentchatReenableHint(cfg as never, account.accountId) }),
+      }
+    }
     return {
-      ok: enabled && me.status === 'active' && mcp.ok && placement.every((c) => c.ok) && !refusal,
+      ok: enabled && me.status === 'active' && (mcp?.ok ?? false) && placement.every((c) => c.ok) && !refusal,
       handle: me.handle,
       status: me.status,
       pausedByOwner: me.paused_by_owner ?? 'none',
-      mcp,
+      ...(mcp ? { mcp } : {}),
       placement,
       integration,
       ...(refusal ? { refusal } : {}),
@@ -160,9 +199,11 @@ export const agentchatStatusAdapter: ChannelStatusAdapter<AgentchatResolvedAccou
     const lines: ChannelCapabilitiesDisplayLine[] = []
     if (probe.error) {
       lines.push({ text: probe.error, tone: 'error' })
-      return lines
+      // Missing configuration: nothing local to check either.
+      if (!probe.placement) return lines
+    } else {
+      lines.push({ text: `authenticated as @${probe.handle}`, tone: 'success' })
     }
-    lines.push({ text: `authenticated as @${probe.handle}`, tone: 'success' })
     if (probe.disabled) lines.push({ text: probe.disabled, tone: 'warn' })
     if (probe.status && probe.status !== 'active') {
       lines.push({ text: `account status: ${probe.status}`, tone: probe.status === 'restricted' ? 'warn' : 'error' })
