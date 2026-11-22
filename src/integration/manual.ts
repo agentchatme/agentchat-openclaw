@@ -75,8 +75,15 @@ const RECORD_VERSION = 1
 const FRONT_MATTER_READ_BYTES = 8 * 1024
 /** A shadow scan looks at no more child directories of one skills root than this. */
 const SHADOW_SCAN_MAX_DIRS = 512
-/** While the managed file is someone else's, the gateway looks again this often (the kit's own retry needs a result). */
-export const NOT_OURS_RECHECK_MS = 10 * 60_000
+/**
+ * How often the running gateway looks at the managed file itself: a local
+ * read and hash, no network. The kit's `ManualSync` syncs on a texts change
+ * and retries a failed sync, but sees nothing a person or another tool does
+ * to the file (a ClawHub copy put there, one removed again, an old copy
+ * written over it). A periodic local re-check is planned in the SDK kit;
+ * when it lands there, this timer goes.
+ */
+export const MANUAL_CHECK_MS = 10 * 60_000
 /** A managed file larger than this is not read whole (only its front matter): it is not a manual this plugin wrote. */
 const INSPECT_MAX_BYTES = 4 * integration.MANUAL_MAX_BYTES
 
@@ -619,7 +626,10 @@ export class ManualKeeper {
   private notOurs: { readonly reason: string; readonly wins: boolean } | null = null
   private floor: ManualOutcome | null = null
   private stopped = false
-  private recheck: ReturnType<typeof setInterval> | null = null
+  private checkTimer: ReturnType<typeof setInterval> | null = null
+  private checking: Promise<void> | null = null
+  /** The managed file as the last look saw it (`fingerprint`). */
+  private lastSeen: string | null = null
 
   constructor(options: ManualKeeperOptions) {
     this.options = options
@@ -641,25 +651,7 @@ export class ManualKeeper {
     const cache = this.options.cache
     noteGatewayStart(this.configDir, this.file)
     const bundled = bundledManual()
-    if (this.writable()) {
-      const served = cache.current()?.manual ?? null
-      const usable = supersededByBundle(served, cache.source, bundled) ? null : served
-      const current = inspectManagedManual(this.configDir)
-      if (usable === null && current.owner.kind === 'absent' && bundled !== null && !this.stopped) {
-        // Nothing announced in hand (offline, nothing cached, or a cached announcement older than the bundle): the bundled copy, through the kit (its fallback).
-        ensureSkillDir(this.configDir)
-        const result = await integration.syncManual({ path: this.file, served: null, apiBase: cache.apiBase, fallback: bundled.bytes })
-        recordResult(result, this.configDir)
-        this.floor = { kind: 'synced', result }
-        this.report(this.floor)
-      } else {
-        const floor = placeFloor(current, usable, usable === null ? served : null, bundled, this.configDir)
-        if (floor !== null) {
-          this.floor = floor
-          this.report(floor)
-        }
-      }
-    }
+    if (this.writable()) await this.placeFloorIfDue()
     if (this.stopped) return this.latest
     // The texts the kit reads: withheld while the file is someone else's, or
     // while the announcement is a cached one the bundled copy supersedes. The
@@ -684,34 +676,91 @@ export class ManualKeeper {
       },
     })
     const first = await this.sync.start()
+    this.startChecks()
     return first !== null ? { kind: 'synced', result: first } : this.latest
+  }
+
+  /**
+   * The bundled copy when no usable announcement is in hand: where there is
+   * no file (the kit's fallback), or over an older copy of ours.
+   */
+  private async placeFloorIfDue(): Promise<void> {
+    const cache = this.options.cache
+    const bundled = bundledManual()
+    const served = cache.current()?.manual ?? null
+    const usable = supersededByBundle(served, cache.source, bundled) ? null : served
+    const current = inspectManagedManual(this.configDir)
+    if (usable === null && current.owner.kind === 'absent' && bundled !== null && !this.stopped) {
+      // Nothing announced in hand (offline, nothing cached, or a cached announcement older than the bundle): the bundled copy, through the kit (its fallback).
+      ensureSkillDir(this.configDir)
+      const result = await integration.syncManual({ path: this.file, served: null, apiBase: cache.apiBase, fallback: bundled.bytes })
+      recordResult(result, this.configDir)
+      this.floor = { kind: 'synced', result }
+      this.report(this.floor)
+      return
+    }
+    const floor = placeFloor(current, usable, usable === null ? served : null, bundled, this.configDir)
+    if (floor !== null) {
+      this.floor = floor
+      this.report(floor)
+    }
+  }
+
+  /** The managed file in one string: whose it is and its bytes' sha256 (`absent`). A local read and hash. */
+  private fingerprint(): string {
+    const found = inspectManagedManual(this.configDir)
+    return found.owner.kind === 'not-ours' ? `not-ours:${found.owner.reason}:${found.sha256 ?? ''}` : `${found.owner.kind}:${found.sha256 ?? ''}`
+  }
+
+  private startChecks(): void {
+    if (this.checkTimer !== null || this.stopped) return
+    this.lastSeen = this.fingerprint()
+    this.checkTimer = setInterval(() => void this.check(), MANUAL_CHECK_MS)
+    ;(this.checkTimer as { unref?: () => void }).unref?.()
+  }
+
+  /**
+   * The timer's look at the file (also callable at once). When the file
+   * changed since the last look — someone else's now (said once), free
+   * again, replaced, removed — the kit syncs it against the texts in hand
+   * (or the bundled copy goes where there is none and nothing is
+   * announced). Unchanged, nothing happens: a stale file that stays as it
+   * was is the kit's retry's, on its own backoff, so this never adds a
+   * download. One at a time: a call while one runs joins it.
+   */
+  check(): Promise<void> {
+    if (this.checking !== null) return this.checking
+    // Cleared once settled, and only if it is still this look (a look that
+    // finishes without awaiting must not clear itself before it is stored).
+    const look: Promise<void> = this.look().finally(() => {
+      if (this.checking === look) this.checking = null
+    })
+    this.checking = look
+    return look
+  }
+
+  private async look(): Promise<void> {
+    try {
+      if (this.stopped || this.sync === null) return
+      const now = this.fingerprint()
+      if (now === this.lastSeen) return
+      this.lastSeen = now
+      if (!this.writable()) return
+      const result = await this.sync.sync()
+      if (result === null && !this.stopped) await this.placeFloorIfDue()
+      this.lastSeen = this.fingerprint()
+    } catch {
+      // a look that fails is tried again at the next tick
+    }
   }
 
   stop(): void {
     this.stopped = true
-    this.stopRecheck()
+    if (this.checkTimer !== null) {
+      clearInterval(this.checkTimer)
+      this.checkTimer = null
+    }
     this.sync?.stop()
-  }
-
-  /**
-   * Someone else's file gets no sync result, so the kit schedules no retry
-   * and a texts fetch that changes nothing starts no sync: look again on a
-   * timer, and sync once the file is free.
-   */
-  private startRecheck(): void {
-    if (this.recheck !== null || this.stopped) return
-    this.recheck = setInterval(() => {
-      if (this.stopped || inspectManagedManual(this.configDir).owner.kind === 'not-ours') return
-      this.stopRecheck()
-      void this.sync?.sync().catch(() => undefined)
-    }, NOT_OURS_RECHECK_MS)
-    ;(this.recheck as { unref?: () => void }).unref?.()
-  }
-
-  private stopRecheck(): void {
-    if (this.recheck === null) return
-    clearInterval(this.recheck)
-    this.recheck = null
   }
 
   /** The ownership guard, with one log line per new reason. */
@@ -722,7 +771,6 @@ export class ManualKeeper {
       this.notOurs = null
       return true
     }
-    this.startRecheck()
     if (owner.reason !== this.notOurs?.reason) {
       this.notOurs = { reason: owner.reason, wins: owner.wins }
       noteLast(this.configDir, this.file, { state: 'not-ours', manual: null, served: this.options.cache.current()?.manual.version ?? null, error: owner.reason })
@@ -955,7 +1003,7 @@ export function checkManual(params: CheckManualParams): { primary: ManualCheck; 
   // gateway takes it back at its own re-check (the kit has no failed sync to retry).
   const freed = params.latest?.kind === 'not-ours' || record?.last?.state === 'not-ours'
   const nextTry = freed
-    ? `the gateway takes it back at its next check of the file (within ${NOT_OURS_RECHECK_MS / 60_000} minutes)`
+    ? `the gateway takes it back at its next check of the file (within ${MANUAL_CHECK_MS / 60_000} minutes)`
     : 'the gateway tries again on its own (after 5 minutes, backing off to an hour)'
   const check = (state: ManualCheckState, ok: boolean, notice: boolean, repair: boolean, detail: string): ManualCheck => ({ state, ok, notice, repair, detail })
   const home = params.home ?? os.homedir()
@@ -980,7 +1028,7 @@ export function checkManual(params: CheckManualParams): { primary: ManualCheck; 
         true,
         true,
         true,
-        `only the copy bundled with the plugin (${bundled.version ?? 'unversioned'}${freshness}) — the copy that keeps itself current (${found.path}) is not placed${lastError ? ` (${lastError})` : ''}; ${freed ? `the gateway places it at its next check of the file (within ${NOT_OURS_RECHECK_MS / 60_000} minutes)` : 'the gateway places it when it starts'} — ${fix('places it now')}`,
+        `only the copy bundled with the plugin (${bundled.version ?? 'unversioned'}${freshness}) — the copy that keeps itself current (${found.path}) is not placed${lastError ? ` (${lastError})` : ''}; ${freed ? `the gateway places it at its next check of the file (within ${MANUAL_CHECK_MS / 60_000} minutes)` : 'the gateway places it when it starts'} — ${fix('places it now')}`,
       ),
     )
   }

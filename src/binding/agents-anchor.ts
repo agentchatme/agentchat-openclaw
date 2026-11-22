@@ -12,21 +12,38 @@
  *
  * The text is served by AgentChat (`GET /v1/texts` → `identity_line`,
  * fetched by `../integration/texts.ts`). It is not ours, and neither is the
- * block's shape: the SDK kit's `anchor` functions render it (the fences, a
- * handle line, the served line), find it (current, legacy and unmarked
- * shapes) and replace or remove it, so re-runs upsert and `channels remove`
- * strips it cleanly. This module only reads and writes the file. No
- * official "plugin → AGENTS.md" API exists.
+ * block's shape nor the rule for whose block it is: the SDK kit's `anchor`
+ * functions render it (the fences, a handle line, the served line), find it
+ * (current, legacy and unmarked shapes), decide whose it is (`owner`, strict:
+ * a handle line, or a whole text that is exactly a text AgentChat served),
+ * and follow it (`follow`: bring this agent's block to the served line,
+ * atomically, never touching a block that is not plainly this agent's — one
+ * edited by hand, another agent's). This module adds what the kit leaves to
+ * the integration: which file, placing a block where there is none, and
+ * removing it. No official "plugin → AGENTS.md" API exists.
+ *
+ * Every write is atomic (the kit's `writeAtomic`: a temp file beside it,
+ * flushed, renamed over), through a symlink to the file it points to, with
+ * the file's permission bits, and only if the file still holds the bytes
+ * the decision was made on (read again right before; an edit saved
+ * meanwhile is decided on again). A file that is not UTF-8 is never read
+ * or written: decoding it would destroy its bytes. The kit's `replace` and
+ * `remove` keep the file's line breaks (a CRLF file stays CRLF), whether it
+ * ends with one, and a byte-order mark.
  *
  * Lifecycle
  * ─────────
- * write   — `setupWizard.finalize` (after the key check passed),
- *           `setup.afterAccountConfigWritten` (non-interactive path),
- *           `lifecycle.onAccountConfigChanged` (disabled → enabled),
- *           `openclaw doctor --fix` when the line for the configured handle
- *           is missing (the re-enable path through `openclaw config set`,
- *           which reaches no plugin hook), and the running gateway when a
- *           fresh server copy of the text differs from the placed one.
+ * place   — `setupWizard.finalize` (after the key check passed) and
+ *           `setup.afterAccountConfigWritten` (non-interactive path): the
+ *           operator just named this agent, so a block another agent's
+ *           identity line holds is replaced (said so); a block edited by
+ *           hand is left. `lifecycle.onAccountConfigChanged` (disabled →
+ *           enabled) and `openclaw doctor --fix` (the re-enable path through
+ *           `openclaw config set`, which reaches no plugin hook): a missing
+ *           block is placed, this agent's is brought to the served line,
+ *           anything else is left and reported.
+ * follow  — the running gateway on every served copy: `follow` only (never
+ *           creates; leaves a hand-edited block and another agent's).
  * remove  — `lifecycle.onAccountConfigChanged` (enabled → disabled,
  *           `channels remove --channel agentchat`) and `lifecycle.onAccountRemoved`
  *           (`--delete`).
@@ -51,6 +68,13 @@ import { resolveOpenClawWorkspaceDir } from '../openclaw-layout.js'
 export const ANCHOR_START = integration.anchor.START_MARKER
 export const ANCHOR_END = integration.anchor.END_MARKER
 
+/** The kit's `follow` result and outcomes (`integration.anchor` is a value namespace: its types are taken from its functions). */
+export type FollowResult = Awaited<ReturnType<typeof integration.anchor.follow>>
+export type FollowOutcome = FollowResult['outcome']
+
+/** Decisions in all before a placement or a removal leaves the file for now (as the kit's `follow`). */
+const ATTEMPTS = integration.anchor.FOLLOW_ATTEMPTS
+
 /**
  * The workspace OpenClaw loads for the agent this channel wakes — per-agent
  * `agents.entries.<id>.workspace`, then `agents.defaults.workspace`, then
@@ -66,77 +90,309 @@ export function agentsAnchorPath(cfg: OpenClawConfig | undefined, agentId?: stri
   return path.join(resolveWorkspaceDir(cfg, agentId), 'AGENTS.md')
 }
 
-function bareHandle(handle: string | undefined): string {
-  return integration.anchor.normalizeHandle(handle ?? '')
+/** What this agent's identity line is, as served and spelled for OpenClaw. */
+export interface AnchorTexts {
+  readonly cfg: OpenClawConfig | undefined
+  readonly agentId?: string | undefined
+  readonly handle: string
+  /** The served identity line (spelled for OpenClaw). */
+  readonly identityLine: string
+  /** The served `identity_line_template` (spelled the same way), when in hand: unmarked blocks are recognised by it. */
+  readonly template?: string | null | undefined
 }
 
 /**
- * Idempotent write of `text` (the served identity line) for `handle`.
- * Re-running upserts the existing block (handle change, text update, an
- * older unmarked or legacy-fenced block) without leaving stale duplicates or
- * blank-line drift. Throws — writing nothing — when the text does not name
- * the handle (a peer would be handed an address that reaches someone else),
- * and when the workspace is not writable; the caller decides whether to
- * surface it.
+ * - `placed` — there was no block (or no file): this agent's block is there now.
+ * - `replaced_other` — setup only: the block was another agent's; it is this agent's now (the operator named this agent).
+ * - the kit's `follow` outcomes: `updated`, `unchanged`, `hand_edited`, `other_agent`, `several_blocks`, `edited_meanwhile`, `failed` (`absent` never: a placement places).
  */
-export function writeAgentsAnchor(params: { cfg: OpenClawConfig | undefined; handle: string; text: string; agentId?: string | undefined }): { path: string } {
-  const bare = bareHandle(params.handle)
+export type AnchorOutcome = Exclude<FollowOutcome, 'absent' | 'setup_offer'> | 'placed' | 'replaced_other'
+
+export interface AnchorResult {
+  readonly outcome: AnchorOutcome
+  readonly path: string
+  /** Whose the block was (`owner`): this agent's, or for `other_agent` / `replaced_other` the other one; null otherwise. */
+  readonly claimed: string | null
+  /** Display only: for `hand_edited`, the handle its words name, when they do. */
+  readonly named: string | null
+  /** What happened, naming the path. */
+  readonly detail: string
+}
+
+/**
+ * The running gateway's follow: this agent's block brought to the served
+ * line, atomically — the kit's `follow`, which never creates a block and
+ * never writes one that is not plainly this agent's. Never throws.
+ */
+export function followAgentsAnchor(params: AnchorTexts): Promise<FollowResult> {
+  return integration.anchor.follow(agentsAnchorPath(params.cfg, params.agentId), {
+    handle: params.handle,
+    identityLine: params.identityLine,
+    template: params.template ?? null,
+  })
+}
+
+/**
+ * Place this agent's identity block: where there is none (or no file), a
+ * new one; this agent's own, brought to the served line (`follow`); a block
+ * edited by hand, several blocks, a file that keeps changing: left, and said
+ * so. Another agent's block is left too, unless `replaceOtherAgent` (setup,
+ * where the operator just named this agent: the old block would claim the
+ * other identity while the key acts as this one). Never throws.
+ */
+export async function placeAgentsAnchor(params: AnchorTexts & { readonly replaceOtherAgent?: boolean }): Promise<AnchorResult> {
+  const file = agentsAnchorPath(params.cfg, params.agentId)
+  const handle = integration.anchor.normalizeHandle(params.handle)
+  const result = (outcome: AnchorOutcome, detail: string, claimed: string | null = null, named: string | null = null): AnchorResult => ({ outcome, path: file, claimed, named, detail })
+  try {
+    for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+      const followed = await followAgentsAnchor(params)
+      if (followed.outcome === 'other_agent' && params.replaceOtherAgent === true) {
+        const read = readAnchorFile(file)
+        if (!read.exists) continue
+        const block = integration.anchor.render({ identity_line: params.identityLine, identity_line_template: '' }, handle)
+        const wrote = await writeIfUnchanged(file, read, integration.anchor.replace(read.text, block))
+        if (wrote === 'changed') continue
+        verifyBlock(file, handle, params.identityLine)
+        return result('replaced_other', `replaced @${followed.claimed}'s identity line in ${file} with @${handle}'s`, followed.claimed)
+      }
+      if (followed.outcome === 'setup_offer') return result('hand_edited', followed.detail)
+      if (followed.outcome !== 'absent') return result(followed.outcome, followed.detail, followed.claimed, followed.named)
+      // No block, or no file: place one, unless a block appeared meanwhile (then decide again).
+      const read = readAnchorFile(file)
+      if (read.exists && integration.anchor.find(withoutBom(read.text)) !== null) continue
+      const block = integration.anchor.render({ identity_line: params.identityLine, identity_line_template: '' }, handle)
+      const wrote = await writeIfUnchanged(file, read, integration.anchor.replace(read.exists ? read.text : '', block))
+      if (wrote === 'changed') continue
+      verifyBlock(file, handle, params.identityLine)
+      return result('placed', `identity line for @${handle} placed in ${file}`, handle)
+    }
+    return result('edited_meanwhile', `${file} changed while the identity line was being placed (${ATTEMPTS} attempts); left as it is`)
+  } catch (err) {
+    return result('failed', `could not place the identity line in ${file}: ${describe(err)}`)
+  }
+}
+
+/**
+ * The served block for `handle` in place of whatever block the file holds
+ * (or appended): unconditional, atomic. For tests and fixtures; placements
+ * go through `placeAgentsAnchor`, the gateway through `followAgentsAnchor`.
+ * Throws — writing nothing — when the text does not name the handle, when
+ * the file is not UTF-8, and when the workspace is not writable.
+ */
+export async function writeAgentsAnchor(params: { cfg: OpenClawConfig | undefined; handle: string; text: string; agentId?: string | undefined }): Promise<{ path: string }> {
+  const bare = integration.anchor.normalizeHandle(params.handle)
   if (!bare) throw new Error('writeAgentsAnchor: handle is empty')
   const text = params.text.trim()
   if (!text) throw new Error('writeAgentsAnchor: identity line is empty')
-
-  const workspaceDir = resolveWorkspaceDir(params.cfg, params.agentId)
-  const filePath = path.join(workspaceDir, 'AGENTS.md')
-  fs.mkdirSync(workspaceDir, { recursive: true })
-
-  const existing = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf-8') : ''
-  // The kit renders the block for the handle (it refuses a text that does
-  // not name it) and replaces the first block of any known shape.
+  const file = agentsAnchorPath(params.cfg, params.agentId)
   const block = integration.anchor.render({ identity_line: text, identity_line_template: '' }, bare)
-  const next = integration.anchor.replace(existing, block)
-  fs.writeFileSync(filePath, next, 'utf-8')
-
-  const verify = fs.readFileSync(filePath, 'utf-8')
-  if (!verify.includes(`@${bare}`)) {
-    throw new Error(`writeAgentsAnchor: handle @${bare} did not land in AGENTS.md — remove the agentchat anchor manually and re-run.`)
+  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+    const read = readAnchorFile(file)
+    if ((await writeIfUnchanged(file, read, integration.anchor.replace(read.exists ? read.text : '', block))) === 'written') {
+      verifyBlock(file, bare, text)
+      return { path: file }
+    }
   }
-  return { path: filePath }
-}
-
-/** Idempotent remove. Strips our block (and any legacy block); leaves the rest untouched. */
-export function removeAgentsAnchor(params: { cfg: OpenClawConfig | undefined; agentId?: string | undefined }): { removed: boolean; path: string } {
-  const filePath = agentsAnchorPath(params.cfg, params.agentId)
-  if (!fs.existsSync(filePath)) return { removed: false, path: filePath }
-  const existing = fs.readFileSync(filePath, 'utf-8')
-  const next = integration.anchor.remove(existing)
-  if (next === existing) return { removed: false, path: filePath }
-  fs.writeFileSync(filePath, next, 'utf-8')
-  return { removed: true, path: filePath }
-}
-
-/** What the file holds in our block (current or legacy fences), without the handle line, if anything. */
-export function readAgentsAnchor(params: { cfg: OpenClawConfig | undefined; agentId?: string | undefined }): { present: boolean; text: string | null; path: string } {
-  const filePath = agentsAnchorPath(params.cfg, params.agentId)
-  if (!fs.existsSync(filePath)) return { present: false, text: null, path: filePath }
-  const found = integration.anchor.find(fs.readFileSync(filePath, 'utf-8'))
-  if (!found) return { present: false, text: null, path: filePath }
-  return { present: true, text: found.body, path: filePath }
+  throw new Error(`writeAgentsAnchor: ${file} kept changing (${ATTEMPTS} attempts)`)
 }
 
 /**
- * Doctor check: is an identity line for this handle present? With `text`
- * (the served line) the block must hold exactly that text; without it (the
- * server unreachable and nothing cached) any of our blocks naming the handle
- * counts.
+ * What removing AgentChat did to the identity block: `removed`, this
+ * agent's block is gone (the rest of the file byte for byte); `absent`, no
+ * file or no AgentChat block; the rest leave the file as it is —
+ * `hand_edited` (the block is not a text AgentChat placed: the user's
+ * words), `other_agent` (another agent's), `several_blocks`, `no_handle`
+ * (this account's handle is not known, so no block can be said to be its),
+ * `edited_meanwhile` (the file kept changing).
  */
-export function hasAgentsAnchorFor(params: { cfg: OpenClawConfig | undefined; handle: string; text?: string | null | undefined; agentId?: string | undefined }): {
-  present: boolean
-  path: string
-} {
-  const found = readAgentsAnchor({ cfg: params.cfg, agentId: params.agentId })
-  if (!found.present || found.text === null) return { present: false, path: found.path }
-  if (typeof params.text === 'string' && params.text.trim().length > 0) {
-    return { present: found.text === params.text.trim(), path: found.path }
+export type RemoveOutcome = 'removed' | 'absent' | 'hand_edited' | 'other_agent' | 'several_blocks' | 'no_handle' | 'edited_meanwhile'
+
+export interface RemoveResult {
+  readonly outcome: RemoveOutcome
+  readonly path: string
+  /** Whose block it is (`owner`): another agent's for `other_agent`; this agent's for `removed`; null otherwise. */
+  readonly claimed: string | null
+}
+
+/**
+ * Remove AgentChat's identity block for this agent, and nothing else: the
+ * block goes only when the kit's strict `owner` reads it as `handle`'s (a
+ * handle line naming it, or a whole text AgentChat served: `identityLine`,
+ * `template` filled in, an earlier served line), and it is the only
+ * AgentChat block in the file. A block edited by hand, another agent's, or
+ * several blocks stay where they are. Atomic; line endings, a final line
+ * break, a byte-order mark and the permission bits are kept. Throws when
+ * the file cannot be read (not UTF-8, not a file) or written.
+ */
+export async function removeAgentsAnchor(params: {
+  cfg: OpenClawConfig | undefined
+  agentId?: string | undefined
+  handle: string | null | undefined
+  identityLine?: string | null | undefined
+  template?: string | null | undefined
+}): Promise<RemoveResult> {
+  const file = agentsAnchorPath(params.cfg, params.agentId)
+  const handle = integration.anchor.normalizeHandle(params.handle ?? '')
+  const result = (outcome: RemoveOutcome, claimed: string | null = null): RemoveResult => ({ outcome, path: file, claimed })
+  const template = params.template ?? null
+  const identityLine = typeof params.identityLine === 'string' && params.identityLine.trim().length > 0 ? params.identityLine : null
+  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
+    const read = readAnchorFile(file)
+    if (!read.exists) return result('absent')
+    const text = withoutBom(read.text)
+    const found = integration.anchor.find(text, { template })
+    if (found === null) return result('absent')
+    if (integration.anchor.find(text.slice(0, found.start) + text.slice(found.end)) !== null) return result('several_blocks')
+    if (!handle) return result('no_handle')
+    const claimed = integration.anchor.owner(found, { handle, identityLine, template })
+    if (claimed === null) return result('hand_edited')
+    if (claimed !== handle) return result('other_agent', claimed)
+    const next = integration.anchor.remove(read.text)
+    if (next === read.text) return result('absent')
+    if ((await writeIfUnchanged(file, read, next)) === 'written') return result('removed', handle)
   }
-  return { present: found.text.includes(`@${bareHandle(params.handle)}`), path: found.path }
+  return result('edited_meanwhile')
+}
+
+/** What the file holds in its first block (current or legacy fences), without the handle line — display only. */
+export function readAgentsAnchor(params: { cfg: OpenClawConfig | undefined; agentId?: string | undefined }): { present: boolean; text: string | null; path: string } {
+  const filePath = agentsAnchorPath(params.cfg, params.agentId)
+  let read: ReadAnchorFile
+  try {
+    read = readAnchorFile(filePath)
+  } catch {
+    return { present: false, text: null, path: filePath }
+  }
+  const found = read.exists ? integration.anchor.find(withoutBom(read.text)) : null
+  return found ? { present: true, text: found.body, path: filePath } : { present: false, text: null, path: filePath }
+}
+
+/**
+ * The identity block as status and doctor see it, strictly, from a local
+ * read: the kit's `decide` against the served line (`unchanged`: in place;
+ * `updated`: this agent's, but an older text or shape the gateway brings to
+ * the served one; `absent`; `hand_edited`; `other_agent`; `several_blocks`;
+ * `failed`). Without the served line (nothing cached) only whose block it is
+ * can be said: `owner`'s reading, `unverified` when it is this agent's.
+ * Never throws.
+ */
+export interface AnchorInspection {
+  readonly outcome: Exclude<FollowOutcome, 'edited_meanwhile' | 'setup_offer'> | 'unverified'
+  readonly path: string
+  readonly claimed: string | null
+  readonly named: string | null
+  readonly detail: string
+}
+
+export function inspectAgentsAnchor(params: Omit<AnchorTexts, 'identityLine'> & { readonly identityLine?: string | null | undefined }): AnchorInspection {
+  const file = agentsAnchorPath(params.cfg, params.agentId)
+  const handle = integration.anchor.normalizeHandle(params.handle)
+  const result = (outcome: AnchorInspection['outcome'], detail: string, claimed: string | null = null, named: string | null = null): AnchorInspection => ({ outcome, path: file, claimed, named, detail })
+  let read: ReadAnchorFile
+  try {
+    read = readAnchorFile(file)
+  } catch (err) {
+    return result('failed', `could not read ${file}: ${describe(err)}`)
+  }
+  if (!read.exists) return result('absent', `${file} does not exist`)
+  const text = withoutBom(read.text)
+  const template = params.template ?? null
+  if (typeof params.identityLine === 'string' && params.identityLine.trim().length > 0) {
+    const decision = integration.anchor.decide(text, { handle, identityLine: params.identityLine, template })
+    const outcome = decision.outcome === 'setup_offer' ? 'hand_edited' : decision.outcome
+    return result(outcome, decision.detail.split('the file').join(file), decision.claimed, decision.named)
+  }
+  const found = integration.anchor.find(text, { template })
+  if (found === null) return result('absent', `no AgentChat block in ${file}`)
+  if (integration.anchor.find(text.slice(0, found.start) + text.slice(found.end)) !== null) return result('several_blocks', `${file} holds more than one AgentChat block`)
+  const claimed = integration.anchor.owner(found, { handle, template })
+  if (claimed === handle) return result('unverified', `an identity line for @${handle} in ${file} (not checked against the served text: none in hand)`, claimed)
+  if (claimed !== null) return result('other_agent', `the AgentChat block in ${file} is @${claimed}'s, not @${handle}'s`, claimed)
+  return result('hand_edited', `the AgentChat block in ${file} has no handle line and is not a text AgentChat served: edited by hand`, null, found.handle)
+}
+
+// ─── reading and writing the file ───────────────────────────────────────────
+
+type ReadAnchorFile =
+  | { readonly exists: false }
+  | { readonly exists: true; readonly target: string; readonly bytes: Uint8Array; readonly text: string; readonly mode: number }
+
+const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true })
+
+/**
+ * The file, read for a decision: through any symlink to the file it points
+ * to, its bytes, its permission bits, and its text — strictly UTF-8 (a
+ * byte-order mark kept in the text; the kit's `replace` keeps it). Missing:
+ * `exists: false`. Throws when it is not a regular file, cannot be read, or
+ * is not UTF-8 (rewriting such a file would destroy its bytes).
+ */
+function readAnchorFile(file: string): ReadAnchorFile {
+  let target: string
+  try {
+    target = fs.realpathSync(file)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { exists: false }
+    throw err
+  }
+  const stat = fs.statSync(target)
+  if (!stat.isFile()) throw new Error(`${file} is not a regular file`)
+  const bytes = new Uint8Array(fs.readFileSync(target))
+  let text: string
+  try {
+    text = UTF8.decode(bytes)
+  } catch {
+    throw new Error(`${file} is not UTF-8 text; the AgentChat block is not read or written there`)
+  }
+  return { exists: true, target, bytes, text, mode: stat.mode & 0o7777 }
+}
+
+/**
+ * Write `next` (the kit's `writeAtomic`) where `read` was read, but only if
+ * the file still holds the bytes read (looked at again right before):
+ * `changed` otherwise — also when a file appeared where there was none.
+ * Keeps the permission bits; through a symlink, the file it points to is
+ * the one replaced. A new file is `0644` in a workspace dir made as needed.
+ */
+async function writeIfUnchanged(file: string, read: ReadAnchorFile, next: string): Promise<'written' | 'changed'> {
+  if (!read.exists) {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    if (fs.existsSync(file)) return 'changed'
+    await integration.writeAtomic(file, next, { mode: 0o644 })
+    return 'written'
+  }
+  fs.accessSync(read.target, fs.constants.W_OK) // a file the user made read-only is refused, not replaced
+  let now: Uint8Array
+  try {
+    now = new Uint8Array(fs.readFileSync(read.target))
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return 'changed'
+    throw err
+  }
+  if (!sameBytes(now, read.bytes)) return 'changed'
+  await integration.writeAtomic(read.target, next, { mode: read.mode })
+  return 'written'
+}
+
+/** After a write: the file reads back with this agent's block, in the current shape, holding the served line. */
+function verifyBlock(file: string, handle: string, identityLine: string): void {
+  const read = readAnchorFile(file)
+  const found = read.exists ? integration.anchor.find(withoutBom(read.text)) : null
+  if (found === null || !found.marked || found.legacy || found.handle !== handle || found.body !== identityLine.replace(/\r\n/g, '\n').trim()) {
+    throw new Error(`${file} did not read back with the identity line for @${handle} after the write — remove the AgentChat block by hand and run it again`)
+  }
+}
+
+function withoutBom(text: string): string {
+  return text.startsWith('\uFEFF') ? text.slice(1) : text
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }

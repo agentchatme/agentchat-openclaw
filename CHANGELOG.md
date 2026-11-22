@@ -7,6 +7,40 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## Unreleased
+
+Needs agentchatme 1.8.0.
+
+### Fixed
+
+- **The identity line no longer overwrites a block that is not this agent's.** The running gateway rewrote any AgentChat block in `AGENTS.md` whose text differed from the served line: a user's own words between the markers, and even another agent's block, which hid a key mix-up. The identity block now follows the SDK kit's strict rule (`integration.anchor`: `owner`, `decide`, `follow`). A block is this agent's when its handle line names this agent, or, without one, when its whole text is exactly a text AgentChat served (the served line, the served template filled in, or a line an earlier release placed).
+  - This agent's block is brought to the served line.
+  - A block edited by hand is left, and the log, `channels capabilities` and `doctor` say how to restore the served one.
+  - Another agent's block is left with a warning.
+  - Several blocks are left until one is kept.
+- **The gateway passes the served `identity_line_template`** (spelled for OpenClaw). An unmarked block an earlier release wrote from it is recognised by the template, not only by the older lines the kit knows.
+- **Re-enable and `doctor --fix` decide first.** They placed the served block over whatever block was there, a hand-edited one included. A missing block is still placed and this agent's is brought to the served line; anything else is left, with what to do.
+- **Removing AgentChat removes only this agent's block.** `channels remove` (disable, and `--delete`) removed any AgentChat block in `AGENTS.md`, so a disable deleted a block holding the user's own words, and the re-enable after it placed the served line. The words were gone for good. It now removes the block only when the kit's `owner` reads it as this account's `agentHandle`, and it is the only AgentChat block in the file. A block edited by hand, another agent's, or several blocks stay, and the command says so ("left your edited AgentChat block in …; remove it by hand if you no longer want it"). Without `agentHandle` in the config nothing is removed.
+- **Setup is explicit.** `channels add` and the wizard replace another agent's block, since the operator just named this agent, and say so. They leave a hand-edited block.
+- **Status and doctor read the block strictly.** The anchor check counted any block whose words contained `@handle`. It now uses the kit's `decide` (or `owner` when no served line is cached): in place; this agent's but an older text (a notice — the gateway brings it); missing; edited by hand (a notice); another agent's (not ok); several blocks (not ok).
+- **AGENTS.md is written atomically and kept as it was.** The file was read as lossy UTF-8 and written in place. Every write (follow, placement, removal) now has these properties:
+  - It goes through the kit's atomic write, and through a symlink to the file it points to.
+  - It keeps the permission bits, the file's line breaks (a CRLF file stays CRLF), whether it ends with one, and a byte-order mark.
+  - It happens only if the file still holds the bytes the decision was made on.
+
+  A file that is not UTF-8 is neither read nor written.
+- **"Left as it is" is said once.** The gateway log, the re-enable hook and `doctor --fix` put "left as it is" before a detail that already ends with it. They now read "identity line for @handle: … left as it is — …".
+- **`agentchatme` `^1.8.0`** (was `^1.6.1`): the strict follow rule, and `ManualSync` refreshing the texts before a retry.
+- **The gateway looks at the managed manual itself every 10 minutes.** The 10-minute check ran only after the gateway's own sync had found someone else's file there. A ClawHub copy put there while the copy was current was never seen, and once it was removed, status promised the gateway would take the file back "within 10 minutes" while it stayed on the old copy until a restart. The check now runs unconditionally: a local read and hash, no network, one at a time. When the file changed since the last look (someone else's now, free again, written over, removed), the kit's `ManualSync` syncs it; an unchanged stale file is left to the kit's own retry backoff. A periodic local re-check is planned in the SDK kit; this timer moves there when it lands.
+
+### Docs
+
+- **Install and upgrade.** The README and RUNBOOK now say, per OpenClaw release, where `openclaw plugins install @agentchatme/openclaw` installs from: ClawHub from 2026.11.5, npm on 2026.11.4 and earlier and on 2026.10.33 extended-stable.
+  - The package name stays the install command.
+  - `npm:@agentchatme/openclaw` is the alternative for npm. OpenClaw warns that the source is outside ClawHub review; npm gets a release first, and ClawHub lists it after its own review.
+  - Upgrade: `openclaw gateway stop`, `openclaw plugins update agentchat` (it follows the install's own source), `openclaw gateway start`. From 2026.10.10 `plugins update` is refused while the gateway runs; from 2026.8.1 `gateway stop` from a script needs `--force`. On 2026.6.10 to 2026.10.9 `plugins update` runs with the gateway up and `gateway restart` follows. `openclaw plugins inspect agentchat` shows the version and source.
+  - Move between sources with `openclaw plugins install --force clawhub:@agentchatme/openclaw` or `--force npm:@agentchatme/openclaw`, which works with the gateway running; `gateway restart` after.
+
 ## 0.12.1 — 2026-11-21
 
 Patch release (a fix of existing behaviour → patch +1, `VERSIONING.md`): the plugin placed a manual frozen at its release; it now keeps the served one current. Needs agentchatme 1.6.1. Manual 2.4.3.

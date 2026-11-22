@@ -61,11 +61,22 @@ import {
 } from './mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, withLlmAgentOverrideOptIn } from './model.js'
 import { bundledManual, checkManual, describeManualOutcome, latestManualOutcome, shadowLine, type ManualOutcome } from './manual.js'
-import { cachedServedTexts } from './texts.js'
+import { cachedIdentityLine, cachedIdentityTemplate, cachedServedTexts } from './texts.js'
 import type { integration } from 'agentchatme'
 
 type ServedManual = integration.ServedManual
-import { writeAgentsAnchor, agentsAnchorPath, hasAgentsAnchorFor, readAgentsAnchor, removeAgentsAnchor } from '../binding/agents-anchor.js'
+import {
+  agentsAnchorPath,
+  ANCHOR_END,
+  ANCHOR_START,
+  followAgentsAnchor,
+  inspectAgentsAnchor,
+  placeAgentsAnchor,
+  removeAgentsAnchor,
+  type AnchorResult,
+  type FollowResult,
+  type RemoveResult,
+} from '../binding/agents-anchor.js'
 import {
   AGENTCHAT_CHANNEL_ID,
   AGENTCHAT_DEFAULT_ACCOUNT_ID,
@@ -365,6 +376,12 @@ export function stripIntegrationConfig<TCfg extends object>(cfg: TCfg, accountId
  * Undo the file side of placement: the identity line in the bound agent's
  * `AGENTS.md`, and — on delete — the key line in the state-dir `.env`.
  *
+ * Only the block AgentChat placed for this account's agent goes: the kit's
+ * strict `owner` reading, against the configured `agentHandle` and the
+ * cached served texts (`removeAgentsAnchor`). A block edited by hand (the
+ * user's own words), another agent's, or several blocks stay, and the
+ * report says so.
+ *
  * The key file is NOT deleted: OpenClaw runs this before it commits the
  * removal (`applyChannelAccountRemoval`, `src/channels/plugins/
  * account-config-mutation.ts`) and may still refuse the write (its
@@ -376,17 +393,25 @@ export function stripIntegrationConfig<TCfg extends object>(cfg: TCfg, accountId
  * config backups) are named, never edited. Best-effort: a filesystem error
  * never blocks a remove.
  */
-export function removeIntegrationFiles(
+export async function removeIntegrationFiles(
   cfg: object | undefined,
   accountId: string,
   options: { clearKey: boolean; stateDir?: string; configPath?: string },
-): string[] {
+): Promise<string[]> {
   const changes: string[] = []
+  const handle = readAgentchatConfigField(cfg as never, accountId, 'agentHandle')?.trim().replace(/^@/, '') || null
   try {
-    const removed = removeAgentsAnchor({ cfg: cfg as never, agentId: resolvePlacementAgentId(cfg, accountId) })
-    if (removed.removed) changes.push(`removed the identity line from ${removed.path}`)
-  } catch {
-    // best effort
+    const removed = await removeAgentsAnchor({
+      cfg: cfg as never,
+      agentId: resolvePlacementAgentId(cfg, accountId),
+      handle,
+      identityLine: cachedIdentityLine(accountId, options.stateDir),
+      template: cachedIdentityTemplate(accountId, options.stateDir),
+    })
+    const line = removedAnchorLine(removed, handle)
+    if (line) changes.push(line)
+  } catch (err) {
+    changes.push(`could not remove the identity line: ${describe(err)}; the rest of the removal goes on`)
   }
   if (options.clearKey) {
     // Read before anything is removed: the copies are found by the key itself.
@@ -413,22 +438,84 @@ export function removeIntegrationFiles(
   return changes
 }
 
+/** What `removeIntegrationFiles` reports for the identity block; null when there was nothing to remove. */
+function removedAnchorLine(removed: RemoveResult, handle: string | null): string | null {
+  const byHand = 'remove it by hand if you no longer want it'
+  switch (removed.outcome) {
+    case 'removed':
+      return `removed the identity line for @${handle ?? removed.claimed ?? '?'} from ${removed.path}`
+    case 'absent':
+      return null
+    case 'hand_edited':
+      return `left your edited AgentChat block in ${removed.path}; ${byHand}`
+    case 'other_agent':
+      return `left the AgentChat block in ${removed.path}: it is @${removed.claimed ?? '?'}'s, not @${handle ?? '?'}'s`
+    case 'several_blocks':
+      return `left the AgentChat blocks in ${removed.path}: there is more than one, so none is plainly this agent's; remove them by hand if you no longer want them`
+    case 'no_handle':
+      return `left the AgentChat block in ${removed.path}: agentHandle is not in the config, so it cannot be told to be this agent's; ${byHand}`
+    case 'edited_meanwhile':
+      return `left the AgentChat block in ${removed.path}: the file kept changing; ${byHand}`
+  }
+}
+
 export interface IdentityLineRestore {
-  readonly outcome: 'placed' | 'present' | 'failed' | 'skipped'
+  /**
+   * `placed`: there was no block, there is now; `updated`: this agent's block
+   * now holds the served line; `present`: it already did; `left`: a block
+   * that is not plainly this agent's (edited by hand, another agent's,
+   * several blocks) or a file that kept changing, left as it is (`detail`
+   * says what to do); `skipped`: no served line in hand; `failed`.
+   */
+  readonly outcome: 'placed' | 'updated' | 'present' | 'left' | 'failed' | 'skipped'
   readonly path: string
   readonly detail?: string
+}
+
+/**
+ * What to do about an identity block the strict rule leaves alone — for the
+ * log, status and doctor. `remedy` swaps `doctor --fix` for the re-enable
+ * route on a disabled account.
+ */
+export function anchorRemedy(outcome: string, claimed: string | null, handle: string, remedy: (forEnabled: string) => string = (text) => text): string {
+  const bare = handle.trim().replace(/^@/, '')
+  const fix = remedy(`run \`${openclawCommand('doctor --fix')}\``)
+  switch (outcome) {
+    case 'hand_edited':
+      return `the agent reads those words. To have the served line again: delete that block (from ${ANCHOR_START} to ${ANCHOR_END}), then ${fix}`
+    case 'other_agent':
+      return (
+        `if this agent is @${bare}, delete that block (from ${ANCHOR_START} to ${ANCHOR_END}), then ${fix}; ` +
+        `if it is @${claimed ?? '?'}, the key configured for this account is another agent's — \`${openclawCommand('channels capabilities --channel agentchat')}\` says which agent the key authenticates as`
+      )
+    case 'several_blocks':
+      return `keep one AgentChat block (delete the others), then ${fix}`
+    case 'edited_meanwhile':
+      return `the file was being edited; ${fix} again`
+    default:
+      return fix
+  }
 }
 
 /**
  * Redo the file side of placement for an enabled account: the served
  * identity line for `handle` in the bound agent's `AGENTS.md` (the
  * workspace resolved the way OpenClaw resolves it). The mirror of
- * `removeIntegrationFiles` on re-enable, and `doctor --fix`'s repair. A
- * line already holding exactly that text is not rewritten — the file stays
- * byte-identical. `identityLine` null (texts unreachable, nothing cached)
- * → `skipped`, nothing written. Never throws.
+ * `removeIntegrationFiles` on re-enable, and `doctor --fix`'s repair. Under
+ * the kit's strict rule: a missing block is placed, this agent's is brought
+ * to the served line (a block already holding it is not rewritten — the
+ * file stays byte-identical), and anything not plainly this agent's — a
+ * block edited by hand, another agent's — is left, with what to do.
+ * `identityLine` null (texts unreachable, nothing cached) → `skipped`,
+ * nothing written. Never throws.
  */
-export function restoreIdentityLine(cfg: object | undefined, accountId: string, handle: string, identityLine: string | null): IdentityLineRestore {
+export async function restoreIdentityLine(
+  cfg: object | undefined,
+  accountId: string,
+  handle: string,
+  identityLine: string | null,
+  template: string | null = null,
+): Promise<IdentityLineRestore> {
   const agentId = resolvePlacementAgentId(cfg, accountId)
   const bare = handle.trim().replace(/^@/, '')
   let filePath = ''
@@ -438,11 +525,20 @@ export function restoreIdentityLine(cfg: object | undefined, accountId: string, 
     if (identityLine === null) {
       return { outcome: 'skipped', path: filePath, detail: `the served identity line is not available (AgentChat unreachable and nothing cached) — run ${openclawCommand('doctor --fix')} once it is` }
     }
-    const present = hasAgentsAnchorFor({ cfg: cfg as never, handle: bare, text: identityLine, agentId })
-    filePath = present.path
-    if (present.present) return { outcome: 'present', path: present.path }
-    const written = writeAgentsAnchor({ cfg: cfg as never, handle: bare, text: identityLine, agentId })
-    return { outcome: 'placed', path: written.path }
+    const placed = await placeAgentsAnchor({ cfg: cfg as never, agentId, handle: bare, identityLine, template })
+    switch (placed.outcome) {
+      case 'placed':
+        return { outcome: 'placed', path: placed.path }
+      case 'updated':
+      case 'replaced_other':
+        return { outcome: 'updated', path: placed.path, detail: placed.detail }
+      case 'unchanged':
+        return { outcome: 'present', path: placed.path }
+      case 'failed':
+        return { outcome: 'failed', path: placed.path, detail: placed.detail }
+      default:
+        return { outcome: 'left', path: placed.path, detail: `${placed.detail} — ${anchorRemedy(placed.outcome, placed.claimed, bare)}` }
+    }
   } catch (err) {
     return { outcome: 'failed', path: filePath, detail: describe(err) }
   }
@@ -450,25 +546,37 @@ export function restoreIdentityLine(cfg: object | undefined, accountId: string, 
 
 /**
  * The running gateway's duty when a fresh server copy of the text arrives:
- * a block that is PRESENT but holds older text is rewritten; an absent
- * block is left to the wizard / doctor (placement is a setup decision, not a
- * runtime one). Never throws.
+ * this agent's block brought to the served line (the kit's `follow`:
+ * atomic, never creating a block — placement is a setup decision — and
+ * never writing one that is not plainly this agent's). `template`: the
+ * served `identity_line_template`, spelled for OpenClaw, by which an
+ * unmarked block is recognised. Never throws.
  */
-export function refreshIdentityLine(
+export function followIdentityLine(
   cfg: object | undefined,
   accountId: string,
   handle: string,
   identityLine: string,
-): { outcome: 'updated' | 'unchanged' | 'absent' | 'failed'; path: string; detail?: string } {
-  const agentId = resolvePlacementAgentId(cfg, accountId)
-  try {
-    const found = readAgentsAnchor({ cfg: cfg as never, agentId })
-    if (!found.present) return { outcome: 'absent', path: found.path }
-    if (found.text === identityLine.trim()) return { outcome: 'unchanged', path: found.path }
-    const written = writeAgentsAnchor({ cfg: cfg as never, handle, text: identityLine, agentId })
-    return { outcome: 'updated', path: written.path }
-  } catch (err) {
-    return { outcome: 'failed', path: agentsAnchorPath(cfg as never, agentId), detail: describe(err) }
+  template: string | null,
+): Promise<FollowResult> {
+  return followAgentsAnchor({ cfg: cfg as never, agentId: resolvePlacementAgentId(cfg, accountId), handle, identityLine, template })
+}
+
+/** A placement's anchor result as a step. A block left alone is a warning: the agent works, but not with the served line. */
+export function anchorStep(placed: AnchorResult, handle: string): PlacementStep {
+  const bare = handle.trim().replace(/^@/, '')
+  switch (placed.outcome) {
+    case 'unchanged':
+      return { name: 'anchor', status: 'ok', detail: `identity line for @${bare} in ${placed.path}` }
+    case 'placed':
+    case 'updated':
+      return { name: 'anchor', status: 'changed', detail: `identity line for @${bare} in ${placed.path}` }
+    case 'replaced_other':
+      return { name: 'anchor', status: 'changed', detail: `${placed.detail} (the block named another agent)` }
+    case 'failed':
+      return { name: 'anchor', status: 'failed', detail: placed.detail }
+    default:
+      return { name: 'anchor', status: 'warned', detail: `${placed.detail} — ${anchorRemedy(placed.outcome, placed.claimed, bare)}` }
   }
 }
 
@@ -481,6 +589,8 @@ export interface PlaceParams<TCfg extends object> {
   readonly apiBase: string
   /** The served identity line (spelled for OpenClaw); `null` when AgentChat was unreachable and nothing is cached. */
   readonly identityLine: string | null
+  /** The served `identity_line_template` (spelled for OpenClaw), when in hand: an unmarked block is recognised by it. */
+  readonly identityTemplate?: string | null
   /** The channel account; selects the bound agent whose workspace holds the identity line. */
   readonly accountId?: string
   /** Explicit agent whose workspace holds the identity line; defaults to the bound agent, else OpenClaw's default. */
@@ -501,11 +611,12 @@ export interface PlaceResult<TCfg extends object> {
 
 /**
  * Key, identity line, manual, tools — in that order. Never throws: each
- * step reports `failed` with the reason instead. Returns the config with
+ * step reports `failed` with the reason instead. The identity line follows
+ * the kit's strict rule (`placeAgentsAnchor`). Returns the config with
  * the tools entry applied for the caller to persist. The manual is synced by
  * the caller (`placeManual` is async) and its outcome handed in.
  */
-export function placeIntegration<TCfg extends object>(params: PlaceParams<TCfg>): PlaceResult<TCfg> {
+export async function placeIntegration<TCfg extends object>(params: PlaceParams<TCfg>): Promise<PlaceResult<TCfg>> {
   const steps: PlacementStep[] = []
 
   if (params.placeKey !== false) {
@@ -530,12 +641,10 @@ export function placeIntegration<TCfg extends object>(params: PlaceParams<TCfg>)
       detail: `identity line for @${handle} not placed — AgentChat's texts were unreachable and nothing is cached; run ${openclawCommand('doctor --fix')} once it is reachable`,
     })
   } else {
-    try {
-      const anchor = writeAgentsAnchor({ cfg: params.cfg as never, handle: params.handle, text: params.identityLine, agentId })
-      steps.push({ name: 'anchor', status: 'ok', detail: `identity line for @${handle} in ${anchor.path}` })
-    } catch (err) {
-      steps.push({ name: 'anchor', status: 'failed', detail: `could not write the identity line to AGENTS.md: ${describe(err)}` })
-    }
+    // Setup: the operator just named this agent, so a block another agent's line holds is replaced (and said so);
+    // a block edited by hand, or several blocks, are left as they are.
+    const placed = await placeAgentsAnchor({ cfg: params.cfg as never, agentId, handle, identityLine: params.identityLine, template: params.identityTemplate ?? null, replaceOtherAgent: true })
+    steps.push(anchorStep(placed, handle))
   }
 
   steps.push(params.manual ? manualStep(params.manual) : manualStepAsIs(params.cfg, params.accountId ?? AGENTCHAT_DEFAULT_ACCOUNT_ID, params.stateDir))
@@ -638,6 +747,8 @@ export function checkPlacement<TCfg extends object>(params: {
   configDir?: string
   /** Test seam: the home whose `~/.agents/skills` is checked. */
   home?: string
+  /** The served `identity_line_template` (spelled for OpenClaw); defaults to the cached texts'. */
+  identityTemplate?: string | null
 }): PlacementCheck[] {
   const checks: PlacementCheck[] = []
   const env = params.env ?? process.env
@@ -650,14 +761,16 @@ export function checkPlacement<TCfg extends object>(params: {
 
   checks.push(...checkKey({ ...params, env, accountId, remedy }))
   if (params.handle) {
-    const anchor = hasAgentsAnchorFor({ cfg: params.cfg as never, handle: params.handle, text: params.identityLine, agentId: params.agentId })
-    checks.push({
-      name: 'anchor',
-      ok: anchor.present,
-      detail: anchor.present
-        ? `identity line for @${params.handle} in ${anchor.path}`
-        : `identity line for @${params.handle} missing from ${anchor.path} — ${remedy(`run ${openclawCommand('doctor --fix')} (or ${openclawCommand('channels add --channel agentchat')})`)}`,
-    })
+    checks.push(
+      checkAnchor({
+        cfg: params.cfg,
+        handle: params.handle,
+        identityLine: params.identityLine ?? null,
+        template: params.identityTemplate !== undefined ? params.identityTemplate : cachedIdentityTemplate(accountId, params.stateDir),
+        agentId: params.agentId,
+        remedy,
+      }),
+    )
   } else {
     checks.push({ name: 'anchor', ok: false, detail: `agentHandle not in config — the identity line cannot be checked; ${remedy(`run ${openclawCommand('doctor --fix')} (it learns the handle from the key)`)}` })
   }
@@ -666,6 +779,53 @@ export function checkPlacement<TCfg extends object>(params: {
 
   checks.push(checkMcpEntry(params.cfg, params.apiBase, params.apiKey, remedy))
   return checks
+}
+
+/**
+ * The identity block, strictly (the kit's `decide` / `owner` on a local
+ * read): in place; this agent's but an older text (the gateway brings it to
+ * the served one); missing; edited by hand (left, the agent reads those
+ * words); another agent's (left — a key mix-up shows here); several blocks.
+ */
+function checkAnchor(params: {
+  cfg: object | undefined
+  handle: string
+  identityLine: string | null
+  template: string | null
+  agentId?: string | undefined
+  remedy: (forEnabled: string) => string
+}): PlacementCheck {
+  const bare = params.handle.trim().replace(/^@/, '')
+  const seen = inspectAgentsAnchor({ cfg: params.cfg as never, agentId: params.agentId, handle: bare, identityLine: params.identityLine, template: params.template })
+  const left = (ok: boolean) => ({ name: 'anchor' as const, ok, ...(ok ? { notice: true } : {}), detail: `${seen.detail} — ${anchorRemedy(seen.outcome, seen.claimed, bare, params.remedy)}` })
+  switch (seen.outcome) {
+    case 'unchanged':
+      return { name: 'anchor', ok: true, detail: `identity line for @${bare} in ${seen.path}` }
+    case 'unverified':
+      return { name: 'anchor', ok: true, detail: seen.detail }
+    case 'updated':
+      return {
+        name: 'anchor',
+        ok: true,
+        notice: true,
+        repair: true,
+        detail: `the identity line for @${bare} in ${seen.path} is this agent's but not the served text — the gateway brings it to the served one when it starts or the texts change; ${params.remedy(`\`${openclawCommand('doctor --fix')}\` does now`)}`,
+      }
+    case 'absent':
+      return {
+        name: 'anchor',
+        ok: false,
+        repair: true,
+        detail: `identity line for @${bare} missing from ${seen.path} — ${params.remedy(`run ${openclawCommand('doctor --fix')} (or ${openclawCommand('channels add --channel agentchat')})`)}`,
+      }
+    case 'hand_edited':
+      return left(true)
+    case 'other_agent':
+    case 'several_blocks':
+      return left(false)
+    default:
+      return { name: 'anchor', ok: false, detail: seen.detail }
+  }
 }
 
 /**

@@ -35,7 +35,7 @@ import {
   keepManualCurrent,
   keeperTextsView,
   loadsPersonalSkills,
-  NOT_OURS_RECHECK_MS,
+  MANUAL_CHECK_MS,
   latestManualOutcome,
   managedManualPath,
   manualMaxBytes,
@@ -557,13 +557,99 @@ describe('ManualKeeper — the kit ManualSync for the gateway, behind the owners
       await keeper.start()
       expect(keeper.latest).toMatchObject({ kind: 'not-ours' })
       fs.rmSync(path.dirname(file), { recursive: true })
-      await vi.advanceTimersByTimeAsync(NOT_OURS_RECHECK_MS + 1_000)
+      await vi.advanceTimersByTimeAsync(MANUAL_CHECK_MS + 1_000)
       await vi.waitFor(() => expect(fs.existsSync(file) && fs.readFileSync(file).equals(BUNDLED)).toBe(true), WAIT)
       keeper.stop()
       cache.stop()
     } finally {
       vi.useRealTimers()
     }
+  })
+
+  describe('the keeper looks at the file itself every 10 minutes (a local read and hash)', () => {
+    const fakeTimers = () => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] })
+    const keeperOn = async (texts: Texts, fetch = refusing) => {
+      const cache = new integration.TextsCache({ client: { baseUrl: API_BASE, texts: { get: async () => texts } } as never, runtime: 'openclaw', filePath: path.join(configDir, 'texts.json') })
+      await cache.start()
+      const lines = { info: vi.fn(), warn: vi.fn(), debug: vi.fn() }
+      const keeper = new ManualKeeper({ cache, configDir, log: lines, fetch })
+      await keeper.start()
+      return { cache, keeper, lines, done: () => (keeper.stop(), cache.stop()) }
+    }
+
+    it('a ClawHub copy that appears while the copy is current is seen; once it is removed the served manual is put back, with no restart', async () => {
+      fakeTimers()
+      try {
+        const k = await keeperOn(SERVED_TEXTS)
+        expect(fs.readFileSync(file)).toEqual(BUNDLED)
+        // Someone installs an old agentchat skill from ClawHub there while the gateway runs.
+        writeManaged(manualAt('2.0.0'))
+        fs.mkdirSync(path.join(path.dirname(file), '.clawhub'))
+        await vi.advanceTimersByTimeAsync(MANUAL_CHECK_MS + 1_000)
+        await k.keeper.check()
+        expect(k.keeper.latest).toMatchObject({ kind: 'not-ours' })
+        expect(k.lines.warn).toHaveBeenCalledWith(expect.stringMatching(/was installed from ClawHub .*this plugin leaves it alone/))
+        expect(fs.readFileSync(file)).toEqual(manualAt('2.0.0'))
+        // The folder is freed: the next look brings the served manual back.
+        fs.rmdirSync(path.join(path.dirname(file), '.clawhub'))
+        await vi.advanceTimersByTimeAsync(MANUAL_CHECK_MS + 1_000)
+        await k.keeper.check()
+        expect(fs.readFileSync(file)).toEqual(BUNDLED)
+        expect(k.lines.info).toHaveBeenCalledWith(expect.stringMatching(/is free again — keeping it current/))
+        k.done()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('an older copy written over the current one, or the file removed: put back at the next look', async () => {
+      fakeTimers()
+      try {
+        const k = await keeperOn(SERVED_TEXTS)
+        writeManaged(manualAt('2.0.0'))
+        await vi.advanceTimersByTimeAsync(MANUAL_CHECK_MS + 1_000)
+        await k.keeper.check()
+        expect(fs.readFileSync(file)).toEqual(BUNDLED)
+        fs.rmSync(path.dirname(file), { recursive: true })
+        await vi.advanceTimersByTimeAsync(MANUAL_CHECK_MS + 1_000)
+        await k.keeper.check()
+        expect(fs.readFileSync(file)).toEqual(BUNDLED)
+        k.done()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('the timer alone keeps looking: an unchanged tick, then a change, is picked up with no explicit check', async () => {
+      fakeTimers()
+      try {
+        const k = await keeperOn(SERVED_TEXTS)
+        await vi.advanceTimersByTimeAsync(MANUAL_CHECK_MS + 1_000) // an unchanged look, which settles at once
+        writeManaged(manualAt('2.0.0'))
+        await vi.advanceTimersByTimeAsync(MANUAL_CHECK_MS + 1_000)
+        for (const end = Date.now() + 3_000; Date.now() < end && !fs.readFileSync(file).equals(BUNDLED); ) await new Promise((r) => setImmediate(r))
+        expect(fs.readFileSync(file)).toEqual(BUNDLED)
+        k.done()
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it("a stale file that stays as it was adds no download (the kit's retry has its own backoff); looks run one at a time", async () => {
+      const newer = manualAt('9.0.0')
+      writeManaged(BUNDLED)
+      const k = await keeperOn(textsAnnouncing(newer, '9.0.0'))
+      const after = refusing.mock.calls.length
+      expect(after).toBeGreaterThan(0) // the start's sync tried
+      await k.keeper.check()
+      await k.keeper.check()
+      expect(refusing.mock.calls.length).toBe(after) // unchanged on disk: nothing fetched
+      // Changed on disk: one sync, however many looks run at once.
+      writeManaged(manualAt('2.0.0'))
+      await Promise.all([k.keeper.check(), k.keeper.check(), k.keeper.check()])
+      expect(refusing.mock.calls.length).toBe(after + 1)
+      k.done()
+    })
   })
 
   it('one keeper per process: the first account keeps it, the next one running takes over when it stops; release is idempotent', async () => {

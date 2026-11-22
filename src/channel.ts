@@ -85,7 +85,7 @@ import { namesApiKey, readAgentchatApiKey } from './channel-key.js'
 import { apiKeyFilePathFor, readTokenFile } from './credentials/key-file.js'
 import { setPluginRuntime } from './integration/runtime-holder.js'
 import { DEFAULT_API_BASE } from './integration/mcp.js'
-import { identityLineOf, loadServedTexts, type ServedTextsCopy } from './integration/texts.js'
+import { identityLineOf, identityTemplateOf, loadServedTexts, type ServedTextsCopy } from './integration/texts.js'
 import { placeManual, removeManagedManual } from './integration/manual.js'
 import { createSdkClient } from './binding/sdk-client.js'
 
@@ -461,7 +461,7 @@ export const agentchatSetupAdapter: BaseSetupAdapter & {
     try {
       const served = await loadServedTexts({ client: createSdkClient({ apiKey, apiBase }), accountId })
       const manual = await placeManual({ texts: served.texts, source: served.source, apiBase: served.apiBase, cfg })
-      const placed = placeIntegration({ cfg, handle, apiKey, apiBase, identityLine: identityLineOf(served), accountId, manual })
+      const placed = await placeIntegration({ cfg, handle, apiKey, apiBase, identityLine: identityLineOf(served), identityTemplate: identityTemplateOf(served), accountId, manual })
       if (keyFile) say(runtime, 'log', `[agentchat:${accountId}] ✓ key file: ${keyFile} (owner-only); openclaw.json holds only its path`)
       for (const line of formatPlacement(placed.steps.filter((s) => s.name !== 'mcp'))) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
       say(runtime, 'log', `[agentchat:${accountId}] ✓ config: agentHandle and mcp.servers.agentchat written with the account (restart the gateway — \`${openclawCommand('gateway restart')}\` — so the hosted tools resolve \${AGENTCHAT_API_KEY}: OpenClaw reads .env only at start)`)
@@ -602,7 +602,7 @@ export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResol
       return
     }
     if (!isEnabled) {
-      for (const line of removeIntegrationFiles(nextCfg, accountId, { clearKey: false })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
+      for (const line of await removeIntegrationFiles(nextCfg, accountId, { clearKey: false })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
       if (otherEnabledAccounts(nextCfg, accountId).length === 0) for (const line of removeManagedManual()) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
       return
     }
@@ -617,14 +617,16 @@ export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResol
       say(runtime, 'log', `[agentchat:${accountId}] agentHandle not in config — run \`${openclawCommand('doctor --fix')}\` to learn it from the key and place the identity line`)
       return
     }
-    const restored = restoreIdentityLine(nextCfg, accountId, handle, identityLineOf(served))
+    const restored = await restoreIdentityLine(nextCfg, accountId, handle, identityLineOf(served), identityTemplateOf(served))
     if (restored.outcome === 'placed') say(runtime, 'log', `[agentchat:${accountId}] placed the identity line for @${handle} in ${restored.path}`)
+    else if (restored.outcome === 'updated') say(runtime, 'log', `[agentchat:${accountId}] brought the identity line for @${handle} in ${restored.path} to the served text`)
+    else if (restored.outcome === 'left') say(runtime, 'log', `[agentchat:${accountId}] identity line for @${handle}: ${restored.detail ?? 'left as it is'}`)
     else if (restored.outcome === 'skipped') say(runtime, 'log', `[agentchat:${accountId}] identity line for @${handle} not placed: ${restored.detail ?? 'the served text is not available'}`)
     else if (restored.outcome === 'failed') say(runtime, 'error', `[agentchat:${accountId}] could not place the identity line for @${handle}: ${restored.detail ?? 'unknown error'} — run \`${openclawCommand('doctor --fix')}\` after fixing the path`)
   },
 
   async onAccountRemoved({ prevCfg, accountId, runtime }) {
-    for (const line of removeIntegrationFiles(prevCfg, accountId, { clearKey: true })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
+    for (const line of await removeIntegrationFiles(prevCfg, accountId, { clearKey: true })) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
     if (otherEnabledAccounts(prevCfg, accountId).length === 0) for (const line of removeManagedManual()) say(runtime, 'log', `[agentchat:${accountId}] ${line}`)
   },
 }

@@ -54,7 +54,7 @@ import { turnEndOf } from '../integration/turns.js'
 import { readAgentChatCalls } from '../integration/run.js'
 import { getPluginRuntime } from '../integration/runtime-holder.js'
 import { removeOldStateFiles } from '../integration/state.js'
-import { refreshIdentityLine } from '../integration/placement.js'
+import { anchorRemedy, followIdentityLine } from '../integration/placement.js'
 import { NIX_MODE_ERROR_CODE, clientIdentityText, refreshHostedMcpEntry, toolsUseOtherKey, type ConfigMutator } from '../integration/mcp.js'
 import {
   DEFAULT_GATE_TIMEOUT_MS,
@@ -222,18 +222,50 @@ export async function startServedTexts(params: {
   if (first) logger.info({ version: first.version, manual: first.manual?.version, source: cache.source }, 'served texts in hand')
   else logger.warn({ err: cache.lastError }, 'served texts not available yet (AgentChat unreachable, nothing cached) — nothing is gated until the first copy arrives')
   if (handle) {
-    // The served identity line replaces a placed one that differs (an
-    // install upgraded from a release that bundled the line gets the
-    // served one on its first start): once from the copy in hand, then on
-    // every copy that changes. An absent line is the wizard's / doctor's
-    // to place.
-    const refresh = (copy: Texts) => {
-      const refreshed = refreshIdentityLine(ctx.cfg, ctx.accountId, handle, spellTextsForOpenClaw(copy).identity_line)
-      if (refreshed.outcome === 'updated') ctx.log?.info?.(`[agentchat:${ctx.accountId}] identity line refreshed from the served texts in ${refreshed.path}`)
-      else if (refreshed.outcome === 'failed') ctx.log?.warn?.(`[agentchat:${ctx.accountId}] identity line could not be refreshed in ${refreshed.path}: ${refreshed.detail ?? 'unknown error'}`)
+    // This agent's identity block follows the served line (the kit's strict
+    // `follow`): once from the copy in hand, then on every copy that changes,
+    // one at a time. A block edited by hand or another agent's is left, with
+    // one line saying what to do; an absent block is the wizard's / doctor's
+    // to place. The served template goes too: an unmarked block from an
+    // earlier release is recognised by it.
+    let following: Promise<void> = Promise.resolve()
+    let lastSaid: string | null = null
+    const say = (level: 'info' | 'warn', line: string) => {
+      if (line === lastSaid) return
+      lastSaid = line
+      ctx.log?.[level]?.(`[agentchat:${ctx.accountId}] ${line}`)
     }
-    if (first) refresh(first)
-    cache.onChange((copy) => refresh(copy))
+    const refresh = (copy: Texts): Promise<void> => {
+      following = following.then(async () => {
+        const spelled = spellTextsForOpenClaw(copy)
+        const followed = await followIdentityLine(ctx.cfg, ctx.accountId, handle, spelled.identity_line, spelled.identity_line_template)
+        switch (followed.outcome) {
+          case 'updated':
+            lastSaid = null
+            ctx.log?.info?.(`[agentchat:${ctx.accountId}] identity line refreshed from the served texts in ${followed.path}`)
+            return
+          case 'unchanged':
+          case 'absent':
+            lastSaid = null
+            return
+          case 'hand_edited':
+            say('info', `identity line for @${handle.replace(/^@/, '')}: ${followed.detail} — ${anchorRemedy(followed.outcome, followed.claimed, handle)}`)
+            return
+          case 'other_agent':
+          case 'several_blocks':
+            say('warn', `identity line for @${handle.replace(/^@/, '')}: ${followed.detail} — ${anchorRemedy(followed.outcome, followed.claimed, handle)}`)
+            return
+          case 'edited_meanwhile':
+            ctx.log?.debug?.(`[agentchat:${ctx.accountId}] ${followed.detail}`)
+            return
+          default:
+            say('warn', `identity line could not be refreshed: ${followed.detail}`)
+        }
+      })
+      return following
+    }
+    if (first) await refresh(first)
+    cache.onChange((copy) => void refresh(copy))
   }
   // The manual: one keeper per process on this account's texts (the next
   // account still running takes over when this one stops).

@@ -107,7 +107,7 @@ describe('status adapter — the doctor-style probe', () => {
   })
 
   it('is ok once placed with the key in the environment', async () => {
-    const placed = placeIntegration({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const placed = await placeIntegration({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
     process.env.AGENTCHAT_API_KEY = KEY
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account(placed.cfg) as never, timeoutMs: 2000, cfg: placed.cfg as never } as never)
     expect(probe.ok).toBe(true)
@@ -117,7 +117,7 @@ describe('status adapter — the doctor-style probe', () => {
   it('the manual: current is a muted line; stale (version, announced version, last error) and a higher-tier agentchat skill are warn lines', async () => {
     await placeServedManual()
     process.env.AGENTCHAT_API_KEY = KEY
-    const placed = placeIntegration({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const placed = await placeIntegration({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
     const probeOf = () => agentchatStatusAdapter.probeAccount!({ account: account(placed.cfg) as never, timeoutMs: 2000, cfg: placed.cfg as never } as never)
     const manualLines = (probe: Awaited<ReturnType<typeof probeOf>>) => agentchatStatusAdapter.formatCapabilitiesProbe!({ probe } as never).filter((l) => l.text.startsWith('manual:'))
     expect(manualLines(await probeOf())).toEqual([{ text: `manual: current (${BUNDLED_MANUAL_VERSION}) — ${managedManualPath()}`, tone: 'muted' }])
@@ -141,7 +141,7 @@ describe('status adapter — the doctor-style probe', () => {
   it('AgentChat unreachable: says so, and the local lines (key, identity line, manual, tools) still print', async () => {
     await placeServedManual()
     process.env.AGENTCHAT_API_KEY = KEY
-    const placed = placeIntegration({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
+    const placed = await placeIntegration({ cfg: { agents: { defaults: { workspace } } }, handle: 'alice', apiKey: KEY, apiBase: 'https://api.agentchat.me', identityLine: IDENTITY_LINE, stateDir: process.env.OPENCLAW_STATE_DIR })
     getMe.mockRejectedValueOnce(new ConnectionError('fetch failed'))
     vi.mocked(probeHostedMcp).mockClear()
     const probe = await agentchatStatusAdapter.probeAccount!({ account: account(placed.cfg) as never, timeoutMs: 2000, cfg: placed.cfg as never } as never)
@@ -358,7 +358,7 @@ describe('status adapter — the doctor-style probe', () => {
     expect(probe.placement?.find((c) => c.name === 'anchor')?.detail).toMatch(/run openclaw doctor --fix/)
   })
 
-  it('resolveAccountState', () => {
+  it('resolveAccountState', async () => {
     expect(agentchatStatusAdapter.resolveAccountState!({ account: { configured: true }, configured: true, enabled: true } as never)).toBe('linked')
     expect(agentchatStatusAdapter.resolveAccountState!({ account: {}, configured: false, enabled: true } as never)).toBe('not configured')
     expect(agentchatStatusAdapter.resolveAccountState!({ account: {}, configured: true, enabled: false } as never)).toBe('disabled')

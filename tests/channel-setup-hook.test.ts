@@ -134,7 +134,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
     expect(lines).toEqual([{ level: 'error', line: '[agentchat:default] no verdict on the API key, saving it for the runtime to try: fetch failed' }])
   })
 
-  it('the handle AgentChat returned is written as it is: no local shape rule drops it', () => {
+  it('the handle AgentChat returned is written as it is: no local shape rule drops it', async () => {
     const next = agentchatPlugin.setup!.applyAccountConfig({ cfg: { channels: {} } as never, accountId: 'default', input: { token: KEY, agentHandle: 'Shape_The_Old_Rule_Refused' } as never }) as unknown as {
       channels: { agentchat: { agentHandle: string } }
     }
@@ -145,7 +145,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
     expect(empty.channels.agentchat.agentHandle).toBeUndefined()
   })
 
-  it('applyAccountConfig (synchronous, the one persisted write) carries the key file path, agentHandle and mcp.servers.agentchat — never the key', () => {
+  it('applyAccountConfig (synchronous, the one persisted write) carries the key file path, agentHandle and mcp.servers.agentchat — never the key', async () => {
     const next = agentchatPlugin.setup!.applyAccountConfig({ cfg: { channels: {} } as never, accountId: 'default', input: { token: KEY, agentHandle: '@alice' } as never }) as unknown as {
       channels: { agentchat: { apiKey?: string; apiKeyFile: string; agentHandle: string } }
       mcp: { servers: { agentchat: { url: string; transport: string; headers: { Authorization: string } } } }
@@ -163,7 +163,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
     expect(next.plugins).toBeUndefined()
   })
 
-  it('applyAccountConfig brings the entry an earlier release wrote up to date in the same write', () => {
+  it('applyAccountConfig brings the entry an earlier release wrote up to date in the same write', async () => {
     const old = { channels: {}, mcp: { servers: { agentchat: { url: 'https://api.agentchat.me/mcp', transport: 'streamable-http', headers: { Authorization: 'Bearer ${AGENTCHAT_API_KEY}' } } } } }
     const next = agentchatPlugin.setup!.applyAccountConfig({ cfg: old as never, accountId: 'default', input: { token: KEY, agentHandle: '@alice' } as never }) as unknown as {
       mcp: { servers: { agentchat: { headers: Record<string, string> } } }
@@ -171,7 +171,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
     expect(next.mcp.servers.agentchat.headers).toEqual({ Authorization: 'Bearer ${AGENTCHAT_API_KEY}', 'X-AgentChat-Client': 'openclaw' })
   })
 
-  it('applyAccountConfig without a learnt handle (older OpenClaw) still registers the hosted tools', () => {
+  it('applyAccountConfig without a learnt handle (older OpenClaw) still registers the hosted tools', async () => {
     const next = agentchatPlugin.setup!.applyAccountConfig({ cfg: { channels: {} } as never, accountId: 'default', input: { token: KEY } }) as unknown as {
       channels: { agentchat: { apiKey: string; agentHandle?: string } }
       mcp: { servers: Record<string, unknown> }
@@ -221,7 +221,7 @@ describe('non-interactive setup — prepare → apply → after', () => {
 describe('runtime holder — the setup-only proxy is not a runtime', () => {
   afterEach(() => resetPluginRuntimeForTest())
 
-  it('rejects a Proxy that throws on property access and keeps a real runtime', () => {
+  it('rejects a Proxy that throws on property access and keeps a real runtime', async () => {
     expect(isUsablePluginRuntime(throwingRuntimeProxy())).toBe(false)
     setPluginRuntime(throwingRuntimeProxy() as never)
     expect(getPluginRuntime()).toBeNull()
@@ -255,9 +255,9 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
     },
   })
   const anchorFile = () => path.join(workspace, 'AGENTS.md')
-  const ANCHOR = '# me\n\n<!-- agentchat:start -->\nI am @alice on AgentChat (api.agentchat.me).\n<!-- agentchat:end -->\n'
+  const ANCHOR = '# me\n\n<!-- agentchat:start -->\n<!-- agentchat:handle alice -->\nI am @alice on AgentChat (api.agentchat.me).\n<!-- agentchat:end -->\n'
 
-  it('setAccountEnabled(false) disables, strips our MCP entry, keeps the key — and the result passes the channel schema OpenClaw validates against', () => {
+  it('setAccountEnabled(false) disables, strips our MCP entry, keeps the key — and the result passes the channel schema OpenClaw validates against', async () => {
     fs.writeFileSync(anchorFile(), ANCHOR)
     const next = agentchatPlugin.config.setAccountEnabled!({ cfg: substituted() as never, accountId: 'default', enabled: false }) as unknown as {
       channels: { agentchat: Record<string, unknown> & { enabled: boolean; apiKey: string } }
@@ -275,14 +275,14 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
     expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(ANCHOR)
   })
 
-  it('setAccountEnabled(true) re-enables and still validates', () => {
+  it('setAccountEnabled(true) re-enables and still validates', async () => {
     const disabled = { channels: { agentchat: { apiKey: KEY, enabled: false } } }
     const next = agentchatPlugin.config.setAccountEnabled!({ cfg: disabled as never, accountId: 'default', enabled: true }) as unknown as { channels: { agentchat: Record<string, unknown> & { enabled?: boolean } } }
     expect(next.channels.agentchat.enabled ?? true).toBe(true)
     expect(agentchatChannelConfigSchema.safeParse(next.channels.agentchat).success).toBe(true)
   })
 
-  it('deleteAccount drops channels.agentchat and our MCP entry, touches no file, and leaves nothing to validate', () => {
+  it('deleteAccount drops channels.agentchat and our MCP entry, touches no file, and leaves nothing to validate', async () => {
     fs.writeFileSync(anchorFile(), ANCHOR)
     const next = agentchatPlugin.config.deleteAccount!({ cfg: substituted() as never, accountId: 'default' }) as unknown as {
       channels?: { agentchat?: unknown }
@@ -295,7 +295,7 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
     expect(fs.readFileSync(anchorFile(), 'utf8')).toBe(ANCHOR)
   })
 
-  it('the wizard disable hook is pure too', () => {
+  it('the wizard disable hook is pure too', async () => {
     fs.writeFileSync(anchorFile(), ANCHOR)
     const next = agentchatSetupWizard.disable!(substituted() as never) as unknown as { channels: { agentchat: { enabled: boolean } }; mcp: { servers: Record<string, unknown> } }
     expect(next.channels.agentchat.enabled).toBe(false)
@@ -393,7 +393,7 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
     it('disable then re-enable through the hooks restores AGENTS.md byte for byte', async () => {
       fs.writeFileSync(anchorFile(), '# me\n\nsome notes\n')
       const enabledCfg = substituted()
-      writeAgentsAnchor({ cfg: enabledCfg as never, handle: 'alice', text: IDENTITY_LINE })
+      await writeAgentsAnchor({ cfg: enabledCfg as never, handle: 'alice', text: IDENTITY_LINE })
       const placed = fs.readFileSync(anchorFile(), 'utf8')
       const disabledCfg = agentchatPlugin.config.setAccountEnabled!({ cfg: enabledCfg as never, accountId: 'default', enabled: false })
       await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: enabledCfg as never, nextCfg: disabledCfg, accountId: 'default', runtime })
@@ -405,7 +405,7 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
 
     it('onAccountConfigChanged on re-enable leaves a present identity line byte-identical', async () => {
       const prevCfg = { ...substituted(), channels: { agentchat: { apiKey: KEY, agentHandle: 'alice', enabled: false } } }
-      writeAgentsAnchor({ cfg: prevCfg as never, handle: 'alice', text: IDENTITY_LINE })
+      await writeAgentsAnchor({ cfg: prevCfg as never, handle: 'alice', text: IDENTITY_LINE })
       const odd = `# me\n\n\n\n${fs.readFileSync(anchorFile(), 'utf8').trim()}\n\n\n# tail` // spacing a rewrite would normalise
       fs.writeFileSync(anchorFile(), odd)
       await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg: substituted() as never, accountId: 'default', runtime })
