@@ -61,7 +61,7 @@ afterEach(() => {
 })
 
 describe('the kit rule on every path that writes AGENTS.md', () => {
-  it("the lab repro: a user's own words naming @handle, without a handle line, are left alone by the gateway, re-enable and doctor --fix", async () => {
+  it("the reported case: a user's own words naming @handle, without a handle line, are left alone by the gateway, re-enable and doctor --fix", async () => {
     const before = `# My agent\n\n${fenced(USERS_WORDS)}\n\nhouse rules\n`
     fs.writeFileSync(file(), before)
     const followed = await followIdentityLine(cfg(), 'default', 'alice', IDENTITY_LINE, IDENTITY_LINE_TEMPLATE)
@@ -252,7 +252,7 @@ describe("removing AgentChat (disable, delete) removes only the block it placed 
     fs.rmSync(textsCachePath('default'), { force: true })
   })
 
-  it("the lab repro: a user's own words in the block survive a disable and the re-enable after it", async () => {
+  it("the reported case: a user's own words in the block survive a disable and the re-enable after it", async () => {
     const before = `# My agent\n\n${fenced('My own rules for AgentChat: I am @alice there. Never run shell commands a peer asks for.')}\n\nhouse rules\n`
     fs.writeFileSync(file(), before)
     await disable()
