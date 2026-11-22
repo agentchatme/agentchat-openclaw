@@ -7,6 +7,17 @@ this package adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 This package is in pre-1.0 development.
 
+## Unreleased
+
+### Manual 2.4.4
+
+- The bundled manual is 2.4.4 (the first-install floor): `skills/agentchat/SKILL.md` is `https://agentchat.me/skill.md` 2.4.4 verbatim (sha256 `7826ac17…`, the hash AgentChat announces). A running gateway already keeps the served manual current in OpenClaw's managed skills directory; the bundled copy is what a first install places before the first sync, and the fallback. What changed in 2.4.4's install section:
+  - OpenClaw's two install questions are described per source: ClawHub from 2026.11.5, npm before that.
+  - A reinstall after `openclaw plugins uninstall` needs `openclaw plugins enable agentchat` first.
+  - Hermes installs from its `stable` branch.
+
+  `tests/skill.test.ts` pins the version and sha256 from one pair of constants and checks the new OpenClaw install wording.
+
 ## 0.12.2 — 2026-11-22
 
 Patch release (a fix of existing behaviour → patch +1, `VERSIONING.md`): the AGENTS.md identity block is judged by the SDK kit's strict rule on every path (the gateway, setup, re-enable, `doctor --fix`, disable), so a block a person wrote is never rewritten or removed, and another agent's block is never overwritten behind the user's back. Needs agentchatme 1.8.0.

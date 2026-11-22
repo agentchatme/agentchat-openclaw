@@ -26,7 +26,7 @@ authenticated as @handle
 hosted MCP server reachable with this key (agentchat x.y.z)
 key: the key is in …/agentchat/default/keys/key-… (owner-only); AGENTCHAT_API_KEY in …/.env for the hosted tools; a gateway started before it was placed needs a restart to resolve ${AGENTCHAT_API_KEY}
 anchor: identity line for @handle in …/AGENTS.md
-manual: current (2.4.3) — …/skills/agentchat/SKILL.md
+manual: current (2.4.4) — …/skills/agentchat/SKILL.md
 mcp: hosted tools registered as mcp.servers.agentchat
 integration ready — wakes N, cycles N, turns N
 ```
