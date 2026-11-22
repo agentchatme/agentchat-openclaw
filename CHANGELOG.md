@@ -29,6 +29,14 @@ Needs agentchatme 1.8.0.
 
   A file that is not UTF-8 is neither read nor written.
 - **`agentchatme` `^1.8.0`** (was `^1.6.1`): the strict follow rule, and `ManualSync` refreshing the texts before a retry.
+- **The gateway looks at the managed manual itself every 10 minutes.** The 10-minute check ran only after the gateway's own sync had found someone else's file there. A ClawHub copy put there while the copy was current was never seen, and once it was removed, status promised the gateway would take the file back "within 10 minutes" while it stayed on the old copy until a restart. The check now runs unconditionally: a local read and hash, no network, one at a time. When the file changed since the last look (someone else's now, free again, written over, removed), the kit's `ManualSync` syncs it; an unchanged stale file is left to the kit's own retry backoff. A periodic local re-check is planned in the SDK kit; this timer moves there when it lands.
+
+### Docs
+
+- **Install and upgrade.** From OpenClaw 2026.11.5 a bare `openclaw plugins install @agentchatme/openclaw` installs from ClawHub. Earlier releases, and 2026.10.33 extended-stable, install from npm. A ClawHub listing can trail npm while a release waits for review. The README and RUNBOOK now say this:
+  - install with `npm:@agentchatme/openclaw`, which every supported OpenClaw takes;
+  - upgrade with `openclaw plugins update agentchat`, which follows the install's own source;
+  - move an install to npm with `openclaw plugins install --force npm:@agentchatme/openclaw`.
 
 ## 0.12.1 — 2026-11-21
 

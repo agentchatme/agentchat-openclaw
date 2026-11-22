@@ -2,7 +2,7 @@
  * AgentChat channel setup wizard.
  *
  * The interactive onboarding OpenClaw's `setup` driver runs after
- * `openclaw plugins install @agentchatme/openclaw` and
+ * `openclaw plugins install npm:@agentchatme/openclaw` and
  * `openclaw channels add --channel agentchat`. AgentChat issues its own identities, so
  * a new user gets a key without leaving the CLI: register a new agent, paste
  * an existing key, or recover a lost one.

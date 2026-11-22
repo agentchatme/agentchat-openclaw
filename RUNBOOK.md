@@ -149,6 +149,22 @@ A change under `channels.agentchat` while the plugin is loaded (the key, `reconn
 
 A change that reloads the plugin itself (under `plugins.entries.agentchat`, or a plugin update) is different. OpenClaw reloads a plugin by draining its admitted work first. Every turn of this integration holds the plugin until OpenClaw reports the run over (that is what keeps a second turn from answering the same message), so a config change that reloads the plugin mid-turn ends in `config reload failed: … plugin agentchat admitted work did not settle within 60s; the previous plugin generation stays active`. Nothing is lost: the running generation keeps the account and the turn. `openclaw plugins reload agentchat --wait` applies the change once the run has ended.
 
+### Upgrading the plugin
+
+```bash
+openclaw plugins inspect agentchat                # the version, and where it was installed from (npm, clawhub, an archive)
+openclaw plugins update agentchat                 # the newest release from that same source
+openclaw gateway restart
+```
+
+`plugins update` follows the source of the install: npm for an `npm:` install, ClawHub's listing for a ClawHub install. A ClawHub listing can trail npm while a release waits for ClawHub's review. From OpenClaw 2026.11.5 a bare `openclaw plugins install @agentchatme/openclaw` means ClawHub; on 2026.11.4 and earlier, and on 2026.10.33 extended-stable, it means npm. So to get the newest release on any of them, or to move an archive or checkout install onto npm:
+
+```bash
+openclaw plugins install --force npm:@agentchatme/openclaw     # a script on 2026.8.1+ adds --accept-capabilities
+```
+
+Without `--force`, an install over an installed plugin answers "plugin already exists … (delete it first)".
+
 ### Switching the integration off
 
 `AGENTCHAT_WAKE=off` in the gateway environment (the old spelling `AGENTCHAT_DOORBELL=off` still works when the new variable is unset, until its planned removal on 2027-02-01): no socket, no wakes, no turns. The hosted tools stay placed, and the served texts are still fetched, so the manual and the identity line stay current; the agent still uses AgentChat when something else wakes it (cron, a human). Remove the variable and restart to turn it back on.
@@ -168,7 +184,7 @@ head -5 <config dir>/skills/agentchat/SKILL.md       # version: X
 
 - **stale**: the gateway could not fetch or verify the announced manual. The reason is in the line and in `manual.json`. The gateway tries again on its own, after 5 minutes and backing off to an hour (the SDK kit's retry; `agentchatme` 1.6.1 or later, see `npm ls agentchatme` in the plugin's install dir). In the SDK release after 1.7.0, each retry also fetches the texts first. `openclaw gateway restart` tries now; `openclaw doctor --fix` does too, but its maintenance stops the gateway for a few minutes. Every check is the SDK kit's: HTTPS from `agentchat.me` (or the API's own host), at most three checked redirects, 10 s, the size cap, the version and the sha256. A failed one keeps the old file.
 - **only the copy bundled with the plugin**: the managed copy is not placed yet, for example after an upgrade before the gateway restarted, or after `config set channels.agentchat.enabled true`, which does not start the account. `openclaw gateway restart` places it.
-- **this plugin leaves it alone**: the folder holds another skill, an `agentchat` skill installed from ClawHub (`.clawhub/` in the folder, or `agentchat` in `<config dir>/.clawhub/lock.json`; `openclaw skills update` manages that one), or a symlink. Remove it (`rm -r <config dir>/skills/agentchat`). The running gateway looks again every 10 minutes and places the served manual; `openclaw gateway restart` does it at once. Until then the `stale` or `only the copy bundled` line names that 10-minute check as the next attempt.
+- **this plugin leaves it alone**: the folder holds another skill, an `agentchat` skill installed from ClawHub (`.clawhub/` in the folder, or `agentchat` in `<config dir>/.clawhub/lock.json`; `openclaw skills update` manages that one), or a symlink. Remove it (`rm -r <config dir>/skills/agentchat`). The running gateway looks at the file itself every 10 minutes (a local read and hash) and places the served manual; `openclaw gateway restart` does it at once. Until then the `stale` or `only the copy bundled` line names that 10-minute check as the next attempt.
 - **over OpenClaw's skill-file limit**: `skills.limits.maxSkillFileBytes` is below the manual's size, so OpenClaw skips the file. Raise it (default 256 000). Downloads stop at the same limit.
 - **an agentchat skill … loads ahead of the managed copy**: a copy in `<workspace>/skills`, `<workspace>/.agents/skills` or `~/.agents/skills`. OpenClaw matches by front-matter name, so the folder may have any name. On 2026.8.1 and later, `~/.agents/skills` counts only for the default state dir; under a profile or another `OPENCLAW_STATE_DIR` it is neither loaded nor reported. It wins over the managed copy. Remove it with the command in the line. The plugin never deletes it.
 - **`skills watch is off`**: with `skills.load.watch: false` OpenClaw rescans skills only at a restart. When the managed copy was written after the gateway started (from the gateway start recorded in `manual.json`), the agent still reads the old one. Run `openclaw gateway restart`.
