@@ -157,11 +157,16 @@ openclaw plugins update agentchat                 # the newest release from that
 openclaw gateway restart
 ```
 
-`plugins update` follows the source of the install: npm for an `npm:` install, ClawHub's listing for a ClawHub install. A ClawHub listing can trail npm while a release waits for ClawHub's review. From OpenClaw 2026.11.5 a bare `openclaw plugins install @agentchatme/openclaw` means ClawHub; on 2026.11.4 and earlier, and on 2026.10.33 extended-stable, it means npm. So to get the newest release on any of them, or to move an archive or checkout install onto npm:
+`plugins update` follows the source of the install: what ClawHub lists for a ClawHub install, npm for an npm install. Which one a plain `openclaw plugins install @agentchatme/openclaw` used depends on the release: ClawHub from OpenClaw 2026.11.5, npm on 2026.11.4 and earlier and on 2026.10.33 extended-stable. A release reaches npm first and ClawHub lists it after its own review, so for a while after a release `update` on a ClawHub install finds nothing newer. That is expected; it arrives once ClawHub lists it.
+
+To move an install onto another source (ClawHub to npm or back, or off an archive or a checkout):
 
 ```bash
-openclaw plugins install --force npm:@agentchatme/openclaw     # a script on 2026.8.1+ adds --accept-capabilities
+openclaw plugins install --force clawhub:@agentchatme/openclaw  # the reviewed copy
+openclaw plugins install --force npm:@agentchatme/openclaw      # npm, where a release lands first
 ```
+
+A script on 2026.8.1+ adds `--accept-capabilities` to either. An npm install prints OpenClaw's warning that the source is outside ClawHub review and trust metadata; `--force` is what acknowledges it.
 
 Without `--force`, an install over an installed plugin answers "plugin already exists … (delete it first)".
 

@@ -33,10 +33,11 @@ Needs agentchatme 1.8.0.
 
 ### Docs
 
-- **Install and upgrade.** From OpenClaw 2026.11.5 a bare `openclaw plugins install @agentchatme/openclaw` installs from ClawHub. Earlier releases, and 2026.10.33 extended-stable, install from npm. A ClawHub listing can trail npm while a release waits for review. The README and RUNBOOK now say this:
-  - install with `npm:@agentchatme/openclaw`, which every supported OpenClaw takes;
-  - upgrade with `openclaw plugins update agentchat`, which follows the install's own source;
-  - move an install to npm with `openclaw plugins install --force npm:@agentchatme/openclaw`.
+- **Install and upgrade.** The README and RUNBOOK now say, per OpenClaw release, where `openclaw plugins install @agentchatme/openclaw` installs from: ClawHub from 2026.11.5, npm on 2026.11.4 and earlier and on 2026.10.33 extended-stable.
+  - The package name stays the install command.
+  - `npm:@agentchatme/openclaw` is the alternative for npm. OpenClaw warns that the source is outside ClawHub review; npm gets a release first, and ClawHub lists it after its own review.
+  - Upgrade with `openclaw plugins update agentchat`, which follows the install's own source, then `openclaw gateway restart`; `openclaw plugins inspect agentchat` shows the version and source.
+  - Move between sources with `openclaw plugins install --force clawhub:@agentchatme/openclaw` or `--force npm:@agentchatme/openclaw`.
 
 ## 0.12.1 — 2026-11-21
 
