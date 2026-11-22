@@ -277,7 +277,7 @@ describe('doctor adapter', () => {
     const before = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')
     const fixed = await agentchatDoctorAdapter.repairConfig!({ cfg: cfg() as never, doctorFixCommand: 'fix', env: {} })
     expect(fixed.changes.some((c) => c.includes('identity line'))).toBe(false)
-    expect(fixed.warnings).toContainEqual(expect.stringMatching(/^\[agentchat:default\] identity line for @alice left as it is: the AgentChat block in .*AGENTS\.md is @bob's, not @alice's; left as it is — if this agent is @alice, delete that block/))
+    expect(fixed.warnings).toContainEqual(expect.stringMatching(/^\[agentchat:default\] identity line for @alice: the AgentChat block in .*AGENTS\.md is @bob's, not @alice's; left as it is — if this agent is @alice, delete that block/))
     expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf8')).toBe(before)
     // and the preview says so too
     const preview = await agentchatDoctorAdapter.collectPreviewWarnings!({ cfg: cfg() as never, doctorFixCommand: 'fix', env: {} })

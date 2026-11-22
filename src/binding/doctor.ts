@@ -235,7 +235,7 @@ export const agentchatDoctorAdapter: ChannelDoctorAdapter = {
         const restored = await restoreIdentityLine(next, accountId, handle, identityLineOf(served), identityTemplateOf(served))
         if (restored.outcome === 'placed') changes.push(`placed the identity line for @${handle.replace(/^@/, '')} in ${restored.path}`)
         else if (restored.outcome === 'updated') changes.push(`brought the identity line for @${handle.replace(/^@/, '')} in ${restored.path} to the served text`)
-        else if (restored.outcome === 'left') warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] identity line for @${handle.replace(/^@/, '')} left as it is: ${restored.detail ?? ''}`)
+        else if (restored.outcome === 'left') warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] identity line for @${handle.replace(/^@/, '')}: ${restored.detail ?? 'left as it is'}`)
         else if (restored.outcome === 'failed') warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] could not place the identity line for @${handle.replace(/^@/, '')}: ${restored.detail ?? 'unknown error'}`)
         else if (restored.outcome === 'skipped') warnings.push(`[${AGENTCHAT_CHANNEL_ID}:${accountId}] identity line for @${handle.replace(/^@/, '')} not placed: ${restored.detail ?? 'the served text is not available'}`)
       }

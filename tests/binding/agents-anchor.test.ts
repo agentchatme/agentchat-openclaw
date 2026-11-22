@@ -14,6 +14,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 
 import { writeAgentsAnchor, removeAgentsAnchor, resolveWorkspaceDir, inspectAgentsAnchor, readAgentsAnchor } from '../../src/binding/agents-anchor.js'
+import { integration } from 'agentchatme'
+
 import { IDENTITY_LINE, identityLineFor } from '../helpers/texts.js'
 
 function cfgFor(workspaceDir: string): { agents: { defaults: { workspace: string } } } {
@@ -170,7 +172,7 @@ describe('agents-anchor', () => {
       const file = path.join(workspace, 'AGENTS.md')
       fs.writeFileSync(file, '# Header\n\nUser body.\n', 'utf-8')
       await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
-      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace) })).removed).toBe(true)
+      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice' })).outcome).toBe('removed')
       const after = fs.readFileSync(file, 'utf-8')
       expect(after).toContain('# Header')
       expect(after).toContain('User body.')
@@ -182,18 +184,18 @@ describe('agents-anchor', () => {
       const workspace = path.join(tmpDir, 'workspace')
       fs.mkdirSync(workspace, { recursive: true })
       fs.writeFileSync(path.join(workspace, 'AGENTS.md'), '# Header\n', 'utf-8')
-      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace) })).removed).toBe(false)
+      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice' })).outcome).toBe('absent')
       expect(fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf-8')).toBe('# Header\n')
       const empty = path.join(tmpDir, 'workspace-empty')
       fs.mkdirSync(empty, { recursive: true })
-      expect((await removeAgentsAnchor({ cfg: cfgFor(empty) })).removed).toBe(false)
+      expect((await removeAgentsAnchor({ cfg: cfgFor(empty), handle: 'alice' })).outcome).toBe('absent')
       expect(fs.existsSync(path.join(empty, 'AGENTS.md'))).toBe(false)
     })
 
     it('handles a workspace where the file holds ONLY our anchor (clean delete)', async () => {
       const workspace = path.join(tmpDir, 'workspace')
       await writeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice', text: IDENTITY_LINE })
-      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace) })).removed).toBe(true)
+      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice' })).outcome).toBe('removed')
       const after = fs.readFileSync(path.join(workspace, 'AGENTS.md'), 'utf-8')
       expect(after).not.toContain('agentchat:start')
       expect(after).not.toContain('@alice')
@@ -217,18 +219,22 @@ describe('agents-anchor', () => {
       expect(content).toContain('## Other user content')
     })
 
-    it('removeAgentsAnchor strips both legacy and unified blocks', async () => {
+    it("removeAgentsAnchor removes this agent's legacy block (a line AgentChat served, in the old fences); a legacy block beside a current one is several blocks, left", async () => {
       const workspace = path.join(tmpDir, 'workspace')
       fs.mkdirSync(workspace, { recursive: true })
       const file = path.join(workspace, 'AGENTS.md')
-      const mixed = ['# Header', '', '<!-- agentchat-skill:start -->', 'Legacy block.', '<!-- agentchat-skill:end -->', '', '<!-- agentchat:start -->', 'Unified block.', '<!-- agentchat:end -->', '', '## Tail'].join('\n')
-      fs.writeFileSync(file, mixed + '\n', 'utf-8')
-      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace) })).removed).toBe(true)
+      const earlier = integration.anchor.EARLIER_IDENTITY_LINES[1]!.split('<handle>').join('alice')
+      fs.writeFileSync(file, ['# Header', '', '<!-- agentchat-skill:start -->', earlier, '<!-- agentchat-skill:end -->', '', '## Tail', ''].join('\n'), 'utf-8')
+      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice' })).outcome).toBe('removed')
       const content = fs.readFileSync(file, 'utf-8')
       expect(content).not.toContain('agentchat-skill:start')
-      expect(content).not.toContain('agentchat:start')
       expect(content).toContain('# Header')
       expect(content).toContain('## Tail')
+
+      const mixed = ['# Header', '', '<!-- agentchat-skill:start -->', 'Legacy block.', '<!-- agentchat-skill:end -->', '', '<!-- agentchat:start -->', 'Unified block.', '<!-- agentchat:end -->', '', '## Tail'].join('\n') + '\n'
+      fs.writeFileSync(file, mixed, 'utf-8')
+      expect((await removeAgentsAnchor({ cfg: cfgFor(workspace), handle: 'alice' })).outcome).toBe('several_blocks')
+      expect(fs.readFileSync(file, 'utf-8')).toBe(mixed)
     })
   })
 })

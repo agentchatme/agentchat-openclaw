@@ -255,7 +255,7 @@ describe('config.setAccountEnabled / config.deleteAccount (what `channels remove
     },
   })
   const anchorFile = () => path.join(workspace, 'AGENTS.md')
-  const ANCHOR = '# me\n\n<!-- agentchat:start -->\nI am @alice on AgentChat (api.agentchat.me).\n<!-- agentchat:end -->\n'
+  const ANCHOR = '# me\n\n<!-- agentchat:start -->\n<!-- agentchat:handle alice -->\nI am @alice on AgentChat (api.agentchat.me).\n<!-- agentchat:end -->\n'
 
   it('setAccountEnabled(false) disables, strips our MCP entry, keeps the key — and the result passes the channel schema OpenClaw validates against', async () => {
     fs.writeFileSync(anchorFile(), ANCHOR)

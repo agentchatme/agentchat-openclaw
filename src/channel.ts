@@ -620,7 +620,7 @@ export const agentchatLifecycleAdapter: NonNullable<ChannelPlugin<AgentchatResol
     const restored = await restoreIdentityLine(nextCfg, accountId, handle, identityLineOf(served), identityTemplateOf(served))
     if (restored.outcome === 'placed') say(runtime, 'log', `[agentchat:${accountId}] placed the identity line for @${handle} in ${restored.path}`)
     else if (restored.outcome === 'updated') say(runtime, 'log', `[agentchat:${accountId}] brought the identity line for @${handle} in ${restored.path} to the served text`)
-    else if (restored.outcome === 'left') say(runtime, 'log', `[agentchat:${accountId}] identity line for @${handle} left as it is: ${restored.detail ?? ''}`)
+    else if (restored.outcome === 'left') say(runtime, 'log', `[agentchat:${accountId}] identity line for @${handle}: ${restored.detail ?? 'left as it is'}`)
     else if (restored.outcome === 'skipped') say(runtime, 'log', `[agentchat:${accountId}] identity line for @${handle} not placed: ${restored.detail ?? 'the served text is not available'}`)
     else if (restored.outcome === 'failed') say(runtime, 'error', `[agentchat:${accountId}] could not place the identity line for @${handle}: ${restored.detail ?? 'unknown error'} — run \`${openclawCommand('doctor --fix')}\` after fixing the path`)
   },

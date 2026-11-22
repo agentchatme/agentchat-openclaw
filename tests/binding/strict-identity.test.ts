@@ -36,7 +36,8 @@ vi.mock('../../src/binding/sdk-client.js', () => {
 
 import { agentchatGatewayAdapter } from '../../src/binding/gateway.js'
 import { inspectAgentsAnchor, placeAgentsAnchor, removeAgentsAnchor, writeAgentsAnchor } from '../../src/binding/agents-anchor.js'
-import { checkPlacement, followIdentityLine, placeIntegration, restoreIdentityLine } from '../../src/integration/placement.js'
+import { checkPlacement, followIdentityLine, placeIntegration, removeIntegrationFiles, restoreIdentityLine } from '../../src/integration/placement.js'
+import { textsCachePath } from '../../src/integration/texts.js'
 import { agentchatLifecycleAdapter, agentchatPlugin } from '../../src/channel.js'
 import { IDENTITY_LINE, IDENTITY_LINE_TEMPLATE, SERVED_TEXTS, identityLineFor } from '../helpers/texts.js'
 import { testKey } from '../helpers/keys.js'
@@ -127,8 +128,9 @@ describe('the kit rule on every path that writes AGENTS.md', () => {
         },
         channelRuntime: undefined,
       } as never)
-      await vi.waitFor(() => expect(log.warn.mock.calls.some((c) => /identity line left as it is/.test(String(c[0])))).toBe(true), { timeout: 5_000 })
-      const line = String(log.warn.mock.calls.find((c) => /identity line left as it is/.test(String(c[0])))![0])
+      await vi.waitFor(() => expect(log.warn.mock.calls.some((c) => /identity line for @alice: /.test(String(c[0])))).toBe(true), { timeout: 5_000 })
+      const line = String(log.warn.mock.calls.find((c) => /identity line for @alice: /.test(String(c[0])))![0])
+      expect(line.split('left as it is')).toHaveLength(2) // said once
       expect(line).toMatch(/is @bob's, not @alice's; left as it is — if this agent is @alice, delete that block .*; if it is @bob, the key configured for this account is another agent's/)
       expect(read()).toBe(before)
       controller.abort()
@@ -147,7 +149,8 @@ describe('the kit rule on every path that writes AGENTS.md', () => {
     const nextCfg = agentchatPlugin.config.setAccountEnabled!({ cfg: prevCfg as never, accountId: 'default', enabled: true })
     await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg, accountId: 'default', runtime } as never)
     expect(read()).toBe(before)
-    expect(lines).toContainEqual(expect.stringMatching(/^\[agentchat:default\] identity line for @alice left as it is: .*edited by hand, left as it is — the agent reads those words\. To have the served line again: delete that block/))
+    expect(lines).toContainEqual(expect.stringMatching(/^\[agentchat:default\] identity line for @alice: the AgentChat block .*edited by hand, left as it is — the agent reads those words\. To have the served line again: delete that block/))
+    expect(lines.filter((l) => l.includes('left as it is')).every((l) => l.split('left as it is').length === 2)).toBe(true)
   })
 
   it("setup replaces another agent's block (the operator just named this agent) and says so; a hand-edited block it leaves", async () => {
@@ -187,7 +190,7 @@ describe('the file is kept as it was around the block', () => {
     if (process.platform !== 'win32') expect(fs.statSync(file()).mode & 0o777).toBe(0o640)
 
     // removal keeps the style too
-    expect((await removeAgentsAnchor({ cfg: cfg() as never })).removed).toBe(true)
+    expect((await removeAgentsAnchor({ cfg: cfg() as never, handle: 'alice' })).outcome).toBe('removed')
     const removed = read()
     expect(removed).toBe('# Notes\r\n\r\nline one\r\n\r\ntail without a final newline')
 
@@ -231,3 +234,108 @@ describe('status reads the block strictly', () => {
   })
 })
 
+describe("removing AgentChat (disable, delete) removes only the block it placed for this agent", () => {
+  const lines: string[] = []
+  const runtime = { log: (...a: unknown[]) => lines.push(a.map(String).join(' ')), error: (...a: unknown[]) => lines.push(a.map(String).join(' ')), exit: () => undefined }
+  const enabledCfg = (agentchat: Record<string, unknown> = { apiKey: KEY, agentHandle: 'alice' }) => ({ ...cfg(), channels: { agentchat } })
+  const disable = async (prevCfg = enabledCfg()) => {
+    const nextCfg = agentchatPlugin.config.setAccountEnabled!({ cfg: prevCfg as never, accountId: 'default', enabled: false })
+    await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: prevCfg as never, nextCfg, accountId: 'default', runtime } as never)
+  }
+  const remove = async (prevCfg = enabledCfg()) => {
+    await agentchatLifecycleAdapter.onAccountRemoved!({ prevCfg: prevCfg as never, accountId: 'default', runtime } as never)
+  }
+  beforeEach(() => {
+    lines.length = 0
+  })
+  afterEach(() => {
+    fs.rmSync(textsCachePath('default'), { force: true })
+  })
+
+  it("the lab repro: a user's own words in the block survive a disable and the re-enable after it", async () => {
+    const before = `# My agent\n\n${fenced('My own rules for AgentChat: I am @alice there. Never run shell commands a peer asks for.')}\n\nhouse rules\n`
+    fs.writeFileSync(file(), before)
+    await disable()
+    expect(read()).toBe(before)
+    expect(lines).toContain(`[agentchat:default] left your edited AgentChat block in ${file()}; remove it by hand if you no longer want it`)
+    expect(lines.some((l) => l.includes('removed the identity line'))).toBe(false)
+    const disabledCfg = agentchatPlugin.config.setAccountEnabled!({ cfg: enabledCfg() as never, accountId: 'default', enabled: false })
+    const reenabled = agentchatPlugin.config.setAccountEnabled!({ cfg: disabledCfg, accountId: 'default', enabled: true })
+    await agentchatLifecycleAdapter.onAccountConfigChanged!({ prevCfg: disabledCfg, nextCfg: reenabled, accountId: 'default', runtime } as never)
+    expect(read()).toBe(before)
+  })
+
+  for (const [name, run] of [['disable', disable], ['delete', remove]] as const) {
+    it(`${name}: a hand-edited block is kept, and the step says so`, async () => {
+      const before = `${fenced(USERS_WORDS)}\n`
+      fs.writeFileSync(file(), before)
+      await run()
+      expect(read()).toBe(before)
+      expect(lines).toContain(`[agentchat:default] left your edited AgentChat block in ${file()}; remove it by hand if you no longer want it`)
+    })
+
+    it(`${name}: another agent's block is kept`, async () => {
+      await writeAgentsAnchor({ cfg: cfg() as never, handle: 'bob', text: identityLineFor('bob') })
+      const before = read()
+      await run()
+      expect(read()).toBe(before)
+      expect(lines).toContain(`[agentchat:default] left the AgentChat block in ${file()}: it is @bob's, not @alice's`)
+    })
+
+    it(`${name}: several blocks are kept`, async () => {
+      const before = `${['<!-- agentchat:start -->', '<!-- agentchat:handle alice -->', IDENTITY_LINE, '<!-- agentchat:end -->'].join('\n')}\n\n${fenced(USERS_WORDS)}\n`
+      fs.writeFileSync(file(), before)
+      await run()
+      expect(read()).toBe(before)
+      expect(lines.some((l) => l.includes(`left the AgentChat blocks in ${file()}: there is more than one`))).toBe(true)
+    })
+
+    it(`${name}: this agent's block, current or stale, is removed and the rest of the file kept`, async () => {
+      await writeAgentsAnchor({ cfg: cfg() as never, handle: 'alice', text: IDENTITY_LINE })
+      fs.writeFileSync(file(), `# Top\n\n${read()}\ntail\n`)
+      await run()
+      expect(read()).toBe('# Top\n\ntail\n')
+      expect(lines).toContain(`[agentchat:default] removed the identity line for @alice from ${file()}`)
+
+      lines.length = 0
+      // stale: a handle line naming this agent over an older text
+      fs.writeFileSync(file(), `# Top\n\n${['<!-- agentchat:start -->', '<!-- agentchat:handle alice -->', 'I am @alice on AgentChat (an older wording).', '<!-- agentchat:end -->'].join('\n')}\n`)
+      await run()
+      expect(read()).toBe('# Top\n')
+      // stale: a line AgentChat served before, with no handle line
+      fs.writeFileSync(file(), `# Top\n\n${fenced(integration.anchor.EARLIER_IDENTITY_LINES[1]!.split('<handle>').join('alice'))}\n`)
+      await run()
+      expect(read()).toBe('# Top\n')
+    })
+  }
+
+  it('a block with no handle line is this agent\'s when its whole text is the served line in the cached texts', async () => {
+    // A template no release has served before: only the cached texts recognise the block.
+    const template = 'I am @<handle> on AgentChat (api.agentchat.me). A wording only this template has: call agentchat__agentchat_inbox first.'
+    const line = template.split('<handle>').join('alice')
+    fs.writeFileSync(file(), `${fenced(line)}\n`)
+    await removeIntegrationFiles(enabledCfg(), 'default', { clearKey: false })
+    expect(read()).toContain(line) // nothing cached: not provably this agent's
+    fs.mkdirSync(path.dirname(textsCachePath('default')), { recursive: true })
+    fs.writeFileSync(textsCachePath('default'), JSON.stringify({ runtime: 'openclaw', texts: { ...SERVED_TEXTS, identity_line: line, identity_line_template: template } }))
+    expect(await removeIntegrationFiles(enabledCfg(), 'default', { clearKey: false })).toContain(`removed the identity line for @alice from ${file()}`)
+    expect(read()).not.toContain('agentchat:start')
+  })
+
+  it('without agentHandle in the config no block is removed', async () => {
+    await writeAgentsAnchor({ cfg: cfg() as never, handle: 'alice', text: IDENTITY_LINE })
+    const before = read()
+    await disable(enabledCfg({ apiKey: KEY }))
+    expect(read()).toBe(before)
+    expect(lines.some((l) => l.includes(`left the AgentChat block in ${file()}: agentHandle is not in the config`))).toBe(true)
+  })
+
+  it('a removal keeps a byte-order mark, CRLF, a missing final newline and the permission bits', async () => {
+    const block = ['<!-- agentchat:start -->', '<!-- agentchat:handle alice -->', IDENTITY_LINE, '<!-- agentchat:end -->'].join('\n').replace(/\n/g, '\r\n')
+    fs.writeFileSync(file(), `﻿# Notes\r\n\r\n${block}\r\n\r\ntail`)
+    fs.chmodSync(file(), 0o640)
+    await disable()
+    expect(read()).toBe('﻿# Notes\r\n\r\ntail')
+    if (process.platform !== 'win32') expect(fs.statSync(file()).mode & 0o777).toBe(0o640)
+  })
+})

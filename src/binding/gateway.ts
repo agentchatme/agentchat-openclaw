@@ -249,11 +249,11 @@ export async function startServedTexts(params: {
             lastSaid = null
             return
           case 'hand_edited':
-            say('info', `identity line left as it is: ${followed.detail} — ${anchorRemedy(followed.outcome, followed.claimed, handle)}`)
+            say('info', `identity line for @${handle.replace(/^@/, '')}: ${followed.detail} — ${anchorRemedy(followed.outcome, followed.claimed, handle)}`)
             return
           case 'other_agent':
           case 'several_blocks':
-            say('warn', `identity line left as it is: ${followed.detail} — ${anchorRemedy(followed.outcome, followed.claimed, handle)}`)
+            say('warn', `identity line for @${handle.replace(/^@/, '')}: ${followed.detail} — ${anchorRemedy(followed.outcome, followed.claimed, handle)}`)
             return
           case 'edited_meanwhile':
             ctx.log?.debug?.(`[agentchat:${ctx.accountId}] ${followed.detail}`)

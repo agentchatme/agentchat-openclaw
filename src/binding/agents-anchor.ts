@@ -197,17 +197,62 @@ export async function writeAgentsAnchor(params: { cfg: OpenClawConfig | undefine
   throw new Error(`writeAgentsAnchor: ${file} kept changing (${ATTEMPTS} attempts)`)
 }
 
-/** Idempotent remove: every AgentChat block (current or legacy) goes, the rest stays byte for byte. Atomic. */
-export async function removeAgentsAnchor(params: { cfg: OpenClawConfig | undefined; agentId?: string | undefined }): Promise<{ removed: boolean; path: string }> {
+/**
+ * What removing AgentChat did to the identity block: `removed`, this
+ * agent's block is gone (the rest of the file byte for byte); `absent`, no
+ * file or no AgentChat block; the rest leave the file as it is —
+ * `hand_edited` (the block is not a text AgentChat placed: the user's
+ * words), `other_agent` (another agent's), `several_blocks`, `no_handle`
+ * (this account's handle is not known, so no block can be said to be its),
+ * `edited_meanwhile` (the file kept changing).
+ */
+export type RemoveOutcome = 'removed' | 'absent' | 'hand_edited' | 'other_agent' | 'several_blocks' | 'no_handle' | 'edited_meanwhile'
+
+export interface RemoveResult {
+  readonly outcome: RemoveOutcome
+  readonly path: string
+  /** Whose block it is (`owner`): another agent's for `other_agent`; this agent's for `removed`; null otherwise. */
+  readonly claimed: string | null
+}
+
+/**
+ * Remove AgentChat's identity block for this agent, and nothing else: the
+ * block goes only when the kit's strict `owner` reads it as `handle`'s (a
+ * handle line naming it, or a whole text AgentChat served: `identityLine`,
+ * `template` filled in, an earlier served line), and it is the only
+ * AgentChat block in the file. A block edited by hand, another agent's, or
+ * several blocks stay where they are. Atomic; line endings, a final line
+ * break, a byte-order mark and the permission bits are kept. Throws when
+ * the file cannot be read (not UTF-8, not a file) or written.
+ */
+export async function removeAgentsAnchor(params: {
+  cfg: OpenClawConfig | undefined
+  agentId?: string | undefined
+  handle: string | null | undefined
+  identityLine?: string | null | undefined
+  template?: string | null | undefined
+}): Promise<RemoveResult> {
   const file = agentsAnchorPath(params.cfg, params.agentId)
+  const handle = integration.anchor.normalizeHandle(params.handle ?? '')
+  const result = (outcome: RemoveOutcome, claimed: string | null = null): RemoveResult => ({ outcome, path: file, claimed })
+  const template = params.template ?? null
+  const identityLine = typeof params.identityLine === 'string' && params.identityLine.trim().length > 0 ? params.identityLine : null
   for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
     const read = readAnchorFile(file)
-    if (!read.exists) return { removed: false, path: file }
+    if (!read.exists) return result('absent')
+    const text = withoutBom(read.text)
+    const found = integration.anchor.find(text, { template })
+    if (found === null) return result('absent')
+    if (integration.anchor.find(text.slice(0, found.start) + text.slice(found.end)) !== null) return result('several_blocks')
+    if (!handle) return result('no_handle')
+    const claimed = integration.anchor.owner(found, { handle, identityLine, template })
+    if (claimed === null) return result('hand_edited')
+    if (claimed !== handle) return result('other_agent', claimed)
     const next = integration.anchor.remove(read.text)
-    if (next === read.text) return { removed: false, path: file }
-    if ((await writeIfUnchanged(file, read, next)) === 'written') return { removed: true, path: file }
+    if (next === read.text) return result('absent')
+    if ((await writeIfUnchanged(file, read, next)) === 'written') return result('removed', handle)
   }
-  throw new Error(`removeAgentsAnchor: ${file} kept changing (${ATTEMPTS} attempts)`)
+  return result('edited_meanwhile')
 }
 
 /** What the file holds in its first block (current or legacy fences), without the handle line — display only. */

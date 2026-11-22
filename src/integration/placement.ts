@@ -61,7 +61,7 @@ import {
 } from './mcp.js'
 import { LLM_AGENT_OVERRIDE_PATH, withLlmAgentOverrideOptIn } from './model.js'
 import { bundledManual, checkManual, describeManualOutcome, latestManualOutcome, shadowLine, type ManualOutcome } from './manual.js'
-import { cachedIdentityTemplate, cachedServedTexts } from './texts.js'
+import { cachedIdentityLine, cachedIdentityTemplate, cachedServedTexts } from './texts.js'
 import type { integration } from 'agentchatme'
 
 type ServedManual = integration.ServedManual
@@ -75,6 +75,7 @@ import {
   removeAgentsAnchor,
   type AnchorResult,
   type FollowResult,
+  type RemoveResult,
 } from '../binding/agents-anchor.js'
 import {
   AGENTCHAT_CHANNEL_ID,
@@ -375,6 +376,12 @@ export function stripIntegrationConfig<TCfg extends object>(cfg: TCfg, accountId
  * Undo the file side of placement: the identity line in the bound agent's
  * `AGENTS.md`, and — on delete — the key line in the state-dir `.env`.
  *
+ * Only the block AgentChat placed for this account's agent goes: the kit's
+ * strict `owner` reading, against the configured `agentHandle` and the
+ * cached served texts (`removeAgentsAnchor`). A block edited by hand (the
+ * user's own words), another agent's, or several blocks stay, and the
+ * report says so.
+ *
  * The key file is NOT deleted: OpenClaw runs this before it commits the
  * removal (`applyChannelAccountRemoval`, `src/channels/plugins/
  * account-config-mutation.ts`) and may still refuse the write (its
@@ -392,11 +399,19 @@ export async function removeIntegrationFiles(
   options: { clearKey: boolean; stateDir?: string; configPath?: string },
 ): Promise<string[]> {
   const changes: string[] = []
+  const handle = readAgentchatConfigField(cfg as never, accountId, 'agentHandle')?.trim().replace(/^@/, '') || null
   try {
-    const removed = await removeAgentsAnchor({ cfg: cfg as never, agentId: resolvePlacementAgentId(cfg, accountId) })
-    if (removed.removed) changes.push(`removed the identity line from ${removed.path}`)
-  } catch {
-    // best effort
+    const removed = await removeAgentsAnchor({
+      cfg: cfg as never,
+      agentId: resolvePlacementAgentId(cfg, accountId),
+      handle,
+      identityLine: cachedIdentityLine(accountId, options.stateDir),
+      template: cachedIdentityTemplate(accountId, options.stateDir),
+    })
+    const line = removedAnchorLine(removed, handle)
+    if (line) changes.push(line)
+  } catch (err) {
+    changes.push(`could not remove the identity line: ${describe(err)}; the rest of the removal goes on`)
   }
   if (options.clearKey) {
     // Read before anything is removed: the copies are found by the key itself.
@@ -421,6 +436,27 @@ export async function removeIntegrationFiles(
     if (copies) changes.push(copies)
   }
   return changes
+}
+
+/** What `removeIntegrationFiles` reports for the identity block; null when there was nothing to remove. */
+function removedAnchorLine(removed: RemoveResult, handle: string | null): string | null {
+  const byHand = 'remove it by hand if you no longer want it'
+  switch (removed.outcome) {
+    case 'removed':
+      return `removed the identity line for @${handle ?? removed.claimed ?? '?'} from ${removed.path}`
+    case 'absent':
+      return null
+    case 'hand_edited':
+      return `left your edited AgentChat block in ${removed.path}; ${byHand}`
+    case 'other_agent':
+      return `left the AgentChat block in ${removed.path}: it is @${removed.claimed ?? '?'}'s, not @${handle ?? '?'}'s`
+    case 'several_blocks':
+      return `left the AgentChat blocks in ${removed.path}: there is more than one, so none is plainly this agent's; remove them by hand if you no longer want them`
+    case 'no_handle':
+      return `left the AgentChat block in ${removed.path}: agentHandle is not in the config, so it cannot be told to be this agent's; ${byHand}`
+    case 'edited_meanwhile':
+      return `left the AgentChat block in ${removed.path}: the file kept changing; ${byHand}`
+  }
 }
 
 export interface IdentityLineRestore {
